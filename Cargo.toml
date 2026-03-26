@@ -1,6 +1,6 @@
 [package]
 name = "triviumdb"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 
 [lib]
@@ -26,7 +26,7 @@ bincode = "1.3"
 rayon = "1.10"
 memmap2 = "0.9"
 instant-distance = { version = "0.6", optional = true }
-pyo3 = { version = "0.23", features = ["extension-module"], optional = true }
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"], optional = true }
 napi = { version = "2", features = ["napi8", "serde-json"], optional = true }
 napi-derive = { version = "2", optional = true }
 half = { version = "2.7.1", features = ["bytemuck", "serde"] }
