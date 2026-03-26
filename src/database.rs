@@ -1,4 +1,5 @@
 use crate::error::{Result, TriviumError};
+#[cfg(not(feature = "hnsw"))]
 use crate::index::brute_force;
 #[cfg(feature = "hnsw")]
 use crate::index::hnsw::HnswIndex;
@@ -277,7 +278,11 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         );
 
         #[cfg(feature = "hnsw")]
-        let anchor_hits = Vec::new(); // 泛型化后 HNSW 还需要继续重构，这里暂时 mock 或直接禁用
+        let anchor_hits: Vec<SearchHit> = {
+            // TODO: 泛型化后 HNSW 还需要继续重构，这里暂时返回空结果
+            let _ = (query_vector, top_k, min_score, dim);
+            Vec::new()
+        };
 
         if anchor_hits.is_empty() {
             return Ok(Vec::new());

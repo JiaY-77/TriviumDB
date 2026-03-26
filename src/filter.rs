@@ -22,6 +22,16 @@ pub enum Filter {
     And(Vec<Filter>),
     /// 逻辑或
     Or(Vec<Filter>),
+    /// 字段是否存在
+    Exists(String, bool),
+    /// 值不在集合中
+    Nin(String, Vec<Value>),
+    /// 数组长度匹配
+    Size(String, usize),
+    /// 数组包含所有指定元素
+    All(String, Vec<Value>),
+    /// 字段类型匹配
+    TypeMatch(String, String),
 }
 
 impl Filter {
@@ -48,6 +58,39 @@ impl Filter {
             Filter::In(key, values) => {
                 if let Some(field_val) = payload.get(key) {
                     values.contains(field_val)
+                } else {
+                    false
+                }
+            }
+            Filter::Exists(key, exists) => {
+                payload.get(key).is_some() == *exists
+            }
+            Filter::Nin(key, values) => {
+                if let Some(field_val) = payload.get(key) {
+                    !values.contains(field_val)
+                } else {
+                    true
+                }
+            }
+            Filter::Size(key, size) => {
+                payload.get(key).and_then(|v| v.as_array()).map_or(false, |arr| arr.len() == *size)
+            }
+            Filter::All(key, values) => {
+                payload.get(key).and_then(|v| v.as_array()).map_or(false, |arr| {
+                    values.iter().all(|val| arr.contains(val))
+                })
+            }
+            Filter::TypeMatch(key, type_str) => {
+                if let Some(v) = payload.get(key) {
+                    let actual_type = match v {
+                        Value::Null => "null",
+                        Value::Bool(_) => "boolean",
+                        Value::Number(_) => "number",
+                        Value::String(_) => "string",
+                        Value::Array(_) => "array",
+                        Value::Object(_) => "object",
+                    };
+                    actual_type == type_str.as_str()
                 } else {
                     false
                 }
@@ -86,6 +129,21 @@ impl Filter {
     }
     pub fn or(filters: Vec<Filter>) -> Self {
         Filter::Or(filters)
+    }
+    pub fn exists(key: impl Into<String>, e: bool) -> Self {
+        Filter::Exists(key.into(), e)
+    }
+    pub fn nin(key: impl Into<String>, vals: Vec<Value>) -> Self {
+        Filter::Nin(key.into(), vals)
+    }
+    pub fn size(key: impl Into<String>, s: usize) -> Self {
+        Filter::Size(key.into(), s)
+    }
+    pub fn all(key: impl Into<String>, vals: Vec<Value>) -> Self {
+        Filter::All(key.into(), vals)
+    }
+    pub fn type_match(key: impl Into<String>, t: impl Into<String>) -> Self {
+        Filter::TypeMatch(key.into(), t.into())
     }
 }
 

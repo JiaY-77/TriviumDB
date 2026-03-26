@@ -6,6 +6,8 @@
 
 > _Trivium_：拉丁语，意为"三条道路的交汇"。
 
+> “_TriviumDB_ 定位是 AI 应用领域的嵌入式数据库，旨在解决单机环境下 Agent 复杂上下文和多模态记忆编织的痛点。如果是需要支撑千万并发的高可用分布式后端，请依然选择大型集群化组件！”
+
 [![Rust](https://img.shields.io/badge/Rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
 [![Python](https://img.shields.io/badge/Python-3.9+-blue?logo=python)](https://pypi.org/)
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
@@ -18,7 +20,7 @@
 
 TriviumDB 是一个用纯 Rust 编写的**嵌入式单文件数据库引擎**，将**向量检索（Vector）**、**属性图谱（Graph）**和**关系型元数据（Relational）**原生融合在同一个存储内核中。
 
-它的目标是成为 **AI 应用领域的 SQLite**：
+我们的目标是成为 **AI 应用领域的 SQLite**：
 
 - 🗃️ **单文件带走** —— 所有数据打包进一个 `.tdb` 文件，复制即迁移
 - 🔗 **节点即一切** —— 每个节点天然同时拥有向量、元数据和图关系，ID 全局唯一，绝不错位
@@ -88,15 +90,19 @@ TriviumDB 是一个用纯 Rust 编写的**嵌入式单文件数据库引擎**，
 ## 快速上手
 
 ### 安装
+
 > 💡 TriviumDB 核心使用 Rust 编写，但我们已经在云端为您提前交叉编译了所有平台的二进制，**无需在本地安装任何编译环境即可秒速安装！**
 
 ### 🐍 Python 用户
 
 推荐使用超快的 [uv](https://github.com/astral-sh/uv) （只需毫秒级）：
+
 ```bash
 uv pip install triviumdb
 ```
+
 或者使用传统 pip：
+
 ```bash
 pip install triviumdb
 ```
@@ -104,6 +110,7 @@ pip install triviumdb
 ### 🌐 Node.js / 前端用户
 
 跨平台包已自带 `*.node` 预编译拓展，并含有完整的 TypeScript 补全：
+
 ```bash
 npm install triviumdb
 # 或者
@@ -113,6 +120,7 @@ pnpm add triviumdb
 ### 🦀 Rust 原生用户
 
 直接把我们当成 Library 依赖：
+
 ```bash
 cargo add triviumdb
 ```
@@ -223,9 +231,20 @@ TriviumDB/
 ### v0.3 — 生态拓展 ✅
 
 - [x] Node.js 扩展绑定 (napi-rs)
+- [x] 高级 Payload 过滤扩展 ($exists/$nin/$size/$all/$type)
+- [x] AVX2 + FMA SIMD 加速余弦相似度（运行时自动检测，标量回退）
 - [ ] 子图导出 / 批量导入
 - [ ] CLI 工具 (`triviumdb-cli`)
 - [ ] 性能基准测试套件 (benchmark)
+
+### v0.4 — 千万级扩展（规划中）
+
+> 以下为突破千万节点秒级热启动的可选技术路线，按优先级排列：
+
+- [ ] **P0 · 向量池 mmap 零拷贝**：SoA 向量直接映射磁盘文件，OS 按需分页加载，启动瞬间完成，内存占用降低 90%+
+- [ ] **P1 · Payload 延迟反序列化**：启动时仅建立 `(offset, length)` 索引表，首次访问时才解析 JSON 并缓存到 LRU
+- [ ] **P2 · 索引结构持久化**：`ids_to_indices` 映射表持久化到磁盘（mmap B-tree / 有序数组二分查找），避免启动时逐条 HashMap 插入
+- [ ] **P3 · 零拷贝序列化协议**（可选）：Payload 格式从 serde_json 迁移至 rkyv / FlatBuffers，支持不反序列化直接读取字段
 - [ ] 分布式分片存储
 
 ---

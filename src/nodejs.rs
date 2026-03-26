@@ -89,6 +89,26 @@ pub mod nodejs {
                             let arr = op_val.as_array().ok_or_else(|| napi::Error::from_reason("$in 需要数组"))?;
                             Filter::In(key.clone(), arr.clone())
                         }
+                        "$exists" => {
+                            let b = op_val.as_bool().ok_or_else(|| napi::Error::from_reason("$exists 需要布尔值"))?;
+                            Filter::Exists(key.clone(), b)
+                        }
+                        "$nin" => {
+                            let arr = op_val.as_array().ok_or_else(|| napi::Error::from_reason("$nin 需要数组"))?;
+                            Filter::Nin(key.clone(), arr.clone())
+                        }
+                        "$size" => {
+                            let s = op_val.as_u64().ok_or_else(|| napi::Error::from_reason("$size 需要非负整数"))?;
+                            Filter::Size(key.clone(), s as usize)
+                        }
+                        "$all" => {
+                            let arr = op_val.as_array().ok_or_else(|| napi::Error::from_reason("$all 需要数组"))?;
+                            Filter::All(key.clone(), arr.clone())
+                        }
+                        "$type" => {
+                            let t = op_val.as_str().ok_or_else(|| napi::Error::from_reason("$type 需要字符串"))?;
+                            Filter::TypeMatch(key.clone(), t.to_string())
+                        }
                         other => return Err(napi::Error::from_reason(format!("不支持的运算符: {}", other))),
                     };
                     filters.push(f);

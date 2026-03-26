@@ -193,6 +193,35 @@ pub mod python {
                                 return Err(pyo3::exceptions::PyValueError::new_err("$in requires a list"));
                             }
                         }
+                        "$exists" => {
+                            if let serde_json::Value::Bool(b) = val {
+                                Filter::Exists(key.clone(), b)
+                            } else {
+                                return Err(pyo3::exceptions::PyValueError::new_err("$exists requires a boolean"));
+                            }
+                        }
+                        "$nin" => {
+                            if let serde_json::Value::Array(arr) = val {
+                                Filter::Nin(key.clone(), arr)
+                            } else {
+                                return Err(pyo3::exceptions::PyValueError::new_err("$nin requires a list"));
+                            }
+                        }
+                        "$size" => {
+                            let s = val.as_u64().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("$size requires a non-negative integer"))?;
+                            Filter::Size(key.clone(), s as usize)
+                        }
+                        "$all" => {
+                            if let serde_json::Value::Array(arr) = val {
+                                Filter::All(key.clone(), arr)
+                            } else {
+                                return Err(pyo3::exceptions::PyValueError::new_err("$all requires a list"));
+                            }
+                        }
+                        "$type" => {
+                            let t = val.as_str().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("$type requires a string"))?;
+                            Filter::TypeMatch(key.clone(), t.to_string())
+                        }
                         _ => return Err(pyo3::exceptions::PyValueError::new_err(format!("Unsupported operator: {}", op_str))),
                     };
                     filters.push(filter_op);
@@ -595,6 +624,7 @@ pub mod python {
         /// ```
         fn query(&self, py: Python<'_>, cypher: &str) -> PyResult<Vec<PyQueryRow>> {
             // 将三种后端的查询结果都统一转成 Python 可消费的格式
+            #[allow(dead_code)]
             fn convert_rows<T: crate::VectorType>(
                 py: Python<'_>,
                 rows: Vec<std::collections::HashMap<String, crate::node::NodeView<T>>>,

@@ -10,18 +10,8 @@ pub struct VectorPoint {
 impl Point for VectorPoint {
     fn distance(&self, other: &Self) -> f32 {
         // Cosine distance = 1.0 - Cosine Similarity
-        let mut dot = 0.0;
-        let mut norm_a = 0.0;
-        let mut norm_b = 0.0;
-        for (va, vb) in self.vec.iter().zip(other.vec.iter()) {
-            dot += va * vb;
-            norm_a += va * va;
-            norm_b += vb * vb;
-        }
-        if norm_a == 0.0 || norm_b == 0.0 {
-            return 1.0; // Max distance
-        }
-        let sim = dot / (norm_a.sqrt() * norm_b.sqrt());
+        // 复用 SIMD 加速的余弦相似度内核
+        let sim = crate::vector::cosine_similarity_f32(&self.vec, &other.vec);
         1.0 - sim
     }
 }

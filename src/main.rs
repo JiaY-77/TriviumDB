@@ -22,7 +22,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // ══════ Phase 2: 重新打开 ══════
     println!("\n=== Phase 2: Reopen from .tdb file ===");
     {
-        let db = Database::open(db_path, 4)?;
+        let mut db = Database::open(db_path, 4)?;
         println!("  Loaded {} nodes from {}", db.node_count(), db_path);
         println!("  Dim: {}", db.dim());
 
