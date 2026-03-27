@@ -1,6 +1,6 @@
 use crate::node::{NodeId, SearchHit};
 use crate::storage::memtable::MemTable;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 /// 执行以最初通过向量检索到的“锚点”（Seeds）向外基于权重的图发散
 pub fn expand_graph<T: crate::VectorType>(

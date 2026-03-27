@@ -56,9 +56,9 @@ python -c "import triviumdb; print('OK')"
 ```toml
 # Cargo.toml
 [dependencies]
-triviumdb = "0.3.0"  # 或者填本地路径 path = "../TriviumDB"
+triviumdb = "0.4.0"  # 或者填本地路径 path = "../TriviumDB"
 # 启用 HNSW 索引
-# triviumdb = { version = "0.3.0", features = ["hnsw"] }
+# triviumdb = { version = "0.4.0", features = ["hnsw"] }
 ```
 
 ### 30 秒入门模板
