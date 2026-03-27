@@ -1,25 +1,28 @@
 use crate::error::{Result, TriviumError};
 use crate::node::{Edge, NodeId};
+use crate::storage::vec_pool::VecPool;
 use crate::VectorType;
 use std::collections::HashMap;
 
 /// 内存工作区，扮演类似 LSM Tree 中 MemTable 的角色。
-/// 在当前架构下，它负责存储运行时的向量（SoA 布局）、JSON 负载和图关系。
+///
+/// v0.4 改进：向量存储委托给 VecPool（分层 mmap + 内存增量），
+/// Payload 和邻接表保持纯内存存储（小而热，随机访问）。
 pub struct MemTable<T: VectorType> {
     dim: usize,
     next_id: NodeId,
 
     // --- 三位一体的核心存储 ---
 
-    // 1. 向量池（纯 SoA 布局）：
-    // 所有向量在此扁平展开。长度永远等于 `node_count * dim`
-    // 提供最极端的 CPU 缓存命中以计算余弦相似度。
-    vectors: Vec<T>,
+    // 1. 向量池（分层 mmap）：
+    // 委托给 VecPool，底层为 mmap 基础层 + Vec 增量层
+    // 基础层由 OS PageCache 按需加载，启动零拷贝
+    vec_pool: VecPool<T>,
 
-    // 2. 元数据映射（关系型负载）
+    // 2. 元数据映射（关系型负载）—— 保持纯内存
     payloads: HashMap<NodeId, serde_json::Value>,
 
-    // 3. 图谱邻接表
+    // 3. 图谱邻接表 —— 保持纯内存
     edges: HashMap<NodeId, Vec<Edge>>,
 
     // 映射表：内部索引 (0, 1, 2...) 到 NodeId
@@ -33,7 +36,7 @@ impl<T: VectorType> MemTable<T> {
         Self {
             dim,
             next_id: 1, // 从 1 开始，保留 0 作为特殊标记
-            vectors: Vec::new(),
+            vec_pool: VecPool::new(dim),
             payloads: HashMap::new(),
             edges: HashMap::new(),
             indices_to_ids: Vec::new(),
@@ -48,9 +51,32 @@ impl<T: VectorType> MemTable<T> {
         mt
     }
 
+    /// 从持久化文件恢复时使用：指定起始 ID 并提供已加载的 VecPool
+    pub fn new_with_vec_pool(dim: usize, next_id: NodeId, vec_pool: VecPool<T>) -> Self {
+        Self {
+            dim,
+            next_id,
+            vec_pool,
+            payloads: HashMap::new(),
+            edges: HashMap::new(),
+            indices_to_ids: Vec::new(),
+            ids_to_indices: HashMap::new(),
+        }
+    }
+
     /// 暴露当前 ID 计数器值（供 save 时写入文件头）
     pub fn next_id_value(&self) -> NodeId {
         self.next_id
+    }
+
+    /// 暴露 VecPool 的可变引用（供 flush 时持久化向量池）
+    pub fn vec_pool_mut(&mut self) -> &mut VecPool<T> {
+        &mut self.vec_pool
+    }
+
+    /// 暴露 VecPool 的只读引用
+    pub fn vec_pool(&self) -> &VecPool<T> {
+        &self.vec_pool
     }
 
     /// 带指定 ID 的插入（从文件重建时使用，不自增 ID）
@@ -63,10 +89,26 @@ impl<T: VectorType> MemTable<T> {
         }
 
         let idx = self.indices_to_ids.len();
-        self.vectors.extend_from_slice(vector);
+        self.vec_pool.push(vector);
         self.payloads.insert(id, payload);
         self.indices_to_ids.push(id);
         self.ids_to_indices.insert(id, idx);
+        Ok(())
+    }
+
+    /// 从 mmap 加载时使用：仅注册映射关系，不推入向量（向量已在 VecPool 中）
+    pub fn register_node(&mut self, id: NodeId, payload: serde_json::Value) -> Result<()> {
+        let idx = self.indices_to_ids.len();
+        self.payloads.insert(id, payload);
+        self.indices_to_ids.push(id);
+        self.ids_to_indices.insert(id, idx);
+        Ok(())
+    }
+
+    /// 从持久化文件加载时遇到逻辑删除节点（Tombstone），仅推进内部索引映射空洞
+    pub fn register_tombstone(&mut self) -> Result<()> {
+        // NodeId=0 仅作为位置占位符，不在 payloads/ids_to_indices 中建立映射
+        self.indices_to_ids.push(0);
         Ok(())
     }
 
@@ -82,9 +124,9 @@ impl<T: VectorType> MemTable<T> {
         let id = self.next_id;
         self.next_id += 1;
 
-        // 1. 记录向量（压入尾部）
+        // 1. 记录向量（推入 VecPool 增量层）
         let idx = self.indices_to_ids.len();
-        self.vectors.extend_from_slice(vector);
+        self.vec_pool.push(vector);
 
         // 2. 更新关系型负载
         self.payloads.insert(id, payload);
@@ -109,9 +151,9 @@ impl<T: VectorType> MemTable<T> {
             });
         }
 
-        // 推入底层数组并映射
+        // 推入 VecPool 并映射
         let idx = self.indices_to_ids.len();
-        self.vectors.extend_from_slice(vector);
+        self.vec_pool.push(vector);
         self.payloads.insert(id, payload);
         self.indices_to_ids.push(id);
         self.ids_to_indices.insert(id, idx);
@@ -138,10 +180,22 @@ impl<T: VectorType> MemTable<T> {
         Ok(())
     }
 
-    /// 暴露底层向量数组供检索层消费
+    /// 确保向量合并缓存已构建（需要 &mut self）
+    ///
+    /// 在调用 flat_vectors() 之前调用此方法，确保缓存已准备好。
+    /// 这样设计是为了解决 Rust 借用检查器的限制：
+    /// 允许在获取向量切片后同时调用其他 &self 方法。
+    #[inline]
+    pub fn ensure_vectors_cache(&mut self) {
+        self.vec_pool.ensure_cache();
+    }
+
+    /// 暴露底层向量数组供检索层消费（只需 &self）
+    ///
+    /// 调用方应先调用 ensure_vectors_cache() 确保缓存有效。
     #[inline]
     pub fn flat_vectors(&self) -> &[T] {
-        &self.vectors
+        self.vec_pool.flat_vectors()
     }
 
     #[inline]
@@ -168,12 +222,9 @@ impl<T: VectorType> MemTable<T> {
             return Err(TriviumError::NodeNotFound(id));
         }
 
-        // 1. 向量层：将对应区间置零（逻辑删除，不移动数组避免索引全部重建）
+        // 1. 向量层：通过 VecPool 逻辑删除（置零）
         if let Some(&idx) = self.ids_to_indices.get(&id) {
-            let offset = idx * self.dim;
-            for i in offset..offset + self.dim {
-                self.vectors[i] = T::zero();
-            }
+            self.vec_pool.zero_out(idx);
         }
 
         // 2. 元数据层
@@ -219,8 +270,7 @@ impl<T: VectorType> MemTable<T> {
         }
         match self.ids_to_indices.get(&id) {
             Some(&idx) => {
-                let offset = idx * self.dim;
-                self.vectors[offset..offset + self.dim].copy_from_slice(vector);
+                self.vec_pool.update(idx, vector);
                 Ok(())
             }
             None => Err(TriviumError::NodeNotFound(id)),
@@ -229,9 +279,8 @@ impl<T: VectorType> MemTable<T> {
 
     /// 按 ID 获取节点的原生向量（返回切片引用）
     pub fn get_vector(&self, id: NodeId) -> Option<&[T]> {
-        self.ids_to_indices.get(&id).map(|&idx| {
-            let offset = idx * self.dim;
-            &self.vectors[offset..offset + self.dim]
+        self.ids_to_indices.get(&id).and_then(|&idx| {
+            self.vec_pool.get(idx)
         })
     }
 
@@ -250,6 +299,12 @@ impl<T: VectorType> MemTable<T> {
         self.payloads.keys().cloned().collect()
     }
 
+    /// 返回包含逻辑删除（tombstones）在内的完整内部 ID 阵列，
+    /// 用于安全持久化，保持与向量池严格逐一对应。
+    pub fn internal_indices(&self) -> &[NodeId] {
+        &self.indices_to_ids
+    }
+
     /// 遍历所有可用的 (index, NodeId) 对，跳过已删除节点
     pub fn active_entries(&self) -> impl Iterator<Item = (usize, NodeId)> + '_ {
         self.indices_to_ids
@@ -259,12 +314,12 @@ impl<T: VectorType> MemTable<T> {
             .map(|(idx, nid)| (idx, *nid))
     }
 
-    /// 估算当前 MemTable 占用的内存字节数
+    /// 估算当前 MemTable 占用的堆内存字节数
     ///
-    /// 这是一个保守的下界估算（不含 HashMap 内部开销），
-    /// 足以用于内存预算控制。
+    /// v0.4 改进：VecPool 的 mmap 部分不计入堆内存（由 OS PageCache 管理），
+    /// 只计算增量层和合并缓存的实际堆分配。
     pub fn estimated_memory_bytes(&self) -> usize {
-        let vec_bytes = self.vectors.len() * std::mem::size_of::<T>();
+        let vec_bytes = self.vec_pool.heap_memory_bytes();
         let payload_bytes: usize = self.payloads.values()
             .map(|v| v.to_string().len())
             .sum();

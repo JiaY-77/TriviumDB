@@ -12,38 +12,50 @@ pub fn expand_graph<T: crate::VectorType>(
         return seeds;
     }
 
-    let mut visited = HashMap::<NodeId, f32>::new();
-    let mut queue = VecDeque::new();
+    // `total_activation` 用于沉淀所有节点最终累积到的能量总和
+    let mut total_activation = HashMap::<NodeId, f32>::new();
+    
+    // `current_tier` 用于保存当前轮次正在向外辐射边界节点的增量能量
+    let mut current_tier = HashMap::<NodeId, f32>::new();
 
     for seed in &seeds {
-        visited.insert(seed.id, seed.score);
-        queue.push_back((seed.id, seed.score, 0)); // ID, 传播分数, 当前深度
+        total_activation.insert(seed.id, seed.score);
+        current_tier.insert(seed.id, seed.score);
     }
+    
+    // 传播阈值：被强抑制的节点（得分 <= 0.0）会严格切断物理传播路径
+    let propagation_threshold = 0.0;
 
-    while let Some((curr_id, curr_score, depth)) = queue.pop_front() {
-        if depth >= max_depth {
-            continue;
-        }
+    for _ in 0..max_depth {
+        let mut next_tier = HashMap::<NodeId, f32>::new();
 
-        if let Some(edges) = db.get_edges(curr_id) {
-            for edge in edges {
-                // 最简单的 Spreading Activation：上一层特征分 × 边权重
-                let new_score = curr_score * edge.weight;
-                let target = edge.target_id;
-
-                let old_score = visited.entry(target).or_insert(0.0);
-                // 仅保留能传递更大分数的路径
-                if new_score > *old_score {
-                    *old_score = new_score;
-                    queue.push_back((target, new_score, depth + 1));
+        for (curr_id, curr_energy) in current_tier {
+            if let Some(edges) = db.get_edges(curr_id) {
+                for edge in edges {
+                    // 发散传播的能量片段 (源节点剩余激活能量 × 边权重)
+                    let transmitted = curr_energy * edge.weight;
+                    
+                    // 1. 将收到的片段累加到下一轮发射台
+                    *next_tier.entry(edge.target_id).or_insert(0.0) += transmitted;
+                    
+                    // 2. 将收到的片段沉淀到该节点的最终总得分池里
+                    *total_activation.entry(edge.target_id).or_insert(0.0) += transmitted;
                 }
             }
         }
+
+        // 阈值守护（The Gatekeeper）：截断被强抑制或自然衰减掉的节点，不让它进入下一轮传播队列
+        next_tier.retain(|_, energy| *energy > propagation_threshold);
+
+        if next_tier.is_empty() {
+            break; // 能量完全衰竭，提前终止图谱漫游
+        }
+        current_tier = next_tier;
     }
 
-    // 将扩散出的一整张子网的所有分数按高低返回
+    // 将散发出的一整张子网通过最终沉淀出的得分转化为 SearchHit 返回
     let mut expanded_results = Vec::new();
-    for (id, score) in visited {
+    for (id, score) in total_activation {
         if let Some(payload) = db.get_payload(id) {
             expanded_results.push(SearchHit {
                 id,
@@ -53,6 +65,7 @@ pub fn expand_graph<T: crate::VectorType>(
         }
     }
 
+    // 依总能量从高到低排序返回
     expanded_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     expanded_results
 }

@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 /// WAL 条目：记录每一次变更操作
 #[derive(Debug, Serialize, Deserialize)]
 pub enum WalEntry<T> {
+    TxBegin { tx_id: u64 },
+    TxCommit { tx_id: u64 },
     Insert {
         id: NodeId,
         vector: Vec<T>,
@@ -131,6 +133,49 @@ impl Wal {
         }
     }
 
+    /// 批量追加一个事务的所有日志（附带事务边界）
+    ///
+    /// 会自动打上 TxBegin 和 TxCommit 封条，并且仅在整个 Batch 写入完毕后才做一次 fsync。
+    pub fn append_batch<T: serde::Serialize>(&mut self, tx_id: u64, entries: &[WalEntry<T>]) -> Result<()> {
+        if let Some(ref mut writer) = self.writer {
+            let mut write_single = |entry: &WalEntry<T>| -> Result<()> {
+                let data = bincode::serialize(entry).map_err(|e| TriviumError::Serialization(e))?;
+                let checksum = crc32fast::hash(&data);
+                let len = data.len() as u32;
+                writer.write_all(&len.to_le_bytes())?;
+                writer.write_all(&data)?;
+                writer.write_all(&checksum.to_le_bytes())?;
+                Ok(())
+            };
+
+            // 1. 写 TxBegin
+            write_single(&WalEntry::TxBegin { tx_id })?;
+            
+            // 2. 写实体记录
+            for e in entries {
+                write_single(e)?;
+            }
+            
+            // 3. 写 TxCommit（封条）
+            write_single(&WalEntry::TxCommit { tx_id })?;
+
+            // 4. 统一同步一次（极其提升性能与保证原子性）
+            match self.sync_mode {
+                SyncMode::Full => {
+                    writer.flush()?;
+                    writer.get_ref().sync_data()?;
+                }
+                SyncMode::Normal => {
+                    writer.flush()?;
+                }
+                SyncMode::Off => {}
+            }
+            Ok(())
+        } else {
+            Err(TriviumError::Generic("WAL writer closed".into()))
+        }
+    }
+
     /// 读取 WAL 文件中的所有条目（用于崩溃恢复）
     ///
     /// 每条记录都会校验 CRC32：
@@ -196,7 +241,43 @@ impl Wal {
             }
         }
 
-        Ok(entries)
+        // ====== 事务回放过滤（The Magic of ACID） ======
+        let mut committed = Vec::new();
+        let mut pending_tx = Vec::new();
+        let mut in_tx = false;
+        let mut current_tx_id = 0;
+
+        for entry in entries {
+            match entry {
+                WalEntry::TxBegin { tx_id } => {
+                    in_tx = true;
+                    current_tx_id = tx_id;
+                    pending_tx.clear(); // 清空，准备接纳新事务
+                }
+                WalEntry::TxCommit { tx_id } => {
+                    if in_tx && tx_id == current_tx_id {
+                        // 发现正确的封条，安全转正！
+                        committed.append(&mut pending_tx);
+                        in_tx = false;
+                    }
+                }
+                other => {
+                    if in_tx {
+                        // 如果处于事务包裹区，先暂存在 pending 里
+                        pending_tx.push(other);
+                    } else {
+                        // 兼容向后/独立的操作（旧版本数据或单个操作）
+                        committed.push(other);
+                    }
+                }
+            }
+        }
+        
+        if in_tx && !pending_tx.is_empty() {
+            tracing::warn!("Discarded a partial transaction ({} operations) due to missing TxCommit (Power loss simulation).", pending_tx.len());
+        }
+
+        Ok(committed)
     }
 
     /// flush 成功后清除 WAL 文件

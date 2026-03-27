@@ -1,6 +1,6 @@
 # TriviumDB API 完整参考
 
-> **版本**: v0.3  
+> **版本**: v0.4 
 > **语言**: Rust 核心 + Python 绑定 (PyO3)  
 > **许可**: Apache-2.0
 
@@ -61,13 +61,21 @@ with triviumdb.TriviumDB("my_data.tdb", dim=1536) as db:
 
 ```rust
 use triviumdb::Database;
+use triviumdb::database::{Config, StorageMode};
 use triviumdb::storage::wal::SyncMode;
 
-// 基础打开
+// 基础打开（默认 Mmap 模式 + Normal 同步）
 let mut db = Database::<f32>::open("my_data.tdb", 1536)?;
 
-// 指定同步模式
+// 指定同步模式（向后兼容）
 let mut db = Database::<f32>::open_with_sync("my_data.tdb", 1536, SyncMode::Full)?;
+
+// 高级配置（v0.4+）——同时指定存储模式和同步模式
+let mut db = Database::<f32>::open_with_config("my_data.tdb", Config {
+    dim: 1536,
+    storage_mode: StorageMode::Rom,  // Rom：单文件便携 | Mmap：分离零拷贝（默认）
+    sync_mode: SyncMode::Normal,
+})?;
 
 // 运行时切换同步模式
 db.set_sync_mode(SyncMode::Off);
@@ -416,7 +424,9 @@ ReturnList:= Ident (',' Ident)*
 |------|------|------|
 | `row` | `dict[str, dict]` | 变量名 → `{"id": int, "payload": dict, "num_edges": int}` |
 
-> 💡 当前仅支持**有向**边模式 `-[]->`，不支持无向匹配或反向匹配。
+> 💡 当起始节点已知 ID 时，强烈建议将 `id` 写入节点属性过滤器。远主键 `id` 走 **O(1) 哈希短路扫描**，而 `type` 等非主键字段会触发 O(N) 全表扫描。
+
+> 💡 当前仅支持**有向**边模式 `-[]->` ，不支持无向匹配或反向匹配。
 
 ---
 
@@ -578,15 +588,20 @@ new_db.flush()?;
 
 ## 事务支持 (Rust Only)
 
-TriviumDB 提供轻量级事务：所有操作先缓冲在内存中，`commit()` 后一次性原子写入。
+TriviumDB 提供轻量级事务，采用**验证前置（Dry-Run）架构**：所有操作先缓冲在内存中，`commit()` 分两阶段执行——首先在纯内存验证全部约束（维度、节点存在性、ID 冲突），全部通过后才一次性写入。
+
+**特性：**
+- `commit()` 返回 `Err` 时，**底层数据没有被修改一个字节**，可加入日志后安全重试
+- 在同一事务内，`insert_with_id(999)` 后立即 `link(..., 999)` 是完全合法的（虚拟状态叠加给 999 号打过标记）
+- `rollback()`（或直接 `drop` 事务对象）将丢弃所有缓冲操作
 
 ```rust
 let mut tx = db.begin_tx();
 tx.insert(&vec1, json!({"type": "event"}));
-tx.insert(&vec2, json!({"type": "person"}));
-tx.link(1, 2, "attended", 1.0);
+tx.insert_with_id(9999, &vec2, json!({"type": "person"}));
+tx.link(1, 9999, "attended", 1.0);
 
-// 原子提交 → 一次性持锁写入 memtable + WAL
+// 原子提交 → 两阶段: 干跑验证 → 物理写入
 let ids = tx.commit()?;
 
 // 或显式回滚（丢弃所有操作）

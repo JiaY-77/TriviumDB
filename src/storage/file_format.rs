@@ -1,53 +1,104 @@
 use crate::error::{Result, TriviumError};
 use crate::node::{Edge, NodeId};
 use crate::storage::memtable::MemTable;
+use crate::storage::vec_pool::VecPool;
+use crate::database::StorageMode;
 use crate::VectorType;
 use memmap2::Mmap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::path::Path;
 
 // ══════ 文件头常量 ══════
 const MAGIC: &[u8; 4] = b"TVDB";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2; // v2：支持分层存储与单文件格式
 const HEADER_SIZE: u64 = 50;
 
-/// 将当前 MemTable 的全部内容写入单个 .tdb 二进制文件
-/// 
-/// 安全写入策略（防断电损坏）：
-///   1. 写入 .tdb.tmp 临时文件
-///   2. fsync 确保数据落盘
-///   3. 原子 rename 替换旧 .tdb 文件
-pub fn save<T: VectorType>(memtable: &MemTable<T>, path: &str) -> Result<()> {
+/// 向量文件路径（.tdb → .vec）
+fn vec_path_from_db(db_path: &str) -> String {
+    format!("{}.vec", db_path)
+}
+
+pub fn save<T: VectorType>(memtable: &mut MemTable<T>, path: &str, mode: StorageMode) -> Result<()> {
+    match mode {
+        StorageMode::Mmap => save_mmap(memtable, path),
+        StorageMode::Rom => save_rom(memtable, path),
+    }
+}
+
+/// Mmap 模式保存：分离向量到 .vec 文件，.tdb 纯元数据
+fn save_mmap<T: VectorType>(memtable: &mut MemTable<T>, path: &str) -> Result<()> {
+    let vec_file_path = vec_path_from_db(path);
+    let vec_count = memtable.vec_pool_mut().flush(Path::new(&vec_file_path))?;
+    save_tdb(memtable, path, vec_count, true)?;
+    Ok(())
+}
+
+/// Rom 模式保存：把向量合并，写单文件，抛弃 .vec
+fn save_rom<T: VectorType>(memtable: &mut MemTable<T>, path: &str) -> Result<()> {
+    // 1. 确保在纯内存中获取到完整的合并数组
+    memtable.ensure_vectors_cache();
+    let total_vectors = memtable.internal_indices().len();
+
+    // 2. 将数据合并写入单文件
+    save_tdb(memtable, path, total_vectors, false)?;
+
+    // 3. 将现有的 mmap (如果有) 剥离到内存 delta 中，避免锁住已或将被删除的 .vec
+    memtable.vec_pool_mut().detach_mmap();
+
+    // 4. 清理残留的 .vec
+    let vec_file_path = vec_path_from_db(path);
+    if Path::new(&vec_file_path).exists() {
+        std::fs::remove_file(vec_file_path).ok(); // 清除旧模式残留
+    }
+    
+    Ok(())
+}
+
+/// 核心通用写入逻辑：将 MemTable (Payload & Edge) 写入 .tdb
+fn save_tdb<T: VectorType>(memtable: &mut MemTable<T>, path: &str, vec_count: usize, is_mmap_mode: bool) -> Result<()> {
+    if !is_mmap_mode {
+        memtable.ensure_vectors_cache();
+    }
+
     let tmp_path = format!("{}.tmp", path);
     let file = File::create(&tmp_path)?;
     let mut w = BufWriter::new(file);
 
     let dim = memtable.dim();
-    let mut node_ids = memtable.all_node_ids();
-    node_ids.sort();
-    let node_count = node_ids.len() as u64;
+    
+    // 我们必须按照内部索引数组以防止在重载时 NodeID/Vector 错位
+    let internal_indices = memtable.internal_indices();
+    // 实际写入的记录数量等于从向量池生成的记录数（包括空洞 Tombstones）
+    let node_count = internal_indices.len() as u64;
 
     let mut all_edges: Vec<(NodeId, &Edge)> = Vec::new();
-    for &nid in &node_ids {
-        if let Some(edges) = memtable.get_edges(nid) {
-            for edge in edges {
-                all_edges.push((nid, edge));
-            }
-        }
-    }
-
     let mut payload_size: u64 = 0;
-    for &nid in &node_ids {
-        if let Some(p) = memtable.get_payload(nid) {
-            let json_bytes = serde_json::to_vec(p).unwrap_or_default();
-            payload_size += 8 + 4 + json_bytes.len() as u64;
+    
+    // 计算 Payload 块大小并收集边
+    for &nid in internal_indices {
+        if nid != 0 { // 有效节点
+            if let Some(p) = memtable.get_payload(nid) {
+                let json_bytes = serde_json::to_vec(p).unwrap_or_default();
+                payload_size += 8 + 4 + json_bytes.len() as u64;
+            } else {
+                // tombstone 占位符结构：NodeId (0) + len (0) = 12 bytes
+                payload_size += 12;
+            }
+            if let Some(edges) = memtable.get_edges(nid) {
+                for edge in edges {
+                    all_edges.push((nid, edge));
+                }
+            }
+        } else { // 空洞（由于节点被彻底移除，保留内部索引占位）
+            payload_size += 12;
         }
     }
-    let vector_size: u64 = node_count * (dim as u64) * (std::mem::size_of::<T>() as u64);
 
     let payload_offset = HEADER_SIZE;
-    let vector_offset = payload_offset + payload_size;
-    let edge_offset = vector_offset + vector_size;
+    let vector_offset = if is_mmap_mode { 0 } else { payload_offset + payload_size };
+    let vector_size = if is_mmap_mode { 0 } else { node_count * (dim as u64) * (std::mem::size_of::<T>() as u64) };
+    let edge_offset = payload_offset + payload_size + vector_size;
 
     // 1. Header
     w.write_all(MAGIC)?;
@@ -59,22 +110,26 @@ pub fn save<T: VectorType>(memtable: &MemTable<T>, path: &str) -> Result<()> {
     w.write_all(&vector_offset.to_le_bytes())?;
     w.write_all(&edge_offset.to_le_bytes())?;
 
-    // 2. Payload Block
-    for &nid in &node_ids {
-        if let Some(p) = memtable.get_payload(nid) {
-            let json_bytes = serde_json::to_vec(p).unwrap_or_default();
-            w.write_all(&nid.to_le_bytes())?;
-            w.write_all(&(json_bytes.len() as u32).to_le_bytes())?;
-            w.write_all(&json_bytes)?;
+    // 2. Payload Block 包含 Tombstones
+    for &nid in internal_indices {
+        if nid != 0 {
+            if let Some(p) = memtable.get_payload(nid) {
+                let json_bytes = serde_json::to_vec(p).unwrap_or_default();
+                w.write_all(&nid.to_le_bytes())?;
+                w.write_all(&(json_bytes.len() as u32).to_le_bytes())?;
+                w.write_all(&json_bytes)?;
+                continue;
+            }
         }
+        // Tombstone
+        w.write_all(&0u64.to_le_bytes())?;
+        w.write_all(&0u32.to_le_bytes())?;
     }
 
-    // 3. Vector Block (SoA 连续布局，写入后可被 mmap 直接映射)
-    for &nid in &node_ids {
-        if let Some(vec) = memtable.get_vector(nid) {
-            let bytes = bytemuck::cast_slice(vec);
-            w.write_all(bytes)?;
-        }
+    // 3. Vector Block (Rom 用)
+    if !is_mmap_mode {
+        let flat = memtable.flat_vectors();
+        w.write_all(bytemuck::cast_slice(flat))?;
     }
 
     // 4. Edge Block
@@ -87,19 +142,22 @@ pub fn save<T: VectorType>(memtable: &MemTable<T>, path: &str) -> Result<()> {
         w.write_all(&edge.weight.to_le_bytes())?;
     }
 
-    // 5. 刷缓冲 → fsync → 原子 rename
     w.flush()?;
     let file = w.into_inner().map_err(|e| TriviumError::Io(e.into_error()))?;
-    file.sync_all()?;  // fsync: 确保数据真正落盘
+    file.sync_all()?;
     drop(file);
 
-    std::fs::rename(&tmp_path, path)?; // 原子替换
+    std::fs::rename(&tmp_path, path)?;
+
+    tracing::info!(
+        "持久化完成: {} 个槽位(含删除), {} 个向量, Mode: {}",
+        node_count, vec_count, if is_mmap_mode { "Mmap" } else { "Rom" }
+    );
 
     Ok(())
 }
 
-/// 从 .tdb 文件加载并重建 MemTable。
-pub fn load<T: VectorType>(path: &str) -> Result<MemTable<T>> {
+pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>> {
     let file = File::open(path).map_err(TriviumError::Io)?;
 
     let mmap = unsafe { Mmap::map(&file) }
@@ -116,11 +174,6 @@ pub fn load<T: VectorType>(path: &str) -> Result<MemTable<T>> {
         )));
     }
 
-    let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-    if version != VERSION {
-        return Err(TriviumError::Generic(format!("Unsupported version: {}", version)));
-    }
-
     let dim = u32::from_le_bytes(bytes[6..10].try_into().unwrap()) as usize;
     let next_id = u64::from_le_bytes(bytes[10..18].try_into().unwrap());
     let node_count = u64::from_le_bytes(bytes[18..26].try_into().unwrap()) as usize;
@@ -128,74 +181,115 @@ pub fn load<T: VectorType>(path: &str) -> Result<MemTable<T>> {
     let vector_offset = u64::from_le_bytes(bytes[34..42].try_into().unwrap()) as usize;
     let edge_offset = u64::from_le_bytes(bytes[42..50].try_into().unwrap()) as usize;
 
+    let vec_file_path = vec_path_from_db(path);
+    
+    // 如果 vector_offset 是 0 说明是分离架构，且存在 .vec 则按 Mmap 加载
+    // 无论目前 config 设置的模式是什么，如果在初始化加载时已经存在可用的 .vec 结构，应当正确恢复它
+    // 由下一次 flush 再按照最新的 StorageMode 决定写出格式
+    if vector_offset == 0 && Path::new(&vec_file_path).exists() {
+        load_v2(bytes, dim, next_id, node_count, payload_offset, edge_offset, &vec_file_path, &mmap)
+    } else {
+        load_v1_rom(bytes, dim, next_id, node_count, payload_offset, vector_offset, edge_offset, &mmap)
+    }
+}
+
+/// 分离向量 .vec 文件的加载
+fn load_v2<T: VectorType>(
+    bytes: &[u8], dim: usize, next_id: u64, node_count: usize,
+    payload_offset: usize, edge_offset: usize, vec_file_path: &str, tdb_mmap: &Mmap,
+) -> Result<MemTable<T>> {
+    let vec_pool = VecPool::<T>::open(Path::new(vec_file_path), dim, node_count)?;
+    let mut memtable = MemTable::new_with_vec_pool(dim, next_id, vec_pool);
+    load_payloads(&mut memtable, bytes, node_count, payload_offset, edge_offset)?;
+    load_edges(&mut memtable, bytes, edge_offset, tdb_mmap.len())?;
+    Ok(memtable)
+}
+
+/// 单文件内存向量的加载
+fn load_v1_rom<T: VectorType>(
+    bytes: &[u8], dim: usize, next_id: u64, node_count: usize,
+    payload_offset: usize, vector_offset: usize, edge_offset: usize, tdb_mmap: &Mmap,
+) -> Result<MemTable<T>> {
+    let mut memtable = MemTable::new_with_next_id(dim, next_id);
     let vector_bytes_per_elem = std::mem::size_of::<T>();
     let expected_vec_size = node_count * dim * vector_bytes_per_elem;
-    if vector_offset + expected_vec_size > mmap.len() {
+    
+    if vector_offset + expected_vec_size > tdb_mmap.len() {
         return Err(TriviumError::Generic("Vector block exceeds file size".into()));
     }
 
-    let mut memtable = MemTable::new_with_next_id(dim, next_id);
+    // 先恢复映射位置和 Payload
+    load_payloads(&mut memtable, bytes, node_count, payload_offset, vector_offset)?;
 
-    // Payload Block
-    let mut cursor = payload_offset;
-    let mut node_ids_in_order = Vec::with_capacity(node_count);
+    let vec_block = &bytes[vector_offset..vector_offset + expected_vec_size];
+    let is_aligned = (vec_block.as_ptr() as usize) % std::mem::align_of::<T>() == 0;
+
+    // 因为 load_payloads 已经按内部索引位置推了占位符（包含 Tombstone），
+    // 接下来我们只需要把所有的 vector_block 推入 VecPool！
+    if is_aligned {
+        let t_slice = unsafe {
+            std::slice::from_raw_parts(
+                vec_block.as_ptr() as *const T, node_count * dim
+            )
+        };
+        memtable.vec_pool_mut().push(t_slice);
+    } else {
+        // 不对齐
+        let mut v = Vec::with_capacity(node_count * dim);
+        for i in 0..(node_count * dim) {
+            let off = i * vector_bytes_per_elem;
+            let chunk = &vec_block[off..off + vector_bytes_per_elem];
+            let elem: T = bytemuck::pod_read_unaligned(chunk);
+            v.push(elem);
+        }
+        memtable.vec_pool_mut().push(&v);
+    }
+
+    load_edges(&mut memtable, bytes, edge_offset, tdb_mmap.len())?;
+    Ok(memtable)
+}
+
+/// 解析 Payload Block，处理 Tombstone
+fn load_payloads<T: VectorType>(
+    memtable: &mut MemTable<T>, bytes: &[u8], node_count: usize, offset: usize, end_offset: usize
+) -> Result<()> {
+    let mut cursor = offset;
     for _ in 0..node_count {
-        if cursor + 12 > vector_offset {
+        if cursor + 12 > end_offset {
             return Err(TriviumError::Generic("Payload block overflow".into()));
         }
         let nid = u64::from_le_bytes(bytes[cursor..cursor+8].try_into().unwrap());
         cursor += 8;
         let json_len = u32::from_le_bytes(bytes[cursor..cursor+4].try_into().unwrap()) as usize;
         cursor += 4;
-        if cursor + json_len > vector_offset {
+        
+        if nid == 0 && json_len == 0 {
+            memtable.register_tombstone()?;
+            continue;
+        }
+        
+        if cursor + json_len > end_offset {
             return Err(TriviumError::Generic("JSON data overflow".into()));
         }
         let payload: serde_json::Value = serde_json::from_slice(&bytes[cursor..cursor+json_len])
             .map_err(|e| TriviumError::Generic(format!("JSON parse error: {}", e)))?;
         cursor += json_len;
-        node_ids_in_order.push((nid, payload));
+
+        memtable.register_node(nid, payload)?;
     }
+    Ok(())
+}
 
-    // Vector Block
-    let vec_block = &bytes[vector_offset..vector_offset + expected_vec_size];
-    let is_aligned = (vec_block.as_ptr() as usize) % std::mem::align_of::<T>() == 0;
-
-    for (vec_idx, (nid, payload)) in node_ids_in_order.iter().enumerate() {
-        let vec_start = vec_idx * dim;
-
-        let vector: Vec<T> = if is_aligned {
-            let t_slice = unsafe {
-                std::slice::from_raw_parts(
-                    vec_block.as_ptr().add(vec_start * vector_bytes_per_elem) as *const T,
-                    dim,
-                )
-            };
-            t_slice.to_vec()
-        } else {
-            let start = vec_start * vector_bytes_per_elem;
-            let mut v = Vec::with_capacity(dim);
-            for j in 0..dim {
-                let off = start + j * vector_bytes_per_elem;
-                let chunk = &vec_block[off..off + vector_bytes_per_elem];
-                let elem: T = bytemuck::pod_read_unaligned(chunk);
-                v.push(elem);
-            }
-            v
-        };
-
-        memtable.raw_insert(*nid, &vector, payload.clone())?;
-    }
-
-    // Edge Block
+fn load_edges<T: VectorType>(memtable: &mut MemTable<T>, bytes: &[u8], edge_offset: usize, file_len: usize) -> Result<()> {
     let mut cursor = edge_offset;
-    while cursor + 18 <= mmap.len() {
+    while cursor + 18 <= file_len {
         let src_id = u64::from_le_bytes(bytes[cursor..cursor+8].try_into().unwrap());
         cursor += 8;
         let dst_id = u64::from_le_bytes(bytes[cursor..cursor+8].try_into().unwrap());
         cursor += 8;
         let label_len = u16::from_le_bytes(bytes[cursor..cursor+2].try_into().unwrap()) as usize;
         cursor += 2;
-        if cursor + label_len + 4 > mmap.len() { break; }
+        if cursor + label_len + 4 > file_len { break; }
         let label = String::from_utf8(bytes[cursor..cursor+label_len].to_vec())
             .map_err(|e| TriviumError::Generic(format!("Label decode error: {}", e)))?;
         cursor += label_len;
@@ -203,6 +297,5 @@ pub fn load<T: VectorType>(path: &str) -> Result<MemTable<T>> {
         cursor += 4;
         memtable.link(src_id, dst_id, label, weight)?;
     }
-
-    Ok(memtable)
+    Ok(())
 }

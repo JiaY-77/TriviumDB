@@ -107,11 +107,28 @@ pub fn execute<T: VectorType>(query: &Query, memtable: &MemTable<T>) -> QueryRes
     }).collect()
 }
 
-/// 查找匹配节点模式的候选节点
 fn find_candidates<T: VectorType>(node_pat: &NodePattern, memtable: &MemTable<T>) -> Vec<Node<T>> {
-    let all_ids = memtable.all_node_ids();
     let mut candidates = Vec::new();
 
+    // 🏆 P0 优化：O(1) 主键索引短路扫描
+    // 如果用户的 Cypher 包含确切的 ID，例如：MATCH (a {id: 42})
+    // 我们直接进入 O(1) 的 HashMap get，而不需要全表扫描！
+    let exact_id = node_pat.props.iter().find(|p| p.key == "id").and_then(|p| {
+        if let LitValue::Int(tid) = &p.value { Some(*tid as u64) } else { None }
+    });
+
+    if let Some(id) = exact_id {
+        if let Some(node) = build_node(id, memtable) {
+            // 还需要确认通过了包含这个 id 在内的所有 props 的核验（例如有多组合条件）
+            if matches_node_props(&node, node_pat) {
+                candidates.push(node);
+            }
+        }
+        return candidates;
+    }
+
+    // 📉 O(N) 全表扫描（当无法走索引时回退）
+    let all_ids = memtable.all_node_ids();
     for id in all_ids {
         if let Some(node) = build_node(id, memtable) {
             // 检查内联属性过滤

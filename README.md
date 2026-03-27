@@ -22,9 +22,10 @@ TriviumDB 是一个用纯 Rust 编写的**嵌入式单文件数据库引擎**，
 
 我们的目标是成为 **AI 应用领域的 SQLite**：
 
-- 🗃️ **单文件带走** —— 所有数据打包进一个 `.tdb` 文件，复制即迁移
+- 🗃️ **Rom/Mmap 双引擎切换** —— 既支持单文件 `*.tdb` 复制走人，也支持分离 `.vec` 向量文件按需 mmap 零拷贝加载
 - 🔗 **节点即一切** —— 每个节点天然同时拥有向量、元数据和图关系，ID 全局唯一，绝不错位
 - 🧠 **为 AI 而生** —— 支持"先向量锚定、再沿图谱扩散"的混合检索范式
+- 🛡️ **四层物理防弹衣** —— 原子替换 + WAL日志 + 事务干跑验证（Dry-Run）+ Mmap COW 隔离，断电断存不毁库
 - 🐍 **Python 原生** —— `pip install` 后直接 `import triviumdb`，类 MongoDB 查询语法
 - ⚡ **多核并行** —— rayon 并行向量扫描 + mmap 零拷贝加载 + 可选 HNSW 索引
 - 💾 **SSD 友好** —— Append-Only WAL + 后台 Compaction 线程，杜绝随机写入磨损
@@ -57,8 +58,8 @@ TriviumDB 是一个用纯 Rust 编写的**嵌入式单文件数据库引擎**，
 │                                                            │
 │   insert() → 向量 + 元数据 + 图谱就绪（原子写入）          │
 │   search() → 向量锚定 + 图谱扩散    （一次调用）           │
-│   delete() → 三层联删               （绝不残留）           │
-│   flush()  → 一个 .tdb 文件         （复制即迁移）          │
+│   begin_tx() → 纯内存储干跑验证，零开销安全回滚        │
+│   flush()  → 随心切换单文件（Rom）或 零拷贝（Mmap）极速启动 │
 │                                                            │
 └────────────────────────────────────────────────────────────┘
 ```
@@ -151,8 +152,9 @@ with triviumdb.TriviumDB("memory.tdb", dim=3) as db:
 | 🔍 **混合检索**     | 向量锚定 → Top-K → 图谱扩散（Spreading Activation）→ 最终排序               |
 | 📦 **统一数据模型** | 每个节点同时持有向量（f32×dim）、JSON 元数据和图谱边，共享全局 `u64` 主键   |
 | ⚡ **多核并行**     | rayon 并行向量扫描 + mmap 零拷贝加载 + 可选 HNSW 索引                       |
-| 💾 **SSD 友好**     | Append-Only WAL + 后台 Compaction，杜绝随机写入                             |
-| 🛡️ **崩溃恢复**     | WAL + CRC32 校验 + 原子写入，断电不丢数据                                   |
+| 💾 **双模式存储**   | Mmap（大模型极速分体冷启动） / Rom（传统 SQLite 级单文件打包携带），无缝热切换 |
+| 🛡️ **四层灾备防御** | 预写日志(WAL) + 写入原子替换 + 事务预检干跑(Dry-Run) + OS 内存写时复制隔离    |
+| 🔄 **零开销事务**   | `begin_tx()` 验证前置架构，中途报错绝不污染内存，实现真正的零代价原子回滚   |
 | 🔎 **高级过滤**     | 类 MongoDB 语法：`$eq/$ne/$gt/$lt/$in/$and/$or`                             |
 | 📝 **图谱查询**     | 内置类 Cypher 查询引擎：`MATCH (a)-[:knows]->(b) WHERE b.age > 18 RETURN b` |
 | 🐍 **Python 原生**  | PyO3 绑定，`pip install` 后直接 `import triviumdb`                          |
@@ -228,7 +230,7 @@ TriviumDB/
 - [x] rayon 并行向量扫描
 - [x] mmap 零拷贝文件加载
 
-### v0.3 — 生态拓展 ✅
+### v0.3 — 生态拓展 ❓️
 
 - [x] Node.js 扩展绑定 (napi-rs)
 - [x] 高级 Payload 过滤扩展 ($exists/$nin/$size/$all/$type)
@@ -237,14 +239,19 @@ TriviumDB/
 - [ ] CLI 工具 (`triviumdb-cli`)
 - [ ] 性能基准测试套件 (benchmark)
 
-### v0.4 — 千万级扩展（规划中）
+### v0.4 — 百万级架构 ✅
 
-> 以下为突破千万节点秒级热启动的可选技术路线，按优先级排列：
+- [x] Mmap / Rom 双引擎热切换：自适应切换单文件便携模式（Rom）与分离式零拷贝挂载文件（Mmap）
+- [x] 验证前置事务架构 (Dry-Run 原子回滚)：利用虚拟状态叠加预设校验约束，实现零内存碎片、绝对安全的业务侧事务中止
+- [x] Tombstone 占位对齐序列化：重写持久化块对齐，完美避免逻辑删除所引起的中途偏移与错位
 
-- [ ] **P0 · 向量池 mmap 零拷贝**：SoA 向量直接映射磁盘文件，OS 按需分页加载，启动瞬间完成，内存占用降低 90%+
-- [ ] **P1 · Payload 延迟反序列化**：启动时仅建立 `(offset, length)` 索引表，首次访问时才解析 JSON 并缓存到 LRU
-- [ ] **P2 · 索引结构持久化**：`ids_to_indices` 映射表持久化到磁盘（mmap B-tree / 有序数组二分查找），避免启动时逐条 HashMap 插入
-- [ ] **P3 · 零拷贝序列化协议**（可选）：Payload 格式从 serde_json 迁移至 rkyv / FlatBuffers，支持不反序列化直接读取字段
+### v0.5 — 千万级扩展（规划中，需权衡利弊）
+
+> 以下为突破千万节点秒级吞吐的可选技术路线：
+
+- [ ] Payload 延迟反序列化：启动时仅建立 `(offset, length)` 索引表，首次访问时才解析 JSON 并缓存到 LRU
+- [ ] 索引结构持久化：`ids_to_indices` 映射表持久化到磁盘（mmap B-tree / 有序数组二分查找），避免启动时逐条 HashMap 插入
+- [ ] 零拷贝序列化协议（可选）：Payload 格式从 serde_json 迁移至 rkyv / FlatBuffers，支持不反序列化直接读取字段
 - [ ] 分布式分片存储
 
 ---

@@ -14,6 +14,32 @@ use fs2::FileExt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StorageMode {
+    /// Mmap 分离模式（默认）：高性能、海量数据，产生 `.tdb` 和 `.vec` 两个文件
+    #[default]
+    Mmap,
+    /// Rom 单文件模式：高便携性，所有数据保存在一个 `.tdb` 文件中（纯内存加载以获得极高并发）
+    Rom,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Config {
+    pub dim: usize,
+    pub sync_mode: SyncMode,
+    pub storage_mode: StorageMode,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            dim: 1536,
+            sync_mode: SyncMode::default(),
+            storage_mode: StorageMode::default(),
+        }
+    }
+}
+
 /// 安全获取 Mutex 锁：如果锁中毒（某个线程 panic 持有锁），
 /// 则恢复内部数据继续运行，而不是 panic 整个进程。
 fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -29,26 +55,32 @@ pub struct Database<T: VectorType> {
     memtable: Arc<Mutex<MemTable<T>>>,
     wal: Arc<Mutex<Wal>>,
     #[cfg(feature = "hnsw")]
-    hnsw_index: HnswIndex,
+    hnsw_index: HnswIndex<T>,
     compaction: Option<CompactionThread>,
     /// 文件锁：防止多进程同时打开同一个数据库
     _lock_file: std::fs::File,
     /// 内存上限（字节），0 = 无限制
     memory_limit: usize,
+    /// 存储模式
+    storage_mode: StorageMode,
 }
 
 impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T> {
-    /// 打开或创建数据库（默认 SyncMode::Normal）
+    /// 打开或创建数据库（默认：Mmap 模式，SyncMode::Normal）
     pub fn open(path: &str, dim: usize) -> Result<Self> {
-        Self::open_with_sync(path, dim, SyncMode::default())
+        let config = Config { dim, ..Default::default() };
+        Self::open_with_config(path, config)
     }
 
-    /// 打开或创建数据库，指定 WAL 同步模式
-    ///
-    /// - `SyncMode::Full`   — 每条写入 fsync，最安全
-    /// - `SyncMode::Normal` — flush 到 OS，平衡模式（默认）
-    /// - `SyncMode::Off`    — 不主动 flush，最快（仅测试用）
+    /// 打开或创建数据库，指定 WAL 同步模式 (向后兼容)
     pub fn open_with_sync(path: &str, dim: usize, sync_mode: SyncMode) -> Result<Self> {
+        let config = Config { dim, sync_mode, ..Default::default() };
+        Self::open_with_config(path, config)
+    }
+
+    /// 打开或创建数据库（高级配置入口）
+    pub fn open_with_config(path: &str, config: Config) -> Result<Self> {
+        let dim = config.dim;
         // ═══ 自动递归创建上层目录 ═══
         if let Some(parent_dir) = std::path::Path::new(path).parent() {
             if !parent_dir.as_os_str().is_empty() {
@@ -71,7 +103,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         })?;
 
         let mut memtable = if std::path::Path::new(path).exists() {
-            file_format::load::<T>(path)?
+            file_format::load(path, config.storage_mode)?
         } else {
             MemTable::new(dim)
         };
@@ -86,10 +118,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             }
         }
 
-        let wal = Wal::open_with_sync(path, sync_mode)?;
+        let wal = Wal::open_with_sync(path, config.sync_mode)?;
 
         #[cfg(feature = "hnsw")]
-        let hnsw_index = HnswIndex::new(dim);
+        let hnsw_index = HnswIndex::<T>::new(dim);
 
         Ok(Self {
             db_path: path.to_string(),
@@ -100,6 +132,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             compaction: None,
             _lock_file: lock_file,
             memory_limit: 0,
+            storage_mode: config.storage_mode,
         })
     }
 
@@ -151,6 +184,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             Arc::clone(&self.memtable),
             Arc::clone(&self.wal),
             self.db_path.clone(),
+            self.storage_mode,
         );
         self.compaction = Some(ct);
     }
@@ -268,20 +302,21 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         expand_depth: usize,
         min_score: f32,
     ) -> Result<Vec<SearchHit>> {
-        let mt = lock_or_recover(&self.memtable);
-        let dim = mt.dim();
+        let mut mt = lock_or_recover(&self.memtable);
 
         #[cfg(not(feature = "hnsw"))]
-        let anchor_hits = brute_force::search(
-            query_vector, mt.flat_vectors(), dim, top_k, min_score,
-            |idx| mt.get_id_by_index(idx),
-        );
+        let anchor_hits = {
+            let dim = mt.dim();
+            mt.ensure_vectors_cache();
+            brute_force::search(
+                query_vector, mt.flat_vectors(), dim, top_k, min_score,
+                |idx| mt.get_id_by_index(idx),
+            )
+        };
 
         #[cfg(feature = "hnsw")]
         let anchor_hits: Vec<SearchHit> = {
-            // TODO: 泛型化后 HNSW 还需要继续重构，这里暂时返回空结果
-            let _ = (query_vector, top_k, min_score, dim);
-            Vec::new()
+            self.hnsw_index.search(query_vector, top_k, min_score)
         };
 
         if anchor_hits.is_empty() {
@@ -296,9 +331,6 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             }
         }
 
-        // expand_graph 也需要泛型化！
-        // let final_hits = expand_graph(&mt, seeds, expand_depth);
-        // 先简单返回种子节点（暂时注释图扩散或者后续改造）
         Ok(crate::graph::traversal::expand_graph(&mt, seeds, expand_depth))
     }
 
@@ -376,10 +408,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     ///   - 步骤 1 完成、步骤 2 前崩溃 → 新 .tdb 已就绪 + WAL 仍存在 → 重启回放幂等数据（安全冗余）
     ///   - 全部完成 → 干净状态
     pub fn flush(&mut self) -> Result<()> {
-        // Step 1: 原子写入 .tdb
+        // Step 1: 分层原子写入（根据 mode 决定单文件 .tdb 或 .vec + .tdb）
         {
-            let mt = lock_or_recover(&self.memtable);
-            file_format::save(&mt, &self.db_path)?;
+            let mut mt = lock_or_recover(&self.memtable);
+            file_format::save(&mut mt, &self.db_path, self.storage_mode)?;
         }
         // Step 2: .tdb 已安全落盘，现在清除 WAL
         {
@@ -416,12 +448,20 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn rebuild_index(&mut self) {
         #[cfg(feature = "hnsw")]
         {
-            let mt = lock_or_recover(&self.memtable);
-            // 将泛型向量池转换为 f32 给 HNSW 使用
+            let mut mt = lock_or_recover(&self.memtable);
+            let dim = mt.dim();
+            mt.ensure_vectors_cache();
             let flat = mt.flat_vectors();
-            let f32_vecs: Vec<f32> = flat.iter().map(|v| v.to_f32()).collect();
-            self.hnsw_index.rebuild(&f32_vecs, |idx| mt.get_id_by_index(idx));
-            tracing::info!("HNSW 索引重建完成，共 {} 个节点", mt.node_count());
+            self.hnsw_index.rebuild(
+                flat,
+                dim,
+                |idx| mt.get_id_by_index(idx),
+                |idx| {
+                    let nid = mt.get_id_by_index(idx);
+                    mt.contains(nid)
+                },
+            );
+            tracing::info!("HNSW 索引重建完成，共 {} 个活跃节点", mt.node_count());
         }
         #[cfg(not(feature = "hnsw"))]
         {
@@ -528,6 +568,9 @@ fn replay_entry<T: VectorType>(mt: &mut MemTable<T>, entry: WalEntry<T>) {
         WalEntry::Unlink { src, dst } => { let _ = mt.unlink(src, dst); }
         WalEntry::UpdatePayload { id, payload } => { let _ = mt.update_payload(id, payload); }
         WalEntry::UpdateVector { id, vector } => { let _ = mt.update_vector(id, &vector); }
+        WalEntry::TxBegin { .. } | WalEntry::TxCommit { .. } => {
+            // 已在 wal.rs 内的回放过滤环节处理，这里不应再收到，直接忽略
+        }
     }
 }
 
@@ -634,10 +677,68 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
         }
 
         let mut mt = lock_or_recover(&self.db.memtable);
+        
+        // ════════ 第一阶段：预检前置 (Dry-Run / Validation) ════════
+        // 利用极小的内存开销，通过虚拟状态叠加验证所有逻辑约束。
+        // 如果出错，MemTable 保持完全未修改，实现零开销原子回滚。
+        let mut sim_next_id = mt.next_id_value();
+        let dim = mt.dim();
+        let mut pending_ids = std::collections::HashSet::new();
+        let mut pending_deletes = std::collections::HashSet::new();
+
+        macro_rules! check_exists {
+            ($id:expr) => {
+                !pending_deletes.contains($id) && (pending_ids.contains($id) || mt.contains(*$id))
+            }
+        }
+
+        for op in &ops {
+            match op {
+                TxOp::Insert { vector, .. } => {
+                    if vector.len() != dim {
+                        return Err(crate::error::TriviumError::DimensionMismatch { expected: dim, got: vector.len() });
+                    }
+                    pending_ids.insert(sim_next_id);
+                    sim_next_id += 1;
+                }
+                TxOp::InsertWithId { id, vector, .. } => {
+                    if check_exists!(id) {
+                        return Err(crate::error::TriviumError::Generic(format!("Node {} already exists", id)));
+                    }
+                    if vector.len() != dim {
+                        return Err(crate::error::TriviumError::DimensionMismatch { expected: dim, got: vector.len() });
+                    }
+                    pending_ids.insert(*id);
+                    if *id >= sim_next_id { sim_next_id = *id + 1; }
+                }
+                TxOp::Link { src, dst, .. } => {
+                    if !check_exists!(src) { return Err(crate::error::TriviumError::NodeNotFound(*src)); }
+                    if !check_exists!(dst) { return Err(crate::error::TriviumError::NodeNotFound(*dst)); }
+                }
+                TxOp::Delete { id } => {
+                    if !check_exists!(id) { return Err(crate::error::TriviumError::NodeNotFound(*id)); }
+                    pending_deletes.insert(*id);
+                }
+                TxOp::Unlink { src, .. } => {
+                    if !check_exists!(src) { return Err(crate::error::TriviumError::NodeNotFound(*src)); }
+                }
+                TxOp::UpdatePayload { id, .. } => {
+                    if !check_exists!(id) { return Err(crate::error::TriviumError::NodeNotFound(*id)); }
+                }
+                TxOp::UpdateVector { id, vector } => {
+                    if !check_exists!(id) { return Err(crate::error::TriviumError::NodeNotFound(*id)); }
+                    if vector.len() != dim {
+                        return Err(crate::error::TriviumError::DimensionMismatch { expected: dim, got: vector.len() });
+                    }
+                }
+            }
+        }
+
+        // ════════ 第二阶段：物理执行 (Infallible Apply) ════════
         let mut wal_entries: Vec<WalEntry<T>> = Vec::with_capacity(ops.len());
         let mut generated_ids: Vec<NodeId> = Vec::new();
 
-        // 逐条应用到 memtable，同时构建 WAL 条目
+        // 逐条应用到 memtable，伴随逻辑验证保证，此处调用的 ? 将不会抛出 Err
         for op in ops {
             match op {
                 TxOp::Insert { vector, payload } => {
@@ -674,12 +775,11 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
         }
         drop(mt); // 释放 memtable 锁
 
-        // 全部成功，批量写入 WAL
+        // 全部成功，批量按事务边界写入 WAL
         {
             let mut w = lock_or_recover(&self.db.wal);
-            for entry in &wal_entries {
-                w.append(entry)?;
-            }
+            let tx_id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
+            w.append_batch(tx_id, &wal_entries)?;
         }
 
         self.committed = true;

@@ -26,6 +26,7 @@ impl CompactionThread {
         memtable: Arc<Mutex<MemTable<T>>>,
         wal: Arc<Mutex<Wal>>,
         db_path: String,
+        storage_mode: crate::database::StorageMode,
     ) -> Self {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop = stop_flag.clone();
@@ -49,11 +50,11 @@ impl CompactionThread {
                 }
 
                 // 执行 Compaction：锁 -> 写 .tdb -> 清 WAL -> 释放锁
-                let mt = memtable.lock().unwrap_or_else(|p| {
+                let mut mt = memtable.lock().unwrap_or_else(|p| {
                     tracing::warn!("Compaction thread: MemTable Mutex poisoned, recovering...");
                     p.into_inner()
                 });
-                match file_format::save(&mt, &db_path) {
+                match file_format::save(&mut mt, &db_path, storage_mode) {
                     Ok(_) => {
                         drop(mt); // 先释放 memtable 锁
                         let mut w = wal.lock().unwrap_or_else(|p| {

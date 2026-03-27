@@ -7,9 +7,12 @@
 ## 目录
 
 - [快速集成](#快速集成)
+- [选择存储模式](#选择存储模式)
 - [数据建模范式](#数据建模范式)
 - [性能调优](#性能调优)
 - [可靠性保障](#可靠性保障)
+- [事务最佳实践](#事务最佳实践)
+- [Cypher 查询最佳实践](#cypher-查询最佳实践)
 - [常见使用模式](#常见使用模式)
 - [避坑指南](#避坑指南)
 - [模型升级与维度迁移](#模型升级与维度迁移)
@@ -76,6 +79,44 @@ with triviumdb.TriviumDB("my_app.tdb", dim=768) as db:
     for hit in results:
         print(f"[{hit.id}] {hit.score:.3f} | {hit.payload}")
 # 退出 with 块时自动 flush 落盘
+```
+
+---
+
+## 选择存储模式
+
+TriviumDB v0.4 引入了 **Rom / Mmap 双存储引擎**，在打开数据库时通过 `Config` 选择（Rust 原生 API），**两者可以随时热切换**，下一次 `flush()` 时会自动转换磁盘格式。
+
+| 模式 | 启动开销 | 内存占用 | 磁盘文件 | 推荐场景 |
+|------|----------|----------|----------|----------|
+| **Rom（单文件）** | O(N) 全量加载 | = 数据体积 | 单一 `.tdb` | 知识库 < 50 万节点、需要一键打包转移 |
+| **Mmap（分离，默认）** | ~O(1) 映射 | ≈ 增量 + 工作集 | `.tdb` + `.vec` | 超大规模数据、追求冷启动性能 |
+
+```rust
+use triviumdb::database::{Database, Config, StorageMode};
+
+// Rom 模式（单文件便携）
+let db = Database::<f32>::open_with_config("agent.tdb", Config {
+    dim: 1536,
+    storage_mode: StorageMode::Rom,
+    ..Default::default()
+})?;
+
+// Mmap 模式（默认，适合大规模）
+let db = Database::<f32>::open("huge_kb.tdb", 1536)?;
+```
+
+### 模式热切换（无需任何数据迁移脚本）
+
+```rust
+// 这个库最初是 Mmap 模式建的，想打包发给别人
+// 只需以 Rom 模式重新打开，flush 一次即可
+let mut db = Database::<f32>::open_with_config("agent.tdb", Config {
+    dim: 1536,
+    storage_mode: StorageMode::Rom, // 声明目标状态
+    ..Default::default()
+})?;
+db.flush()?;  // 引擎自动完成: 向量解封 → 写入单 .tdb → 删除旧 .vec
 ```
 
 ---
@@ -248,7 +289,78 @@ If this is unexpected, delete 'data.tdb.lock'
 
 ---
 
-## 常见使用模式
+## 事务最佳实践
+
+TriviumDB 的事务（`begin_tx()`）采用**验证前置（Dry-Run）架构**：`commit()` 分为两个严格的阶段执行，任何错误都会在第一阶段被提前拦截，不会产生部分写入污染。
+
+### 事务的典型用法
+
+```rust
+let mut tx = db.begin_tx();
+
+// 第 1 步：缓冲操作（纯内存，零开销）
+let person_id = tx.next_id();   // 预测将要分配的 ID
+tx.insert(&vec1, json!({"type": "person", "name": "Alice"}));
+tx.insert_with_id(9999, &vec2, json!({"type": "event"}));
+tx.link(person_id, 9999, "attended", 1.0);
+
+// 第 2 步：commit 两阶段执行
+// 阶段 1: 干跑验证 → 维度 OK？节点存在？ID 未冲突？
+// 阶段 2: 验证通过后一次性物理写入，不会中途失败
+let ids = tx.commit()?;
+```
+
+### 事务内 insert_with_id 后立即 link：完全安全
+
+由于干跑阶段有虚拟状态叠加（`pending_ids`），在同一个事务里先 `insert_with_id(999)`，再 `link(999, ...)` 是完全合法的——验证器能感知到 999 将要存在。
+
+```rust
+let mut tx = db.begin_tx();
+tx.insert_with_id(999, &vec, json!({"name": "新节点"}));
+tx.link(1, 999, "relates_to", 0.8);  // ✅ 合法，999 在事务内已被追踪
+let _ = tx.commit()?;
+```
+
+### 只有逻辑错误才会让 commit() 失败
+
+| 失败原因 | 说明 |
+|----------|------|
+| `DimensionMismatch` | 插入的向量维度与 `dim` 不符 |
+| `NodeNotFound` | `link`/`delete`/`update` 引用了不存在的 ID |
+| ID 已存在 | `insert_with_id` 的 ID 在已有库或同事务中重复 |
+
+> ✅ 任何 `commit()` 返回的 `Err` 都意味着底层数据完全未被修改，可以安全重试或放弃。
+
+---
+
+## Cypher 查询最佳实践
+
+### 优先使用 ID 锚定，避免全表扫描
+
+TriviumDB 的 Cypher 执行器针对主键 `id` 内联了 O(1) 短路扫描优化。**每当起始节点是已知 ID 时，一定要将 `id` 写入节点属性过滤器**，这比直接使用 `type` 等 Payload 字段快上几个数量级。
+
+```python
+# 💡 推荐：AI Agent 的标准使用流程
+# 1. 用语义向量盲搜，取得锚点 ID
+results = db.search(encode("小明和小红的咖啡馆"), top_k=1)
+anchor_id = results[0].id   # 拿到了准确的 ID，如 42
+
+# 2. 以 ID 精准起跳 Cypher → O(1) 定位 + 图谱扩散
+rows = db.query(f'MATCH (a {{id: {anchor_id}}})-[:participant]->(b) RETURN b')
+
+# ❌ 避免（触发 O(N) 全表扫描）
+# db.query('MATCH (a {type: "event"})-[:participant]->(b) RETURN b')
+```
+
+### 三种获取 ID 的方式
+
+| 方式 | 获取时机 | 说明 |
+|------|----------|------|
+| `insert()` 返回值 | 插入节点时 | 引擎自动分配，调用方必须自行保存 |
+| `insert_with_id(my_id, ...)` | 插入时 | 业务侧使用自己的主键（如数据库 UID、雪花 ID）直接指定 |
+| `search()` 结果的 `result.id` | 向量语义搜索时 | 最常用的 AI Agent 工作流——先盲搜锚定，再 Cypher 扩散 |
+
+---
 
 ### 模式一：AI Agent 长期记忆
 
