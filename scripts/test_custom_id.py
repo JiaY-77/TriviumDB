@@ -14,8 +14,8 @@ db = triviumdb.TriviumDB(DB_PATH, dim=2)
 try:
     print("=== Testing Single insert_with_id ===")
     
-    # PEDSA 的 id 可能是特定数值，比如 1001, 1002
-    db.insert_with_id(1001, [0.1, 0.2], {"source": "PEDSA", "type": "Memory"})
+    # 外部系统的 id 可能是特定数值，比如 1001, 1002
+    db.insert_with_id(1001, [0.1, 0.2], {"source": "External", "type": "Memory"})
     print("Inserted custom ID = 1001")
     
     node = db.get(1001)

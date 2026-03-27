@@ -11,6 +11,8 @@ pub mod nodejs;
 pub mod query;
 pub mod storage;
 
+pub mod cognitive;
+
 pub use database::Database;
 pub use error::{Result, TriviumError};
 pub use filter::Filter;

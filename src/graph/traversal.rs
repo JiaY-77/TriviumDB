@@ -7,6 +7,7 @@ pub fn expand_graph<T: crate::VectorType>(
     db: &MemTable<T>,
     seeds: Vec<SearchHit>,
     max_depth: usize,
+    teleport_alpha: f32, // PPR 阻尼因子/回家概率
 ) -> Vec<SearchHit> {
     if max_depth == 0 {
         return seeds;
@@ -31,9 +32,15 @@ pub fn expand_graph<T: crate::VectorType>(
 
         for (curr_id, curr_energy) in current_tier {
             if let Some(edges) = db.get_edges(curr_id) {
+                // PPR 阻尼机制：留下一部分能量不传导（或者说是回跳），剩下部分顺着边流淌
+                let spread_energy = curr_energy * (1.0 - teleport_alpha).max(0.0);
+                if spread_energy <= propagation_threshold {
+                    continue;
+                }
+
                 for edge in edges {
-                    // 发散传播的能量片段 (源节点剩余激活能量 × 边权重)
-                    let transmitted = curr_energy * edge.weight;
+                    // 发散传播的能量片段 (源节点释放能量 × 边权重)
+                    let transmitted = spread_energy * edge.weight;
                     
                     // 1. 将收到的片段累加到下一轮发射台
                     *next_tier.entry(edge.target_id).or_insert(0.0) += transmitted;

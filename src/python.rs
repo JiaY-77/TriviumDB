@@ -342,6 +342,70 @@ pub mod python {
             }).collect())
         }
 
+        #[pyo3(signature = (
+            query_vector,
+            top_k=5,
+            expand_depth=2,
+            min_score=0.1,
+            teleport_alpha=0.0,
+            enable_advanced_pipeline=true,
+            enable_sparse_residual=false,
+            fista_lambda=0.1,
+            fista_threshold=0.3,
+            enable_dpp=false,
+            dpp_quality_weight=1.0
+        ))]
+        fn search_advanced(
+            &self,
+            py: Python<'_>,
+            query_vector: Bound<'_, PyAny>,
+            top_k: usize,
+            expand_depth: usize,
+            min_score: f32,
+            teleport_alpha: f32,
+            enable_advanced_pipeline: bool,
+            enable_sparse_residual: bool,
+            fista_lambda: f32,
+            fista_threshold: f32,
+            enable_dpp: bool,
+            dpp_quality_weight: f32,
+        ) -> PyResult<Vec<PySearchHit>> {
+            let config = crate::database::SearchConfig {
+                top_k,
+                expand_depth,
+                min_score,
+                teleport_alpha,
+                enable_advanced_pipeline,
+                enable_sparse_residual,
+                fista_lambda,
+                fista_threshold,
+                enable_dpp,
+                dpp_quality_weight,
+            };
+
+            let results = match &self.inner {
+                DbBackend::F32(db) => {
+                    let vec: Vec<f32> = query_vector.extract()?;
+                    db.search_advanced(&vec, &config)
+                }
+                DbBackend::F16(db) => {
+                    let vec: Vec<f32> = query_vector.extract()?;
+                    let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
+                    db.search_advanced(&vec16, &config)
+                }
+                DbBackend::U64(db) => {
+                    let vec: Vec<u64> = query_vector.extract()?;
+                    db.search_advanced(&vec, &config)
+                }
+            }.map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+            Ok(results.into_iter().map(|h| PySearchHit {
+                id: h.id,
+                score: h.score,
+                payload: json_to_pyobject(py, &h.payload),
+            }).collect())
+        }
+
         fn delete(&mut self, id: u64) -> PyResult<()> {
             dispatch!(self, mut db => db.delete(id))
                 .map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))

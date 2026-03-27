@@ -43,6 +43,21 @@ pub mod nodejs {
         pub payload: serde_json::Value,
     }
 
+    /// 高级管线专用配置结构
+    #[napi(object)]
+    pub struct JsSearchConfig {
+        pub top_k: Option<u32>,
+        pub expand_depth: Option<u32>,
+        pub min_score: Option<f64>,
+        pub teleport_alpha: Option<f64>,
+        pub enable_advanced_pipeline: Option<bool>,
+        pub enable_sparse_residual: Option<bool>,
+        pub fista_lambda: Option<f64>,
+        pub fista_threshold: Option<f64>,
+        pub enable_dpp: Option<bool>,
+        pub dpp_quality_weight: Option<f64>,
+    }
+
     /// 节点完整视图
     #[napi(object)]
     pub struct JsNodeView {
@@ -333,6 +348,54 @@ pub mod nodejs {
                 DbBackend::U64(db) => {
                     let v: Vec<u64> = query_vector.iter().map(|&x| x as u64).collect();
                     db.search(&v, top_k, expand_depth, min_score)
+                }
+            }.map_err(|e| napi::Error::from_reason(e.to_string()))?;
+
+            Ok(hits.into_iter().map(|h| JsSearchHit {
+                id: h.id as f64,
+                score: h.score as f64,
+                payload: h.payload,
+            }).collect())
+        }
+
+        /// 认知检索引擎：完全参数化暴露的高级功能 (FISTA, DPP, PPR)
+        #[napi]
+        pub fn search_advanced(
+            &self,
+            query_vector: Vec<f64>,
+            config: Option<JsSearchConfig>,
+        ) -> napi::Result<Vec<JsSearchHit>> {
+            let cfg = config.unwrap_or_else(|| JsSearchConfig {
+                top_k: None, expand_depth: None, min_score: None, teleport_alpha: None,
+                enable_advanced_pipeline: None, enable_sparse_residual: None, fista_lambda: None,
+                fista_threshold: None, enable_dpp: None, dpp_quality_weight: None,
+            });
+
+            let core_config = crate::database::SearchConfig {
+                top_k: cfg.top_k.unwrap_or(5) as usize,
+                expand_depth: cfg.expand_depth.unwrap_or(2) as usize,
+                min_score: cfg.min_score.unwrap_or(0.1) as f32,
+                teleport_alpha: cfg.teleport_alpha.unwrap_or(0.0) as f32,
+                enable_advanced_pipeline: cfg.enable_advanced_pipeline.unwrap_or(true),
+                enable_sparse_residual: cfg.enable_sparse_residual.unwrap_or(false),
+                fista_lambda: cfg.fista_lambda.unwrap_or(0.1) as f32,
+                fista_threshold: cfg.fista_threshold.unwrap_or(0.3) as f32,
+                enable_dpp: cfg.enable_dpp.unwrap_or(false),
+                dpp_quality_weight: cfg.dpp_quality_weight.unwrap_or(1.0) as f32,
+            };
+
+            let hits = match &self.inner {
+                DbBackend::F32(db) => {
+                    let v: Vec<f32> = query_vector.iter().map(|&x| x as f32).collect();
+                    db.search_advanced(&v, &core_config)
+                }
+                DbBackend::F16(db) => {
+                    let v: Vec<half::f16> = query_vector.iter().map(|&x| half::f16::from_f64(x)).collect();
+                    db.search_advanced(&v, &core_config)
+                }
+                DbBackend::U64(db) => {
+                    let v: Vec<u64> = query_vector.iter().map(|&x| x as u64).collect();
+                    db.search_advanced(&v, &core_config)
                 }
             }.map_err(|e| napi::Error::from_reason(e.to_string()))?;
 

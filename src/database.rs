@@ -40,6 +40,44 @@ impl Default for Config {
     }
 }
 
+/// 基于外部参数化配置的查询配置参数矩阵
+#[derive(Debug, Clone, Copy)]
+pub struct SearchConfig {
+    pub top_k: usize,
+    pub expand_depth: usize,
+    pub min_score: f32,
+    pub teleport_alpha: f32, // L6 PPR 阻尼因子/回家概率
+    
+    // 认知层统开开关 (当为 false 时，管线完全退化为最极简的传统检索引擎)
+    pub enable_advanced_pipeline: bool,
+    
+    // L4 / L5: 残差与二次搜索
+    pub enable_sparse_residual: bool,
+    pub fista_lambda: f32,
+    pub fista_threshold: f32,
+    
+    // L9: DPP
+    pub enable_dpp: bool,
+    pub dpp_quality_weight: f32,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            top_k: 5,
+            expand_depth: 2,
+            min_score: 0.1,
+            teleport_alpha: 0.0,
+            enable_advanced_pipeline: false,
+            enable_sparse_residual: false,
+            fista_lambda: 0.1,
+            fista_threshold: 0.30,
+            enable_dpp: false,
+            dpp_quality_weight: 1.0,
+        }
+    }
+}
+
 /// 安全获取 Mutex 锁：如果锁中毒（某个线程 panic 持有锁），
 /// 则恢复内部数据继续运行，而不是 panic 整个进程。
 fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -302,22 +340,106 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         expand_depth: usize,
         min_score: f32,
     ) -> Result<Vec<SearchHit>> {
+        // 向下兼容的转发封装
+        let config = SearchConfig {
+            top_k,
+            expand_depth,
+            min_score,
+            enable_advanced_pipeline: false, // Legacy search is pure and raw
+            ..Default::default()
+        };
+        self.search_advanced(query_vector, &config)
+    }
+
+    /// 全能认知检索核心引擎 (Advanced Pipeline)
+    /// 包含最密集的数学约束、动态管线打断重排机制
+    pub fn search_advanced(
+        &self,
+        query_vector: &[T],
+        config: &SearchConfig,
+    ) -> Result<Vec<SearchHit>> {
         let mut mt = lock_or_recover(&self.memtable);
 
-        #[cfg(not(feature = "hnsw"))]
-        let anchor_hits = {
-            let dim = mt.dim();
-            mt.ensure_vectors_cache();
-            brute_force::search(
-                query_vector, mt.flat_vectors(), dim, top_k, min_score,
-                |idx| mt.get_id_by_index(idx),
-            )
+        // --- 0. 容错与防御式编程 (Sanity Checks) ---
+        let dim = mt.dim();
+        if query_vector.len() != dim {
+            return Err(crate::error::TriviumError::DimensionMismatch {
+                expected: dim,
+                got: query_vector.len(),
+            });
+        }
+        for item in query_vector {
+            let f = item.to_f32();
+            if f.is_nan() || f.is_infinite() {
+                return Err(crate::error::TriviumError::Generic("Query vector contains NaN or Infinity".to_string()));
+            }
+        }
+
+        // 隔离作用域：强行钳平越界的玄学配置参数，防止底层矩阵求解 Panic 或死循环
+        let mut safe_cfg = *config;
+        safe_cfg.top_k = safe_cfg.top_k.max(1);
+        safe_cfg.fista_lambda = safe_cfg.fista_lambda.clamp(1e-5, 100.0); // 惩罚太小等于没正则，太大全变0
+        safe_cfg.teleport_alpha = safe_cfg.teleport_alpha.clamp(0.0, 1.0); // 必须在 0 - 1 的概率之间
+        safe_cfg.dpp_quality_weight = safe_cfg.dpp_quality_weight.clamp(0.0, 10.0); // 幂次太高会导致 float 溢出
+        safe_cfg.fista_threshold = safe_cfg.fista_threshold.clamp(0.0, f32::MAX);
+
+        let config = &safe_cfg; // 复用下文变量名
+
+        // --- L1 & L2 向量初排 / NMF ---
+        let mut anchor_hits: Vec<SearchHit> = {
+            #[cfg(not(feature = "hnsw"))]
+            {
+                let dim = mt.dim();
+                mt.ensure_vectors_cache();
+                brute_force::search(
+                    query_vector, mt.flat_vectors(), dim, config.top_k, config.min_score,
+                    |idx| mt.get_id_by_index(idx),
+                )
+            }
+            #[cfg(feature = "hnsw")]
+            {
+                self.hnsw_index.search(query_vector, config.top_k, config.min_score)
+            }
         };
 
-        #[cfg(feature = "hnsw")]
-        let anchor_hits: Vec<SearchHit> = {
-            self.hnsw_index.search(query_vector, top_k, min_score)
-        };
+        if config.enable_advanced_pipeline {
+            if config.enable_sparse_residual && !anchor_hits.is_empty() {
+                // --- L4 FISTA Sparse Residual ---
+                let entity_vecs: Vec<Vec<f32>> = anchor_hits.iter()
+                    .filter_map(|hit| mt.get_vector(hit.id).map(|v| v.iter().map(|&x| x.to_f32()).collect()))
+                    .collect();
+                let q_f32: Vec<f32> = query_vector.iter().map(|&x| x.to_f32()).collect();
+                
+                let (_, residual, residual_norm) = crate::cognitive::fista_solve(&q_f32, &entity_vecs, config.fista_lambda, 80);
+                
+                // --- L5 Shadow Query ---
+                if residual_norm > config.fista_threshold {
+                    tracing::debug!("FISTA Residual magnitude high ({} > {}). Triggering Shadow Query.", residual_norm, config.fista_threshold);
+                    let r_orig: Vec<T> = residual.iter().map(|&x| T::from_f32(x)).collect();
+                    let shadow_hits: Vec<SearchHit> = {
+                        #[cfg(not(feature = "hnsw"))]
+                        {
+                            let dim = mt.dim();
+                            brute_force::search(
+                                &r_orig, mt.flat_vectors(), dim, config.top_k, config.min_score,
+                                |idx| mt.get_id_by_index(idx),
+                            )
+                        }
+                        #[cfg(feature = "hnsw")]
+                        {
+                            self.hnsw_index.search(&r_orig, config.top_k, config.min_score)
+                        }
+                    };
+                    
+                    // 合并影子结果 (去重)
+                    for sh in shadow_hits {
+                        if !anchor_hits.iter().any(|h| h.id == sh.id) {
+                            anchor_hits.push(sh);
+                        }
+                    }
+                }
+            }
+        }
 
         if anchor_hits.is_empty() {
             return Ok(Vec::new());
@@ -331,7 +453,46 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             }
         }
 
-        Ok(crate::graph::traversal::expand_graph(&mt, seeds, expand_depth))
+        // --- L6 & L7: PPR 结合内向原生边漫游 ---
+        let mut expanded = crate::graph::traversal::expand_graph(&mt, seeds, config.expand_depth, config.teleport_alpha);
+        
+        // L8 (时间衰减与多维重排) 已被设计哲学剥离：不应在此侵入 JSON 业务字段，交由上层 Agent 侧处理。
+
+        if config.enable_advanced_pipeline && config.enable_dpp && expanded.len() > config.top_k {
+            let limit = config.top_k;
+            let dpp_pool_size = std::cmp::min(expanded.len(), limit * 3);
+            let mut pool_vecs = Vec::with_capacity(dpp_pool_size);
+            let mut pool_scores = Vec::with_capacity(dpp_pool_size);
+            let mut pool_valid = Vec::with_capacity(dpp_pool_size);
+            
+            for i in 0..dpp_pool_size {
+                let hit = &expanded[i];
+                if let Some(v) = mt.get_vector(hit.id) {
+                    pool_vecs.push(v.iter().map(|&x| x.to_f32()).collect());
+                    pool_scores.push(hit.score);
+                    pool_valid.push(hit.clone());
+                }
+            }
+            
+            if pool_valid.len() > limit {
+                let selected_idx = crate::cognitive::dpp_greedy(
+                    &pool_vecs, 
+                    &pool_scores, 
+                    limit, 
+                    config.dpp_quality_weight
+                );
+                
+                let mut final_results = Vec::with_capacity(limit);
+                for &idx in &selected_idx {
+                    final_results.push(pool_valid[idx].clone());
+                }
+                final_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                return Ok(final_results);
+            }
+        }
+        
+        expanded.truncate(config.top_k);
+        Ok(expanded)
     }
 
     pub fn get(&self, id: NodeId) -> Option<crate::node::NodeView<T>> {

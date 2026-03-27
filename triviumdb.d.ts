@@ -65,6 +65,33 @@ export type FilterCondition = {
 };
 
 // ==========================================
+// 认知管线配置
+// ==========================================
+
+export interface JsSearchConfig {
+  /** 最终返回结果数量 (默认 5) */
+  topK?: number;
+  /** 图谱扩散跳数 (默认 2) */
+  expandDepth?: number;
+  /** 余弦相似度下限 (默认 0.1) */
+  minScore?: number;
+  /** PPR 回跳概率 0.0~1.0，越高越抑制深层扩散 (默认 0.0) */
+  teleportAlpha?: number;
+  /** 认知管线总开关 (默认 true) */
+  enableAdvancedPipeline?: boolean;
+  /** 启用 FISTA 残差寻隐 + 影子查询 (默认 false) */
+  enableSparseResidual?: boolean;
+  /** FISTA L1 正则化系数 (默认 0.1) */
+  fistaLambda?: number;
+  /** 残差范数超过此值时触发影子查询 (默认 0.3) */
+  fistaThreshold?: number;
+  /** 启用 DPP 多样性采样 (默认 false) */
+  enableDpp?: boolean;
+  /** DPP 质量权重幂次 (默认 1.0) */
+  dppQualityWeight?: number;
+}
+
+// ==========================================
 // 核心类定义
 // ==========================================
 
@@ -164,6 +191,13 @@ export class TriviumDB {
    * @param minScore    只接受相似度大于这个阈值的搜索命中 (默认 0.5)
    */
   search(queryVector: Vector, topK?: number, expandDepth?: number, minScore?: number): JsSearchHit[];
+
+  /**
+   * 认知管线检索：向量锚定 + FISTA 残差寻隐 + PPR 图扩散 + DPP 多样性采样
+   * @param queryVector 查询向量
+   * @param config      管线配置（所有字段均可选，有安全默认值）
+   */
+  searchAdvanced(queryVector: Vector, config?: JsSearchConfig): JsSearchHit[];
 
   /**
    * 像类 MongoDB 一样去条件匹配！

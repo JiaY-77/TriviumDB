@@ -56,9 +56,9 @@ python -c "import triviumdb; print('OK')"
 ```toml
 # Cargo.toml
 [dependencies]
-triviumdb = "0.4.0"  # 或者填本地路径 path = "../TriviumDB"
+triviumdb = "0.4.1"  # 或者填本地路径 path = "../TriviumDB"
 # 启用 HNSW 索引
-# triviumdb = { version = "0.4.0", features = ["hnsw"] }
+# triviumdb = { version = "0.4.1", features = ["hnsw"] }
 ```
 
 ### 30 秒入门模板
@@ -244,6 +244,28 @@ db.search(query_vec, top_k=10, expand_depth=1, min_score=0.5)
 | 生产服务（持续写入） | `db.enable_auto_compaction(interval_secs=60)` |
 | 批量导入（一次性） | 不启用，导入完成后手动 `flush()` |
 | 低频写入的查询服务 | `db.enable_auto_compaction(interval_secs=300)` |
+
+### 认知管线 (search_advanced) 开关策略
+
+| 场景 | 建议配置 |
+|------|----------|
+| 纯向量检索（不需要深层认知） | 直接用 `search()`，完全不涉及管线开销 |
+| 向量 + 图扩散（轻量认知） | `search_advanced(enable_advanced_pipeline=True, enable_dpp=False)` |
+| 全流程认知探索（发现隐藏记忆） | `enable_sparse_residual=True` + `enable_dpp=True` |
+| 非常复杂的跨领域记忆查询 | 低 `fista_threshold`（如 0.15）+ 高 `teleport_alpha`（如 0.2）|
+
+```python
+# “简单问答”场景：纯向量 + 图扩散，不需要 FISTA/DPP
+results = db.search(query_vec, top_k=5, expand_depth=2)
+
+# “深度回忆”场景：开启全管线，类似“挑重点+去重复”
+results = db.search_advanced(
+    query_vec, top_k=10, expand_depth=2,
+    enable_advanced_pipeline=True,
+    enable_sparse_residual=True,  # 挖掘隐藏记忆
+    enable_dpp=True,              # 保证结果多样性
+)
+```
 
 ---
 

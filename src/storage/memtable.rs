@@ -138,7 +138,7 @@ impl<T: VectorType> MemTable<T> {
         Ok(id)
     }
 
-    /// 使用外部指定的 ID 插入节点（例如从 PEDSA 导入数据）。
+    /// 使用外部指定的 ID 插入节点（例如从外部知识库导入数据）。
     /// 如果 ID 已存在会返回错误，并且会自动更新内部的 next_id 以免未来冲突。
     pub fn insert_with_id(&mut self, id: NodeId, vector: &[T], payload: serde_json::Value) -> Result<()> {
         if self.payloads.contains_key(&id) {

@@ -1,7 +1,7 @@
 # TriviumDB API 完整参考
 
-> **版本**: v0.4.0 
-> **语言**: Rust 核心 + Python 绑定 (PyO3)  
+> **版本**: v0.4.1  
+> **语言**: Rust 核心 + Python 绑定 (PyO3) + Node.js 绑定 (napi-rs)  
 > **许可**: Apache-2.0
 
 ---
@@ -315,6 +315,81 @@ for hit in &results {
                                   ▼
                            最终排序结果
 ```
+
+---
+
+### search_advanced — 认知管线检索
+
+内置九层认知管线的全功能入口。通过 `SearchConfig` 参数化控制 FISTA 残差寻隐、PPR 图扩散、DPP 多样性采样等高级特性。
+
+**Python：**
+```python
+results = db.search_advanced(
+    query_vector=[0.10, -0.48, 0.80, ...],
+    top_k=10,
+    expand_depth=2,
+    min_score=0.1,
+    teleport_alpha=0.15,          # PPR 回跳概率
+    enable_advanced_pipeline=True, # 总开关
+    enable_sparse_residual=True,   # FISTA 影子查询
+    fista_lambda=0.1,
+    fista_threshold=0.3,
+    enable_dpp=True,               # DPP 多样性采样
+    dpp_quality_weight=1.0,
+)
+for hit in results:
+    print(f"[{hit.id}] score={hit.score:.3f} | {hit.payload}")
+```
+
+**Node.js：**
+```javascript
+const results = db.searchAdvanced(queryVector, {
+    topK: 10,
+    expandDepth: 2,
+    teleportAlpha: 0.15,
+    enableAdvancedPipeline: true,
+    enableSparseResidual: true,
+    enableDpp: true,
+});
+```
+
+**Rust：**
+```rust
+use triviumdb::database::SearchConfig;
+
+let config = SearchConfig {
+    top_k: 10,
+    expand_depth: 2,
+    min_score: 0.1,
+    teleport_alpha: 0.15,
+    enable_advanced_pipeline: true,
+    enable_sparse_residual: true,
+    fista_lambda: 0.1,
+    fista_threshold: 0.3,
+    enable_dpp: true,
+    dpp_quality_weight: 1.0,
+};
+let results = db.search_advanced(&query_vec, &config)?;
+```
+
+**SearchConfig 参数说明：**
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `top_k` | `usize` | `5` | 最终返回的结果数量 |
+| `expand_depth` | `usize` | `2` | 图谱扩散跳数 |
+| `min_score` | `f32` | `0.1` | 余弦相似度下限 |
+| `teleport_alpha` | `f32` | `0.0` | PPR 回跳概率 (0.0~1.0)，越高越抑制深层扩散 |
+| `enable_advanced_pipeline` | `bool` | `false` | 认知管线总开关，关闭时退化为普通检索 |
+| `enable_sparse_residual` | `bool` | `false` | 启用 FISTA 残差寻隐 + 影子查询 |
+| `fista_lambda` | `f32` | `0.1` | FISTA L1 正则化系数 |
+| `fista_threshold` | `f32` | `0.3` | 残差范数超过此值时触发影子查询 |
+| `enable_dpp` | `bool` | `false` | 启用 DPP 多样性采样 |
+| `dpp_quality_weight` | `f32` | `1.0` | DPP 质量权重幂次 |
+
+> 💡 所有参数均内置安全钳位：`teleport_alpha` 被约束在 [0, 1]，`fista_lambda` 在 [1e-5, 100]，`dpp_quality_weight` 在 [0, 10]。传入越界值不会崩溃，而是被静默钳平。
+
+> 💡 当 `enable_advanced_pipeline = false` 时，`search_advanced` 的行为与 `search` 完全一致。
 
 ---
 

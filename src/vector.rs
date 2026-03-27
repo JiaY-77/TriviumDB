@@ -14,6 +14,9 @@ pub trait VectorType:
 
     /// 将单个元素转换为 f32（用于 HNSW 索引等需要统一浮点表示的场景）
     fn to_f32(self) -> f32;
+
+    /// 从 f32 构造单元素（用于产生数学计算后的残差向量等机制）
+    fn from_f32(v: f32) -> Self;
 }
 
 // ════════ SIMD 内核：AVX2 + FMA 余弦相似度 ════════
@@ -140,6 +143,9 @@ impl VectorType for f32 {
 
     #[inline]
     fn to_f32(self) -> f32 { self }
+
+    #[inline]
+    fn from_f32(v: f32) -> Self { v }
 }
 
 // ════════ f16：半精度压缩向量（省 50% 内存） ════════
@@ -157,9 +163,12 @@ impl VectorType for f16 {
 
     #[inline]
     fn to_f32(self) -> f32 { half::f16::to_f32(self) }
+
+    #[inline]
+    fn from_f32(v: f32) -> Self { half::f16::from_f32(v) }
 }
 
-// ════════ u64：二进制哈希向量（如 SimHash / PEDSA ChaosFingerprint） ════════
+// ════════ u64：二进制哈希向量（如 SimHash 或其他指纹） ════════
 impl VectorType for u64 {
     #[inline]
     fn similarity(a: &[u64], b: &[u64]) -> f32 {
@@ -177,4 +186,7 @@ impl VectorType for u64 {
 
     #[inline]
     fn to_f32(self) -> f32 { self as f32 }
+
+    #[inline]
+    fn from_f32(v: f32) -> Self { v as u64 }
 }

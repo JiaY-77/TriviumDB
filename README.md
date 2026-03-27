@@ -24,9 +24,9 @@ TriviumDB 是一个用纯 Rust 编写的**嵌入式单文件数据库引擎**，
 
 - 🗃️ **Rom/Mmap 双引擎切换** —— 既支持单文件 `*.tdb` 复制走人，也支持分离 `.vec` 向量文件按需 mmap 零拷贝加载
 - 🔗 **节点即一切** —— 每个节点天然同时拥有向量、元数据和图关系，ID 全局唯一，绝不错位
-- 🧠 **为 AI 而生** —— 支持"先向量锚定、再沿图谱扩散"的混合检索范式
+- 🧠 **为 AI 而生** —— 支持"先向量锚定、再沿图谱扩散"的混合检索范式，内置九层认知管线（FISTA / DPP / PPR）
 - 🛡️ **四层物理防弹衣** —— 原子替换 + WAL日志 + 事务干跑验证（Dry-Run）+ Mmap COW 隔离，断电断存不毁库
-- 🐍 **Python 原生** —— `pip install` 后直接 `import triviumdb`，类 MongoDB 查询语法
+- 🐍 **Python / Node.js 原生** —— `pip install` 或 `npm install` 后直接使用，类 MongoDB 查询语法
 - ⚡ **多核并行** —— rayon 并行向量扫描 + mmap 零拷贝加载 + 可选 HNSW 索引
 - 💾 **SSD 友好** —— Append-Only WAL + 后台 Compaction 线程，杜绝随机写入磨损
 
@@ -150,6 +150,7 @@ with triviumdb.TriviumDB("memory.tdb", dim=3) as db:
 | 特性                | 说明                                                                        |
 | ------------------- | --------------------------------------------------------------------------- |
 | 🔍 **混合检索**     | 向量锚定 → Top-K → 图谱扩散（Spreading Activation）→ 最终排序               |
+| 🧠 **认知管线**     | 内置九层认知管线：FISTA 残差寻隐 / PPR 图扩散 / DPP 多样性采样，运行时可开关 |
 | 📦 **统一数据模型** | 每个节点同时持有向量（f32×dim）、JSON 元数据和图谱边，共享全局 `u64` 主键   |
 | ⚡ **多核并行**     | rayon 并行向量扫描 + mmap 零拷贝加载 + 可选 HNSW 索引                       |
 | 💾 **双模式存储**   | Mmap（大模型极速分体冷启动） / Rom（传统 SQLite 级单文件打包携带），无缝热切换 |
@@ -158,6 +159,7 @@ with triviumdb.TriviumDB("memory.tdb", dim=3) as db:
 | 🔎 **高级过滤**     | 类 MongoDB 语法：`$eq/$ne/$gt/$lt/$in/$and/$or`                             |
 | 📝 **图谱查询**     | 内置类 Cypher 查询引擎：`MATCH (a)-[:knows]->(b) WHERE b.age > 18 RETURN b` |
 | 🐍 **Python 原生**  | PyO3 绑定，`pip install` 后直接 `import triviumdb`                          |
+| 🌐 **Node.js 原生** | napi-rs 绑定，`npm install` 后直接 `require('triviumdb')`                    |
 
 > 📖 深入了解架构设计和技术细节请查看 **[支持特性详解](docs/features.md)**。
 
@@ -188,8 +190,10 @@ maturin develop --features python
 TriviumDB/
 ├── src/
 │   ├── lib.rs              # 库入口 + 公开 API
-│   ├── database.rs         # Database 核心（Arc<Mutex> 并发安全）
+│   ├── database.rs         # Database 核心（SearchConfig + search_advanced）
+│   ├── cognitive.rs        # 认知算子（FISTA / DPP / NMF）
 │   ├── node.rs             # Node / Edge / SearchHit 数据结构
+│   ├── vector.rs           # VectorType Trait（f32 / f16 / u64）
 │   ├── filter.rs           # 高级过滤引擎 ($gt/$lt/$in/$and/$or)
 │   ├── error.rs            # 统一错误类型
 │   ├── storage/
@@ -201,8 +205,11 @@ TriviumDB/
 │   │   ├── brute_force.rs  # rayon 并行暴力精确搜索
 │   │   └── hnsw.rs         # HNSW 近似搜索 (feature-gated)
 │   ├── graph/
-│   │   └── traversal.rs    # Spreading Activation 图扩散
-│   └── python.rs           # PyO3 绑定（完整 Pythonic API）
+│   │   └── traversal.rs    # PPR 图扩散 (Spreading Activation)
+│   ├── python.rs           # PyO3 绑定（完整 Pythonic API）
+│   └── nodejs.rs           # napi-rs 绑定（完整 TypeScript API）
+├── benches/
+│   └── benchmark.rs        # Criterion 性能基准测试套件
 ├── Cargo.toml
 ├── pyproject.toml          # Maturin 构建配置
 └── README.md
@@ -235,15 +242,18 @@ TriviumDB/
 - [x] Node.js 扩展绑定 (napi-rs)
 - [x] 高级 Payload 过滤扩展 ($exists/$nin/$size/$all/$type)
 - [x] AVX2 + FMA SIMD 加速余弦相似度（运行时自动检测，标量回退）
+- [x] 性能基准测试套件 (Criterion benchmark)
 - [ ] 子图导出 / 批量导入
 - [ ] CLI 工具 (`triviumdb-cli`)
-- [ ] 性能基准测试套件 (benchmark)
 
-### v0.4 — 百万级架构 ✅
+### v0.4 — 百万级架构 + 认知管线 ✅
 
-- [x] Mmap / Rom 双引擎热切换：自适应切换单文件便携模式（Rom）与分离式零拷贝挂载文件（Mmap）
-- [x] 验证前置事务架构 (Dry-Run 原子回滚)：利用虚拟状态叠加预设校验约束，实现零内存碎片、绝对安全的业务侧事务中止
-- [x] Tombstone 占位对齐序列化：重写持久化块对齐，完美避免逻辑删除所引起的中途偏移与错位
+- [x] Mmap / Rom 双引擎热切换
+- [x] 验证前置事务架构 (Dry-Run 原子回滚)
+- [x] Tombstone 占位对齐序列化
+- [x] 认知检索管线内置（FISTA 残差搜索 / PPR 图扩散 / DPP 多样性采样）
+- [x] 运行时可开关 `SearchConfig`，逐查询粒度动态控制管线各层
+- [x] 向量 / 配置 NaN / Inf / 维度容错拦截
 
 ### v0.5 — 千万级扩展（规划中，需权衡利弊）
 

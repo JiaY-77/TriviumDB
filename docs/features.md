@@ -11,11 +11,12 @@
 - [存储引擎](#存储引擎)
 - [向量索引策略](#向量索引策略)
 - [图谱扩散检索](#图谱扩散检索)
+- [认知检索管线](#认知检索管线)
 - [类 MongoDB 过滤引擎](#类-mongodb-过滤引擎)
 - [类 Cypher 查询语言](#类-cypher-查询语言)
 - [崩溃恢复机制](#崩溃恢复机制)
 - [并发安全模型](#并发安全模型)
-- [Python 绑定架构](#python-绑定架构)
+- [多语言绑定架构](#多语言绑定架构)
 
 ---
 
@@ -34,6 +35,9 @@ TriviumDB 采用分层架构，各层职责明确：
 │ 向量索引层 │ 图谱遍历层 │     过滤/查询引擎          │
 │ BruteForce│ Spreading│  MongoDB Filter / Cypher   │
 │   HNSW   │Activation│   Lexer→Parser→Executor    │
+├──────────┴──────────┴────────────────────────────┤
+│          认知管线层 (cognitive.rs)           │
+│     FISTA 残差寻隐 / DPP 多样性采样 / NMF        │
 ├──────────┴──────────┴────────────────────────────┤
 │              内存工作区 (MemTable)                 │
 │       SoA 向量池 + HashMap Payload + 邻接表        │
@@ -202,6 +206,37 @@ results = db.search(
 
 ---
 
+## 认知检索管线
+
+TriviumDB 内置了一套九层认知检索管线。所有数学算子均为纯 Rust 手写，零依赖外部矩阵库。
+
+### 设计哲学
+
+- **可配（Configurable）**：每个数学参数通过 `SearchConfig` 在运行时控制
+- **可关（Runtime Toggleable）**：每条查询独立决定启用哪些层，不是编译期宏
+- **零侵入（Zero-Impact）**：原有22 `search()` API 绝对不受影响，认知功能全部收束在 `search_advanced()` 入口
+
+### 九层管线架构
+
+| 层级 | 功能 | 实现位置 |
+|:---|:---|:---|
+| **L1/L2** | 意图拆分 + 向量召回 | 外部客户端 + MemTable 向量池 |
+| **L3** | NMF 语义分解分析 | `cognitive.rs` · `nmf_multiplicative_update` |
+| **L4/L5** | FISTA 稀疏残差 + 影子查询 | `cognitive.rs` · `fista_solve` + `database.rs` 自动触发 |
+| **L6/L7** | PPR 图扩散 + 共现边权增益 | `graph/traversal.rs` · `teleport_alpha` |
+| **L8** | 时间/重要性重排 | 主动向业务侧让权，不侵入底层 |
+| **L9** | DPP 多样性采样 | `cognitive.rs` · `dpp_greedy` + Cholesky 行列式 |
+
+### 安全拦截层 (Layer 0)
+
+所有进入 `search_advanced` 的查询会首先经过安全拦截：
+
+- **维度检查**：向量维度与库不匹配时立即报错
+- **NaN / Infinity 毒素检测**：向量中包含无效浮点数时扔出清晰错误
+- **参数安全钳位**：`teleport_alpha`、`fista_lambda`、`dpp_quality_weight` 等全部被强制约束在合法数学范围内
+
+---
+
 ## 类 MongoDB 过滤引擎
 
 内置的过滤引擎支持对节点 Payload（JSON）进行复杂条件查询，语法风格接近 MongoDB。
@@ -336,3 +371,7 @@ enum DbBackend {
 ### 数据转换
 
 Python 侧的 `dict` 与 Rust 侧的 `serde_json::Value` 通过 `pyobject_to_json` / `json_to_pyobject` 双向无损转换。支持的 Python 类型：`None` / `bool` / `int` / `float` / `str` / `list` / `dict`。
+
+### Node.js 绑定架构
+
+Node.js 侧通过 `napi-rs` 提供原生扩展，自带完整的 TypeScript 类型定义。同样通过 `DbBackend` 枚举 + `dispatch!` 宏模式实现多类型动态分发。通过 `JsSearchConfig` 结构体暂露完整的认知管线配置。

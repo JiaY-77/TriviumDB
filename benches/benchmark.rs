@@ -1,6 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BatchSize};
 use rand::Rng;
 use triviumdb::Database;
+use triviumdb::database::SearchConfig;
 use serde_json::json;
 use std::fs;
 
@@ -57,6 +58,7 @@ fn bench_search(c: &mut Criterion) {
     }
     // 强制落盘，让搜索测试走 mmap（如果有相关逻辑）或者纯内存
     db.flush().unwrap();
+    drop(db); // Windows 下必需释放文件系统锁，否则后续 open 会崩溃
     
     // 打开只读模式测试读取
     let db_read = Database::open(db_path, dim).unwrap();
@@ -99,6 +101,7 @@ fn bench_hybrid_search(c: &mut Criterion) {
         }
     }
     db.flush().unwrap();
+    drop(db);
 
     let query = generate_vector(dim);
 
@@ -115,5 +118,58 @@ fn bench_hybrid_search(c: &mut Criterion) {
     let _ = fs::remove_file(format!("{}.wal", db_path));
 }
 
-criterion_group!(benches, bench_inserts, bench_search, bench_hybrid_search);
+fn bench_cognitive_pipeline(c: &mut Criterion) {
+    let dim = 128;
+    let db_path = "bench_cognitive.tdb";
+    let _ = fs::remove_file(db_path);
+    let _ = fs::remove_file(format!("{}.wal", db_path));
+
+    let mut db = Database::open(db_path, dim).unwrap();
+    db.disable_auto_compaction();
+
+    let data_size = 5000;
+    println!("Pre-loading {} nodes for cognitive pipeline benchmark...", data_size);
+    let dataset = generate_dataset(data_size, dim);
+    let mut ids = Vec::with_capacity(data_size);
+    for vec in &dataset {
+        ids.push(db.insert(vec, json!({"cognitive": "bench"})).unwrap());
+    }
+    
+    // 生成关联网络以测试漫游
+    let mut rng = rand::thread_rng();
+    for _ in 0..(data_size * 2) {
+        let src = ids[rng.gen_range(0..data_size)];
+        let dst = ids[rng.gen_range(0..data_size)];
+        db.link(src, dst, "synapse", 0.8).unwrap();
+    }
+    db.flush().unwrap();
+    drop(db);
+
+    let query = generate_vector(dim);
+    let config = SearchConfig {
+        top_k: 10,
+        expand_depth: 2,
+        min_score: 0.1,
+        teleport_alpha: 0.2, // 启用 PPR 返回跳散
+        enable_advanced_pipeline: true,
+        enable_sparse_residual: true, // 启用 FISTA 影子查询
+        fista_lambda: 0.1,
+        fista_threshold: 0.2, // 容易触发残差查询
+        enable_dpp: true, // 启用多样性采样
+        dpp_quality_weight: 1.0,
+    };
+
+    let db_read = Database::open(db_path, dim).unwrap();
+
+    c.bench_function("cognitive_search_advanced", |b| {
+        b.iter(|| {
+            db_read.search_advanced(black_box(&query), &config).unwrap()
+        })
+    });
+
+    let _ = fs::remove_file(db_path);
+    let _ = fs::remove_file(format!("{}.wal", db_path));
+}
+
+criterion_group!(benches, bench_inserts, bench_search, bench_hybrid_search, bench_cognitive_pipeline);
 criterion_main!(benches);
