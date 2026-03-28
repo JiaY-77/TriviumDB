@@ -53,12 +53,20 @@ python -c "import triviumdb; print('OK')"
 
 ### Rust 项目集成（原生模式）
 
+你可以直接通过 `cargo add` 命令快速引入最新版本：
+
+```bash
+cargo add triviumdb
+
+# 若需要启用额外的高级特性，如 HNSW 向量索引算法：
+cargo add triviumdb --features hnsw
+```
+
+在 `Cargo.toml` 中也会自动生成如下配置：
+
 ```toml
-# Cargo.toml
 [dependencies]
-triviumdb = "0.4.2"  # 或者填本地路径 path = "../TriviumDB"
-# 启用 HNSW 索引
-# triviumdb = { version = "0.4.2", features = ["hnsw"] }
+triviumdb = "0.4.2" 
 ```
 
 ### 30 秒入门模板
