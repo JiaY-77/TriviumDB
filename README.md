@@ -1,8 +1,8 @@
 <div align="center">
 
-![TriviumDB Banner](./banner.jpg)
+<img src="./banner.jpg" width="100%" alt="TriviumDB Banner"/>
 
-<br/>
+<br/><br/>
 
 <!-- 动态打字效果 Slogan -->
 <a href="https://github.com/YoKONCy/TriviumDB">
