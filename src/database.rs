@@ -1,4 +1,5 @@
 use crate::VectorType;
+use crate::filter::Filter;
 use crate::error::{Result, TriviumError};
 #[cfg(not(feature = "hnsw"))]
 use crate::index::brute_force;
@@ -41,7 +42,7 @@ impl Default for Config {
 }
 
 /// 基于外部参数化配置的查询配置参数矩阵
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SearchConfig {
     pub top_k: usize,
     pub expand_depth: usize,
@@ -77,6 +78,11 @@ pub struct SearchConfig {
     pub enable_text_hybrid_search: bool,
     pub bm25_k1: f32,
     pub bm25_b: f32,
+
+    // --- Payload 预过滤 (向量召回阶段生效) ---
+    /// 可选的 Payload 过滤条件，在向量搜索阶段即可跳过不符合条件的节点。
+    /// 典型用途：多 Agent 隔离（按 agent_id 过滤）。
+    pub payload_filter: Option<Filter>,
 }
 
 impl Default for SearchConfig {
@@ -100,6 +106,7 @@ impl Default for SearchConfig {
             enable_text_hybrid_search: false,
             bm25_k1: 1.2,
             bm25_b: 0.75,
+            payload_filter: None,
         }
     }
 }
@@ -469,7 +476,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         }
 
         // 隔离作用域：强行钳平越界的玄学配置参数，防止底层矩阵求解 Panic 或死循环
-        let mut safe_cfg = *config;
+        let mut safe_cfg = config.clone();
         safe_cfg.top_k = safe_cfg.top_k.max(1);
         safe_cfg.fista_lambda = safe_cfg.fista_lambda.clamp(1e-5, 100.0); // 惩罚太小等于没正则，太大全变0
         safe_cfg.teleport_alpha = safe_cfg.teleport_alpha.clamp(0.0, 1.0); // 必须在 0 - 1 的概率之间
@@ -511,42 +518,49 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 mt.ensure_vectors_cache();
                 let vectors = mt.flat_vectors();
 
+                // 构建 payload 过滤闭包（向量召回阶段预过滤）
+                let filter_ref = config.payload_filter.as_ref();
+                let passes_filter = |id: NodeId| -> bool {
+                    match filter_ref {
+                        None => true,
+                        Some(f) => mt.get_payload(id)
+                            .map_or(false, |p| f.matches(p)),
+                    }
+                };
+
                 if config.enable_bq_coarse_search {
                     // --- BQ 混沌检索分支: L1 1-bit Hamming 粗排 ---
                     let q_bq = crate::index::bq::BqSignature::from_vector(query_vector);
-                    // 必须扫描全部内部槽位（含 tombstone），而非活跃节点数
-                    // 否则删除节点后尾部活跃节点会被漏扫
                     let slot_count = mt.internal_slot_count();
                     let candidate_cnt = (((mt.node_count() as f32) * config.bq_candidate_ratio)
                         .ceil() as usize)
                         .max(config.top_k);
 
                     let mut bq_scores: Vec<(usize, u32)> = (0..slot_count)
-                        .filter(|&i| mt.get_id_by_index(i) != 0) // 跳过 tombstone 槽位
+                        .filter(|&i| {
+                            let id = mt.get_id_by_index(i);
+                            id != 0 && passes_filter(id) // 预过滤
+                        })
                         .filter_map(|i| {
                             mt.get_bq_signature(i)
                                 .map(|sig| (i, sig.hamming_distance(&q_bq)))
                         })
                         .collect();
 
-                    // Hamming 距离越小越好（非严格 Top-K 可以不用完全排序，这里为保证精度采用完全排序后截断）
                     bq_scores.sort_unstable_by_key(|&(_, dist)| dist);
                     bq_scores.truncate(candidate_cnt);
 
                     // --- BQ 混沌检索分支: L2 f32/f16 Cosine 精排 ---
-                    // 这里重用 brute_force 的单次距离点积（由于已经在 cache 里了，直接对这些 index 切片）
                     let mut refined = Vec::with_capacity(candidate_cnt);
                     for (i, _dist) in bq_scores {
                         let offset = i * dim;
-                        // 这里有个隐患如果 offset 越界。因为 m_count 包含了被删除节点空洞。
-                        // 但底层 vec_pool 其实能容纳所有的内部 index。
                         if offset + dim <= vectors.len() {
                             let score = T::similarity(query_vector, &vectors[offset..offset + dim]);
                             if score >= config.min_score {
                                 refined.push(SearchHit {
                                     id: mt.get_id_by_index(i),
                                     score,
-                                    payload: serde_json::Value::Null, // 暂时置空，最后统一组装 payload
+                                    payload: serde_json::Value::Null,
                                 });
                             }
                         }
@@ -566,14 +580,17 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     }
                     refined
                 } else {
-                    // 原生基础全局爆搜
+                    // 原生基础全局爆搜（带预过滤）
                     brute_force::search(
                         query_vector,
                         vectors,
                         dim,
                         config.top_k,
                         config.min_score,
-                        |idx| mt.get_id_by_index(idx),
+                        |idx| {
+                            let id = mt.get_id_by_index(idx);
+                            if passes_filter(id) { id } else { 0 }
+                        },
                     )
                 }
             };

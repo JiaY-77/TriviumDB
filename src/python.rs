@@ -426,7 +426,7 @@ pub mod python {
             )
         }
 
-        #[pyo3(signature = (query_vector, top_k=5, expand_depth=0, min_score=0.5))]
+        #[pyo3(signature = (query_vector, top_k=5, expand_depth=0, min_score=0.5, payload_filter=None))]
         fn search(
             &self,
             py: Python<'_>,
@@ -434,20 +434,35 @@ pub mod python {
             top_k: usize,
             expand_depth: usize,
             min_score: f32,
+            payload_filter: Option<&Bound<'_, PyDict>>,
         ) -> PyResult<Vec<PySearchHit>> {
+            let rust_filter = match payload_filter {
+                Some(dict) => Some(dict_to_filter(py, dict)?),
+                None => None,
+            };
+
+            let config = crate::database::SearchConfig {
+                top_k,
+                expand_depth,
+                min_score,
+                enable_advanced_pipeline: false,
+                payload_filter: rust_filter,
+                ..Default::default()
+            };
+
             let results = match &self.inner {
                 DbBackend::F32(db) => {
                     let vec: Vec<f32> = query_vector.extract()?;
-                    db.search(&vec, top_k, expand_depth, min_score)
+                    db.search_hybrid(None, Some(&vec), &config)
                 }
                 DbBackend::F16(db) => {
                     let vec: Vec<f32> = query_vector.extract()?;
                     let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
-                    db.search(&vec16, top_k, expand_depth, min_score)
+                    db.search_hybrid(None, Some(&vec16), &config)
                 }
                 DbBackend::U64(db) => {
                     let vec: Vec<u64> = query_vector.extract()?;
-                    db.search(&vec, top_k, expand_depth, min_score)
+                    db.search_hybrid(None, Some(&vec), &config)
                 }
             }
             .map_err(|e: crate::error::TriviumError| {
@@ -478,7 +493,8 @@ pub mod python {
             dpp_quality_weight=1.0,
             enable_text_hybrid_search=false,
             text_boost=1.5,
-            custom_query_text=None
+            custom_query_text=None,
+            payload_filter=None
         ))]
         fn search_advanced(
             &self,
@@ -497,7 +513,14 @@ pub mod python {
             enable_text_hybrid_search: bool,
             text_boost: f32,
             custom_query_text: Option<String>,
+            payload_filter: Option<&Bound<'_, PyDict>>,
         ) -> PyResult<Vec<PySearchHit>> {
+            // 解析 payload_filter（类 MongoDB 语法的 dict -> Rust Filter）
+            let rust_filter = match payload_filter {
+                Some(dict) => Some(dict_to_filter(py, dict)?),
+                None => None,
+            };
+
             let config = crate::database::SearchConfig {
                 top_k,
                 expand_depth,
@@ -511,6 +534,7 @@ pub mod python {
                 dpp_quality_weight,
                 enable_text_hybrid_search,
                 text_boost,
+                payload_filter: rust_filter,
                 ..Default::default()
             };
 
@@ -545,7 +569,7 @@ pub mod python {
                 .collect())
         }
 
-        #[pyo3(signature = (query_vector, query_text, top_k=5, expand_depth=2, min_score=0.1, hybrid_alpha=0.7))]
+        #[pyo3(signature = (query_vector, query_text, top_k=5, expand_depth=2, min_score=0.1, hybrid_alpha=0.7, payload_filter=None))]
         fn search_hybrid(
             &self,
             py: Python<'_>,
@@ -555,7 +579,13 @@ pub mod python {
             expand_depth: usize,
             min_score: f32,
             hybrid_alpha: f32,
+            payload_filter: Option<&Bound<'_, PyDict>>,
         ) -> PyResult<Vec<PySearchHit>> {
+            let rust_filter = match payload_filter {
+                Some(dict) => Some(dict_to_filter(py, dict)?),
+                None => None,
+            };
+
             // hybrid_alpha 越大，向量分数占比越高。
             // TriviumDB 底层使用 text_boost = (1.0 - alpha) * 2.5 作为启发式倍率
             let boost = (1.0 - hybrid_alpha).max(0.1) * 3.0;
@@ -565,6 +595,7 @@ pub mod python {
                 min_score,
                 enable_text_hybrid_search: true,
                 text_boost: boost,
+                payload_filter: rust_filter,
                 ..Default::default()
             };
             let results = match &self.inner {

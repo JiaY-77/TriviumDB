@@ -465,6 +465,9 @@ pub mod nodejs {
                 fista_threshold: None,
                 enable_dpp: None,
                 dpp_quality_weight: None,
+                custom_query_text: None,
+                enable_text_hybrid_search: None,
+                text_boost: None,
             });
 
             let core_config = crate::database::SearchConfig {
@@ -589,7 +592,7 @@ pub mod nodejs {
         /// 在批量插入或重启后必须调用，用于重编译自动机与词频
         #[napi]
         pub fn build_text_index(&mut self) {
-            dispatch!(self, mut db => db.build_text_index());
+            let _ = dispatch!(self, mut db => db.build_text_index());
         }
 
         // ── 元数据过滤 ──
