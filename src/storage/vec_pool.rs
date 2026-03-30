@@ -513,7 +513,7 @@ impl<T: VectorType> VecPool<T> {
     pub fn advise_dontneed(&self) {
         #[cfg(unix)]
         if let Some(ref m) = self.mmap {
-            madvise(m, memmap2::Advice::DontNeed);
+            let _ = unsafe { m.unchecked_advise(memmap2::UncheckedAdvice::DontNeed) };
             tracing::debug!("[VecPool] madvise(DONTNEED)：释放 {} MB 冷页",
                 self.mmap_count * self.dim * std::mem::size_of::<T>() / (1024 * 1024)
             );
