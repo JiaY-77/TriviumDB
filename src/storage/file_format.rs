@@ -9,6 +9,47 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
+/// Windows 下应对杀毒软件瞬态文件锁定的原子重命名
+///
+/// 杀毒软件（Windows Defender / 火绒等）会在文件关闭的瞬间以独占模式扫描，
+/// 导致紧随其后的 rename 操作遇到 ERROR_SHARING_VIOLATION (32) 或
+/// ERROR_ACCESS_DENIED (5)。此函数通过短暂指数退避重试来等待杀软释放锁。
+///
+/// 在非 Windows 平台上直接调用 std::fs::rename，零开销。
+fn robust_rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(not(windows))]
+    {
+        return std::fs::rename(from, to);
+    }
+
+    #[cfg(windows)]
+    {
+        let max_retries = 10;
+        let mut delay = std::time::Duration::from_millis(1);
+        for attempt in 0..max_retries {
+            match std::fs::rename(from, to) {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt < max_retries - 1 => {
+                    let os_err = e.raw_os_error();
+                    // ERROR_ACCESS_DENIED (5) 或 ERROR_SHARING_VIOLATION (32)
+                    if os_err == Some(5) || os_err == Some(32) {
+                        tracing::debug!(
+                            "robust_rename: attempt {} failed (os_error={:?}), retrying in {:?}",
+                            attempt + 1, os_err, delay
+                        );
+                        std::thread::sleep(delay);
+                        delay = (delay * 2).min(std::time::Duration::from_millis(50));
+                        continue;
+                    }
+                    return Err(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
+    }
+}
+
 // ══════ 文件头常量 ══════
 const MAGIC: &[u8; 4] = b"TVDB";
 const VERSION: u16 = 2; // v2：支持分层存储与单文件格式
@@ -57,7 +98,7 @@ fn save_mmap<T: VectorType>(memtable: &mut MemTable<T>, path: &str) -> Result<()
         f.write_all(&vec_size.to_le_bytes())?;
         f.sync_all()?;
     }
-    std::fs::rename(&marker_tmp, &marker_path)?;
+    robust_rename(Path::new(&marker_tmp), Path::new(&marker_path))?;
 
     Ok(())
 }
@@ -159,15 +200,14 @@ fn save_tdb<T: VectorType>(
 
     // 2. Payload Block 包含 Tombstones
     for &nid in internal_indices {
-        if nid != 0 {
-            if let Some(p) = memtable.get_payload(nid) {
+        if nid != 0
+            && let Some(p) = memtable.get_payload(nid) {
                 let json_bytes = serde_json::to_vec(p).unwrap_or_default();
                 w.write_all(&nid.to_le_bytes())?;
                 w.write_all(&(json_bytes.len() as u32).to_le_bytes())?;
                 w.write_all(&json_bytes)?;
                 continue;
             }
-        }
         // Tombstone
         w.write_all(&0u64.to_le_bytes())?;
         w.write_all(&0u32.to_le_bytes())?;
@@ -196,7 +236,7 @@ fn save_tdb<T: VectorType>(
     file.sync_all()?;
     drop(file);
 
-    std::fs::rename(&tmp_path, path)?;
+    robust_rename(Path::new(&tmp_path), Path::new(path))?;
 
     tracing::info!(
         "持久化完成: {} 个槽位(含删除), {} 个向量, Mode: {}",
@@ -211,7 +251,7 @@ fn save_tdb<T: VectorType>(
 pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>> {
     let file = File::open(path).map_err(TriviumError::Io)?;
 
-    let mmap = unsafe { Mmap::map(&file) }.map_err(|e| TriviumError::Io(e))?;
+    let mmap = unsafe { Mmap::map(&file) }.map_err(TriviumError::Io)?;
 
     if mmap.len() < HEADER_SIZE as usize {
         return Err(TriviumError::Generic("File too small for header".into()));
@@ -352,7 +392,7 @@ fn load_v1_rom<T: VectorType>(
     )?;
 
     let vec_block = &bytes[vector_offset..vector_offset + expected_vec_size];
-    let is_aligned = (vec_block.as_ptr() as usize) % std::mem::align_of::<T>() == 0;
+    let is_aligned = (vec_block.as_ptr() as usize).is_multiple_of(std::mem::align_of::<T>());
 
     // 因为 load_payloads 已经按内部索引位置推了占位符（包含 Tombstone），
     // 接下来我们只需要把所有的 vector_block 推入 VecPool！

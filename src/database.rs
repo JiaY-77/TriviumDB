@@ -1,6 +1,12 @@
 use crate::VectorType;
 use crate::filter::Filter;
 use crate::error::{Result, TriviumError};
+
+/// HNSW 墓碑 GC 触发阈值（相对于活跃节点总数的比例）
+/// 当自上次重建以来删除的节点数超过活跃节点数的 20%，自动触发全量 rebuild_index
+#[cfg(feature = "hnsw")]
+const HNSW_GC_THRESHOLD_RATIO: f64 = 0.20;
+
 #[cfg(not(feature = "hnsw"))]
 use crate::index::brute_force;
 #[cfg(feature = "hnsw")]
@@ -160,11 +166,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn open_with_config(path: &str, config: Config) -> Result<Self> {
         let dim = config.dim;
         // ═══ 自动递归创建上层目录 ═══
-        if let Some(parent_dir) = std::path::Path::new(path).parent() {
-            if !parent_dir.as_os_str().is_empty() {
+        if let Some(parent_dir) = std::path::Path::new(path).parent()
+            && !parent_dir.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent_dir)?;
             }
-        }
 
         // ═══ 文件锁：防止多进程并发写同一个数据库 ═══
         let lock_path = format!("{}.lock", path);
@@ -187,12 +192,23 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         };
 
         if Wal::needs_recovery(path) {
-            let entries = Wal::read_entries::<T>(path)?;
+            let (entries, valid_offset) = Wal::read_entries::<T>(path)?;
+            
+            // 执行极其关键的物理防串局截断（Truncation）！
+            // 把后续由于 OS 崩溃造成的乱码，或由于断电缺失 TxCommit 的半拉子幽灵事务，彻底从磁盘上抹除！
+            let wal_path = format!("{}.wal", path);
+            let wal_file = std::fs::OpenOptions::new().write(true).open(&wal_path)?;
+            wal_file.set_len(valid_offset)?;
+            wal_file.sync_all()?;
+
             if !entries.is_empty() {
-                tracing::info!("Recovering {} entries from WAL...", entries.len());
+                tracing::info!("Recovering {} entries from WAL, safely truncated at offset {}...", entries.len(), valid_offset);
                 for entry in entries {
                     replay_entry(&mut memtable, entry);
                 }
+            } else {
+                // 如果 entries 为空且触发了 needs_recovery，说明 WAL 全是未提交/损坏的残碎数据
+                tracing::info!("Cleared purely corrupt/uncommitted WAL data, truncated back to {}.", valid_offset);
             }
         }
 
@@ -274,9 +290,39 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         self.compaction.take();
     }
 
+    /// 主动触发全量重写与压实（Manual Compaction）
+    ///
+    /// 阻塞当前线程，将 MemTable 中的数据全量写入 .tdb 和 .vec 文件，
+    /// 并清空旧的 WAL 日志。
+    /// 业务层可以在凌晨或系统空闲时调用，避免后台压实带来的不可控前台延迟。
+    /// 压实结束时强制 rebuild_index，确保 HNSW 图索引中不遗留任何墓碑。
+    pub fn compact(&mut self) -> Result<()> {
+        {
+            let mut mt = lock_or_recover(&self.memtable);
+            tracing::info!("Manual compaction started for {}", self.db_path);
+            file_format::save(&mut mt, &self.db_path, self.storage_mode)?;
+        } // 先释放内存锁，让前台后续读写快速获取
+
+        {
+            let mut w = lock_or_recover(&self.wal);
+            w.clear()?;
+        }
+
+        // 强制 HNSW 完整 GC：此时磁盘已落盘，趁锁释放窗口重建图索引
+        self.rebuild_index();
+
+        tracing::info!("Manual compaction completed for {}", self.db_path);
+        Ok(())
+    }
+
     // ════════ 写操作 ════════
 
     pub fn insert(&mut self, vector: &[T], payload: serde_json::Value) -> Result<NodeId> {
+        let payload_str = payload.to_string();
+        if payload_str.len() > 8 * 1024 * 1024 {
+            return Err(crate::error::TriviumError::Generic("Payload size exceeds maximum allowed limit (8MB)".into()));
+        }
+
         let id = {
             let mut mt = lock_or_recover(&self.memtable);
             mt.insert(vector, payload.clone())?
@@ -286,7 +332,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             w.append(&WalEntry::Insert {
                 id,
                 vector: vector.to_vec(),
-                payload: payload.to_string(),
+                payload: payload_str,
             })?;
         }
         self.check_memory_pressure();
@@ -299,6 +345,11 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         vector: &[T],
         payload: serde_json::Value,
     ) -> Result<()> {
+        let payload_str = payload.to_string();
+        if payload_str.len() > 8 * 1024 * 1024 {
+            return Err(crate::error::TriviumError::Generic("Payload size exceeds maximum allowed limit (8MB)".into()));
+        }
+
         {
             let mut mt = lock_or_recover(&self.memtable);
             mt.insert_with_id(id, vector, payload.clone())?;
@@ -308,7 +359,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             w.append(&WalEntry::Insert {
                 id,
                 vector: vector.to_vec(),
-                payload: payload.to_string(),
+                payload: payload_str,
             })?;
         }
         self.check_memory_pressure();
@@ -341,6 +392,26 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             let mut w = lock_or_recover(&self.wal);
             w.append(&WalEntry::Delete::<T> { id })?;
         }
+
+        // HNSW 墓碑 GC：超阈值自动触发重建，清除图索引中已累积的死节点
+        #[cfg(feature = "hnsw")]
+        {
+            let (deleted, active) = {
+                let mt = lock_or_recover(&self.memtable);
+                (mt.deleted_since_rebuild, mt.node_count())
+            };
+            if active > 0 {
+                let ratio = deleted as f64 / active as f64;
+                if ratio >= HNSW_GC_THRESHOLD_RATIO {
+                    tracing::info!(
+                        "HNSW GC triggered: {} tombstones / {} active nodes ({:.1}% >= {:.0}% threshold), rebuilding index...",
+                        deleted, active, ratio * 100.0, HNSW_GC_THRESHOLD_RATIO * 100.0
+                    );
+                    self.rebuild_index();
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -357,6 +428,11 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn update_payload(&mut self, id: NodeId, payload: serde_json::Value) -> Result<()> {
+        let payload_str = payload.to_string();
+        if payload_str.len() > 8 * 1024 * 1024 {
+            return Err(crate::error::TriviumError::Generic("Payload size exceeds maximum allowed limit (8MB)".into()));
+        }
+
         {
             let mut mt = lock_or_recover(&self.memtable);
             mt.update_payload(id, payload.clone())?;
@@ -365,7 +441,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             let mut w = lock_or_recover(&self.wal);
             w.append(&WalEntry::UpdatePayload::<T> {
                 id,
-                payload: payload.to_string(),
+                payload: payload_str,
             })?;
         }
         Ok(())
@@ -454,6 +530,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         query_vector: Option<&[T]>,
         config: &SearchConfig,
     ) -> Result<Vec<SearchHit>> {
+        #[allow(unused_mut)]
         let mut mt = lock_or_recover(&self.memtable);
 
         // --- 0. 容错与防御式编程 (Sanity Checks) ---
@@ -491,8 +568,8 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         let mut seed_map: std::collections::HashMap<NodeId, f32> = std::collections::HashMap::new();
 
         // 1. 如果有文本且开启文本引擎
-        if config.enable_text_hybrid_search {
-            if let Some(txt) = query_text {
+        if config.enable_text_hybrid_search
+            && let Some(txt) = query_text {
                 let text_engine = mt.text_engine();
                 // 1.1 精准 AC 命中
                 let ac_hits = text_engine.search_ac(txt);
@@ -508,7 +585,6 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     *seed_map.entry(id).or_insert(0.0) += normalized_score;
                 }
             }
-        }
 
         // 2. 如果存在向量查询，进入数学多层筛选管线
         if let Some(query_vector) = query_vector {
@@ -604,8 +680,8 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 *seed_map.entry(hit.id).or_insert(0.0) += hit.score;
             }
 
-            if config.enable_advanced_pipeline {
-                if config.enable_sparse_residual && !seed_map.is_empty() {
+            if config.enable_advanced_pipeline
+                && config.enable_sparse_residual && !seed_map.is_empty() {
                     // --- L4 FISTA Sparse Residual ---
                     let entity_vecs: Vec<Vec<f32>> = seed_map
                         .keys()
@@ -656,17 +732,24 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                         }
                     }
                 }
-            }
         }
 
         // 将混合融合收集的所有 seed_map 对象转换为 `anchor_hits` 进入后处理
+        let filter_ref = config.payload_filter.as_ref();
         for (id, score) in seed_map {
             if score >= config.min_score {
-                let payload = mt
-                    .get_payload(id)
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                anchor_hits.push(SearchHit { id, score, payload });
+                // 确保所有来源（文本/HNSW/残差）的结果都在最终聚合前经过过滤检查
+                let passes = match filter_ref {
+                    None => true,
+                    Some(f) => mt.get_payload(id).is_some_and(|p| f.matches(p)),
+                };
+                if passes {
+                    let payload = mt
+                        .get_payload(id)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    anchor_hits.push(SearchHit { id, score, payload });
+                }
             }
         }
         anchor_hits.sort_by(|a, b| {
@@ -786,8 +869,8 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         let mt = lock_or_recover(&self.memtable);
         let mut results = Vec::new();
         for nid in mt.all_node_ids() {
-            if let Some(payload) = mt.get_payload(nid) {
-                if payload.get(key) == Some(value) {
+            if let Some(payload) = mt.get_payload(nid)
+                && payload.get(key) == Some(value) {
                     let vector = mt.get_vector(nid).unwrap_or(&[]).to_vec();
                     let edges = mt.get_edges(nid).unwrap_or(&[]).to_vec();
                     results.push(crate::node::NodeView {
@@ -797,7 +880,6 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                         edges,
                     });
                 }
-            }
         }
         results
     }
@@ -806,8 +888,8 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         let mt = lock_or_recover(&self.memtable);
         let mut results = Vec::new();
         for nid in mt.all_node_ids() {
-            if let Some(payload) = mt.get_payload(nid) {
-                if condition.matches(payload) {
+            if let Some(payload) = mt.get_payload(nid)
+                && condition.matches(payload) {
                     let vector = mt.get_vector(nid).unwrap_or(&[]).to_vec();
                     let edges = mt.get_edges(nid).unwrap_or(&[]).to_vec();
                     results.push(crate::node::NodeView {
@@ -817,7 +899,6 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                         edges,
                     });
                 }
-            }
         }
         results
     }
@@ -870,6 +951,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     ///
     /// 仅在启用 `hnsw` feature 时有效。BruteForce 模式下调用此方法为 no-op。
     /// 通常在批量插入完成后调用一次，以构建高效的近似搜索索引。
+    /// 此方法也是 HNSW 墓碑 GC 的执行点：重建完成后会重置删除计数器。
     pub fn rebuild_index(&mut self) {
         #[cfg(feature = "hnsw")]
         {
@@ -886,7 +968,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     mt.contains(nid)
                 },
             );
-            tracing::info!("HNSW 索引重建完成，共 {} 个活跃节点", mt.node_count());
+            // GC 完成：图索引已清洁，重置墓碑计数器
+            mt.reset_deleted_since_rebuild();
+            tracing::info!("HNSW 索引重建完成，共 {} 个活跃节点，GC 计数器已清零", mt.node_count());
         }
         #[cfg(not(feature = "hnsw"))]
         {
@@ -1208,6 +1292,12 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
                             got: vector.len(),
                         });
                     }
+                    for item in vector {
+                        let f = item.to_f32();
+                        if f.is_nan() || f.is_infinite() {
+                            return Err(crate::error::TriviumError::Generic("Vector contains NaN or Infinity".into()));
+                        }
+                    }
                     pre_assigned_ids.push(Some(sim_next_id));
                     pending_ids.insert(sim_next_id);
                     sim_next_id += 1;
@@ -1224,6 +1314,12 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
                             expected: dim,
                             got: vector.len(),
                         });
+                    }
+                    for item in vector {
+                        let f = item.to_f32();
+                        if f.is_nan() || f.is_infinite() {
+                            return Err(crate::error::TriviumError::Generic("Vector contains NaN or Infinity".into()));
+                        }
                     }
                     pre_assigned_ids.push(Some(*id));
                     pending_ids.insert(*id);
@@ -1269,6 +1365,12 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
                             got: vector.len(),
                         });
                     }
+                    for item in vector {
+                        let f = item.to_f32();
+                        if f.is_nan() || f.is_infinite() {
+                            return Err(crate::error::TriviumError::Generic("Vector contains NaN or Infinity".into()));
+                        }
+                    }
                     pre_assigned_ids.push(None);
                 }
             }
@@ -1282,11 +1384,15 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
             match op {
                 TxOp::Insert { vector, payload } => {
                     let id = pre_assigned_ids[i].unwrap();
+                    let payload_str = payload.to_string();
+                    if payload_str.len() > 8 * 1024 * 1024 {
+                        return Err(crate::error::TriviumError::Generic("Payload size exceeds maximum allowed limit (8MB)".into()));
+                    }
                     generated_ids.push(id);
                     wal_entries.push(WalEntry::Insert {
                         id,
                         vector: vector.clone(),
-                        payload: payload.to_string(),
+                        payload: payload_str,
                     });
                 }
                 TxOp::InsertWithId {
@@ -1294,11 +1400,15 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
                     vector,
                     payload,
                 } => {
+                    let payload_str = payload.to_string();
+                    if payload_str.len() > 8 * 1024 * 1024 {
+                        return Err(crate::error::TriviumError::Generic("Payload size exceeds maximum allowed limit (8MB)".into()));
+                    }
                     generated_ids.push(*id);
                     wal_entries.push(WalEntry::Insert {
                         id: *id,
                         vector: vector.clone(),
-                        payload: payload.to_string(),
+                        payload: payload_str,
                     });
                 }
                 TxOp::Link {
@@ -1324,9 +1434,13 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
                     });
                 }
                 TxOp::UpdatePayload { id, payload } => {
+                    let payload_str = payload.to_string();
+                    if payload_str.len() > 8 * 1024 * 1024 {
+                        return Err(crate::error::TriviumError::Generic("Payload size exceeds maximum allowed limit (8MB)".into()));
+                    }
                     wal_entries.push(WalEntry::UpdatePayload {
                         id: *id,
-                        payload: payload.to_string(),
+                        payload: payload_str,
                     });
                 }
                 TxOp::UpdateVector { id, vector } => {

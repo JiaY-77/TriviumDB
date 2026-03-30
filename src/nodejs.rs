@@ -454,7 +454,7 @@ pub mod nodejs {
             query_vector: Vec<f64>,
             config: Option<JsSearchConfig>,
         ) -> napi::Result<Vec<JsSearchHit>> {
-            let cfg = config.unwrap_or_else(|| JsSearchConfig {
+            let cfg = config.unwrap_or(JsSearchConfig {
                 top_k: None,
                 expand_depth: None,
                 min_score: None,
@@ -705,6 +705,13 @@ pub mod nodejs {
         #[napi]
         pub fn disable_auto_compaction(&mut self) {
             dispatch!(self, mut db => db.disable_auto_compaction());
+        }
+
+        /// 手动触发全量压实（阻塞当前线程）
+        #[napi]
+        pub fn compact(&mut self) -> napi::Result<()> {
+            dispatch!(self, mut db => db.compact())
+                .map_err(|e| napi::Error::from_reason(e.to_string()))
         }
 
         /// 设置内存上限（MB），0 = 无限制

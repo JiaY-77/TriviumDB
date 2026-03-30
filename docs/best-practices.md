@@ -17,6 +17,7 @@
 - [避坑指南](#避坑指南)
 - [模型升级与维度迁移](#模型升级与维度迁移)
 - [HNSW 索引重建策略](#hnsw-索引重建策略)
+- [架构边界认知与规避策略](#架构边界认知与规避策略)
 
 ---
 
@@ -317,6 +318,17 @@ If this is unexpected, delete 'data.tdb.lock'
 1. 确认没有其他进程在使用该数据库
 2. 如果进程异常退出残留了锁文件，手动删除 `data.tdb.lock`
 
+### 为什么采用全独占锁定（Exclusive Lock）？
+
+这主要是由于 TriviumDB 的底层架构定位与内存特性决定的：
+
+1. **Agent 私有记忆仓库的定位**：TriviumDB 的核心使用场景是为每一个 AI Agent 或本地应用分配独立专属的“记忆仓库”。在绝大多数情况下，一个 Agent 不会在文件级别与外部毫无关联的进程“共享同一个脑子”。
+2. **Mmap 内存映射的一致性边界**：由于底层采用了 `Mmap` 模式将多达 GB 级的向量文件直接映射入进程的虚拟内存空间，如果在缺乏复杂协调中心的情况下允许多个进程同时改写同一物理文件，要保持它们之间的内存状态完全同步（例如让进程 B 实时知晓进程 A 刚更新了某一块页表内存）工程复杂度将会呈指数级上升。
+
+相比引入重型的跨进程内存通信与多版本控制架构（这会使其直接变成一头 MySQL 级别的庞然大物），TriviumDB 选择了**“极其精简与安全第一”**的全文件级独占锁定策略，以换取极小的二进制体积、极速的启动加载与随手拷贝的零运维体验。
+
+**如果确实存在多端读写或高并发共享的需求，请遵循嵌入式数据库的最佳实践：多线程调度、读写仲裁、锁的抢占等复杂机制，应由外部业务逻辑或应用服务进行设计（如通过单例模式封装连接池，或在应用程序外层架设统一的 RESTful API 网关代理）。存储引擎本身的职责是坚守绝对的数据一致性边界。**
+
 ---
 
 ## 事务最佳实践
@@ -605,3 +617,174 @@ with triviumdb.TriviumDB("data.tdb", dim=768, sync_mode="off") as db:
 ```
 
 > 💡 `rebuild_index()` 是同步操作，重建期间会持有 MemTable 读锁。对于百万级节点建议在低峰期执行。
+
+---
+
+## 架构边界认知与规避策略
+
+TriviumDB 是一款经过深度取舍、专为 AI 嵌入式记忆场景设计的存储引擎，而不是通用关系型数据库。理解下面这些固有的架构边界，并采用合适的应用层手段对冲，是生产环境稳定运行的前提。
+
+---
+
+### 一、内存占用：Payload 精简原则
+
+**边界**：向量数据通过 Mmap 按需换入，OS 只加载被访问的 Page，不占满全部物理内存。然而 Payload（JSON 元数据）和图关系边（`HashMap`）是**全量常驻内存**的结构。若每个节点存储了几 KB 甚至几十 KB 的大文本对象，百万节点规模下将会出现数 GB 级别的 RAM 消耗。
+
+**规避策略**：
+
+1. **Payload 只存检索需要的字段**，长文本正文单独存入外部存储（如文件、对象存储），Payload 只记录指针或摘要：
+
+```python
+# ❌ 不推荐：把完整文章正文塞进 payload
+db.insert(vec, {
+    "title": "量子计算入门",
+    "full_text": "量子计算是一种利用量子力学现象...（5000字）",
+})
+
+# ✅ 推荐：payload 只保留用于过滤和展示的关键字段
+doc_id = save_to_external_storage(full_text)  # 存 S3/本地文件/数据库
+db.insert(vec, {
+    "title": "量子计算入门",
+    "doc_id": doc_id,   # 指向外部存储的 ID
+    "type": "article",
+    "ts": 1711440000,
+})
+```
+
+2. **使用 `set_memory_limit()` 设置内存上限**，引擎会在超限时自动触发 flush 将向量 delta 写回磁盘，释放增量层内存：
+
+```python
+db.set_memory_limit(mb=512)
+```
+
+3. **对于 payload 体积不可控的场景**，使用 `dtype="f16"` 将向量内存减半，为 payload 腾出空间：
+
+```python
+db = triviumdb.TriviumDB("data.tdb", dim=1536, dtype="f16")  # 向量内存减半
+```
+
+---
+
+### 二、字段索引：利用向量检索"缩圈"策略
+
+**边界**：TriviumDB 目前**只对节点 ID 建立了 O(1) 哈希索引**。对 JSON Payload 中任意字段的过滤（如 `filter_where({"name": "Alice"})`）在底层是全表 O(N) 扫描。在千万节点规模下，对非 ID 字段的单次 Cypher 查询可能出现明显延迟。
+
+> 💡 对 JSON 字段建立 B-Tree 或 Hash 索引（`create_index("field_name")`）是已规划中的路线图功能，尚未实现。
+
+**规避策略**：
+
+遵循 TriviumDB 的**正确使用范式**——在绝大多数 AI 检索场景中，不应该直接用 Payload 字段作为主入口，而应先用向量检索将候选集缩小到几十个节点，再在小候选集上做条件过滤：
+
+```python
+# ❌ 低效：直接用 Payload 字段全量扫描（O(N)，节点多时慢）
+all_alices = db.filter_where({"name": "Alice"})
+
+# ✅ 高效：先向量检索缩圈，再在 top_k 候选集上过滤（O(K)，K 极小）
+candidates = db.search(encode("Alice 的个人介绍"), top_k=20, expand_depth=0)
+alices = [hit for hit in candidates if hit.payload.get("name") == "Alice"]
+
+# ✅ 或者：对已知 ID 用 O(1) 直接定位
+node = db.get(known_id)
+```
+
+对于确实需要高频全表 Payload 过滤的业务场景（如统计报表），建议在外部维护一份关系型数据库（SQLite / PostgreSQL）同步记录关键字段索引，由 TriviumDB 负责语义检索，外部数据库负责精确过滤，实现互补。
+
+---
+
+### 三、Cypher 子集：定位是"图谱导航"而非完整图查询语言
+
+**边界**：TriviumDB 内置的类 Cypher 查询引擎支持 `MATCH`、`WHERE`、`RETURN` 等基础语法，**不支持** `UNWIND`、`OPTIONAL MATCH`、聚合函数、路径算法等高级语法。它不是 Neo4j 的替代品。
+
+**正确定位**：TriviumDB 的 Cypher 引擎的设计职责是在**向量检索已完成锚点定位后，沿已知图谱结构做精准的结构化跳转**。这类查询通常只有 1~3 跳，节点集极小，根本不需要复杂的查询计划器。
+
+```python
+# TriviumDB Cypher 的正确用法：向量找锚，Cypher 做图谱扩散导航
+anchor_id = db.search(encode("小明的工作关系"), top_k=1)[0].id
+
+# 从锚点出发做结构化导航（O(1) 起跳 + BFS）
+rows = db.query(f'MATCH (a {{id: {anchor_id}}})-[:colleague]->(b) RETURN b')
+```
+
+对于需要复杂图算法（最短路径、社区发现、PageRank）的场景，TriviumDB 内置的**扩散激活（Spreading Activation）+ PPR（Personalized PageRank）**认知管线已覆盖了 AI 场景下最实用的图语义传播需求，且比纯 Cypher 查询更具 AI 语义感知能力：
+
+```python
+results = db.search_advanced(
+    query_vector=vec,
+    expand_depth=3,
+    teleport_alpha=0.15,   # PPR 回跳概率，等效于图算法中的 PageRank 阻尼因子
+    enable_advanced_pipeline=True,
+)
+```
+
+---
+
+### 四、WAL 回放与启动延迟：定时提交策略
+
+**边界**：如果长期进行写操作但从未调用 `flush()`，所有变更都会堆积在 `.wal` 文件里。下次启动时，引擎需要逐条回放这些日志来重建内存状态，积累越多，启动越慢。
+
+**规避策略**：
+
+这个问题在现有机制下**完全可以消除**，关键在于让 WAL 不要堆积太多：
+
+```python
+# ✅ 方案 A：启动后台自动压实（推荐生产环境）
+# 每 60 秒自动落盘，WAL 永远不会超过 60 秒的写入量
+db.enable_auto_compaction(interval_secs=60)
+
+# ✅ 方案 B：对延迟敏感的服务（关闭自动，在低峰期手动触发）
+db.disable_auto_compaction()
+# 在业务调度（如 cron 凌晨 3 点）中调用：
+db.compact()   # 阻塞式全量压实 + 清空 WAL
+
+# ✅ 方案 C：分批写入时配合内存上限（适合持续写入场景）
+db.set_memory_limit(mb=256)  # 超限后自动 flush，同步清空 delta
+```
+
+| 场景 | 推荐方案 | 启动 WAL 回放量 |
+|------|----------|----------------|
+| 实时 AI 服务 | 方案 A（60s 自动压实） | ≤ 60 秒写入量 |
+| 批量导入 + 夜间维护 | 方案 B（手动 compact） | 几乎为零 |
+| 持续内存受限写入 | 方案 C（内存上限触发） | 极小 |
+
+---
+
+### 五、弱类型 Payload：应用层 Schema 约束规范
+
+**边界**：Payload 是纯 JSON，TriviumDB 引擎本身**不做任何 Schema 校验**。同一个字段在不同节点上可能类型不一致（如 `"age": 20` 和 `"age": "20"`），这不会触发引擎报错，但会导致 `filter_where` 过滤时静默地漏掉数据。
+
+**规避策略**：
+
+Schema 约束的正确位置是**应用层调用 API 之前**，而不是数据库引擎层。建议定义一套简单的插入辅助函数作为统一入口，在其中强制类型校验：
+
+```python
+from typing import Any
+import time
+
+def insert_memory(db, vec: list[float], text: str, metadata: dict[str, Any] = None):
+    """统一的记忆插入入口——强制 Schema 约束"""
+    payload = {
+        "text": str(text),        # 强制 str
+        "ts": int(time.time()),   # 强制 int
+        "type": "memory",         # 强制存在
+    }
+    if metadata:
+        # 强制校验扩展字段的类型
+        for k, v in metadata.items():
+            if k == "importance" and not isinstance(v, (int, float)):
+                raise TypeError(f"importance 字段必须是数字，got {type(v)}")
+            payload[k] = v
+    return db.insert(vec, payload)
+
+# 所有写入都通过这个统一入口，而不是直接调用 db.insert
+node_id = insert_memory(db, embedding, "今天和小红喝了咖啡", {"importance": 0.8})
+```
+
+此外，对于 Payload 过滤，在查询时可以显式做类型保护：
+
+```python
+# ⚠️ 不安全：age 字段可能是 str 或 int
+adults = db.filter_where({"age": {"$gt": 18}})
+
+# ✅ 安全：在过滤前统一做类型保证（应用层约束）
+# 插入时: payload["age"] = int(age)  ← 写入时就确保是整数
+```

@@ -41,9 +41,35 @@ pub struct MemTable<T: VectorType> {
     // 用于在 vectors 数组里定位数据位置
     indices_to_ids: Vec<NodeId>,
     ids_to_indices: HashMap<NodeId, usize>,
+
+    // HNSW 墓碑 GC 计数器：记录自上次 rebuild_index 以来被删除的节点数
+    // 当此值超过活跃节点数的 HNSW_GC_THRESHOLD_RATIO 时，应触发自动重建
+    pub deleted_since_rebuild: usize,
 }
 
 impl<T: VectorType> MemTable<T> {
+    /// 内部辅助：校验向量中是否包含 NaN 或 Infinity
+    ///
+    /// **为什么在写入时检查而不是查询时？**
+    /// NaN 进入 mmap 基础层后会永久残留。在 BruteForce 并行昦描时，
+    /// `score >= min_score`（NaN 比较永远为 false）会静默将该节点永久消失于检索结果，
+    /// 且权会无任何错误提示。一旦进入就难以排查。
+    ///
+    /// `raw_insert` 是内部恢复路径（WAL 回放 / 文件重建），剛意不加此检查。
+    #[inline]
+    fn validate_vector(vector: &[T]) -> Result<()> {
+        for elem in vector {
+            let f = elem.to_f32();
+            if f.is_nan() || f.is_infinite() {
+                return Err(TriviumError::Generic(
+                    "Vector contains NaN or Infinity; insert rejected to prevent silent search corruption"
+                        .into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(dim: usize) -> Self {
         Self {
             dim,
@@ -57,6 +83,7 @@ impl<T: VectorType> MemTable<T> {
             in_degrees: HashMap::new(),
             indices_to_ids: Vec::new(),
             ids_to_indices: HashMap::new(),
+            deleted_since_rebuild: 0,
         }
     }
 
@@ -81,6 +108,7 @@ impl<T: VectorType> MemTable<T> {
             in_degrees: HashMap::new(),
             indices_to_ids: Vec::new(),
             ids_to_indices: HashMap::new(),
+            deleted_since_rebuild: 0,
         }
     }
 
@@ -153,6 +181,7 @@ impl<T: VectorType> MemTable<T> {
                 got: vector.len(),
             });
         }
+        Self::validate_vector(vector)?;
 
         let id = self.next_id;
         self.next_id += 1;
@@ -188,6 +217,7 @@ impl<T: VectorType> MemTable<T> {
                 got: vector.len(),
             });
         }
+        Self::validate_vector(vector)?;
 
         // 推入 VecPool 并映射
         let idx = self.indices_to_ids.len();
@@ -323,7 +353,16 @@ impl<T: VectorType> MemTable<T> {
         // BQ 签名已过期，标记需要重建
         self.bq_dirty = true;
 
+        // HNSW GC 计数器递增：此删除使图索引中产生了一个永久墓碑
+        self.deleted_since_rebuild += 1;
+
         Ok(())
+    }
+
+    /// 重置 HNSW 墓碑 GC 计数器（在 rebuild_index 完成后调用）
+    #[inline]
+    pub fn reset_deleted_since_rebuild(&mut self) {
+        self.deleted_since_rebuild = 0;
     }
 
     /// 断开两个节点之间的指定边
@@ -366,6 +405,7 @@ impl<T: VectorType> MemTable<T> {
                 got: vector.len(),
             });
         }
+        Self::validate_vector(vector)?;
         // 必须同时检查 payload 存在性：delete() 会移除 payload 但保留 ids_to_indices，
         // 仅检查索引表会让 tombstone 节点被错误更新
         if !self.payloads.contains_key(&id) {
@@ -478,16 +518,15 @@ impl<T: VectorType> MemTable<T> {
         for (&id, payload) in &self.payloads {
             if let serde_json::Value::Object(map) = payload {
                 for (_key, value) in map {
-                    if let serde_json::Value::String(text) = value {
-                        if !text.is_empty() {
+                    if let serde_json::Value::String(text) = value
+                        && !text.is_empty() {
                             self.text_index.add_text(id, text);
                         }
-                    }
                 }
             }
         }
         self.text_index.build();
-        if self.payloads.len() > 0 {
+        if !self.payloads.is_empty() {
             tracing::info!(
                 "TextIndex 从 {} 个节点的 payload 自动重建完成",
                 self.payloads.len()

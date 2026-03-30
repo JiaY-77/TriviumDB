@@ -555,12 +555,12 @@ db.set_sync_mode("off")    # 批量导入时临时提速
 
 ### enable_auto_compaction — 后台自动压缩
 
-启动后台守护线程，定时执行 flush + WAL 清理。
+启动后台守护线程，定时在后台串行化执行数据压缩与全量落盘（包含 `flush` + WAL 截断清理）。
 
 **Python：**
 ```python
-db.enable_auto_compaction(interval_secs=30)  # 每 30 秒自动落盘
-db.disable_auto_compaction()                  # 停止
+db.enable_auto_compaction(interval_secs=30)  # 每 30 秒后台自动落盘
+db.disable_auto_compaction()                 # 停止后台压缩线程
 ```
 
 **Rust：**
@@ -568,6 +568,22 @@ db.disable_auto_compaction()                  # 停止
 db.enable_auto_compaction(Duration::from_secs(30));
 db.disable_auto_compaction();
 ```
+
+### compact — 手动强制压实 (Manual Compaction)
+
+主动触发一次全量数据重写与压实。**此调用会阻塞当前线程**，直到所有的内存数据被安全落盘，并彻底截断清理旧的 WAL 文件。
+为了极致的崩溃安全性，执行压实时会短暂阻塞前台读写。强烈建议在关闭了自动压缩后，于业务低峰期（如凌晨调度）执行此方法。
+
+**Python：**
+```python
+db.compact()
+```
+
+**Rust：**
+```rust
+db.compact()?;
+```
+
 
 ---
 

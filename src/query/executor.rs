@@ -19,17 +19,18 @@ pub type QueryResult<T> = Vec<HashMap<String, Node<T>>>;
 pub fn execute<T: VectorType>(query: &Query, memtable: &MemTable<T>) -> QueryResult<T> {
     let pattern = &query.pattern;
 
-    // 步骤 1：确定起始候选节点
+    // 步骤 1：确定起始候选节点 IDs
     let first_node_pat = &pattern.nodes[0];
-    let start_candidates = find_candidates(first_node_pat, memtable);
+    let start_candidates_ids = find_candidates_ids(first_node_pat, memtable);
 
     // 步骤 2：从起点出发，逐层匹配 edge → node → edge → node ...
-    let mut bindings_set: Vec<HashMap<String, Node<T>>> = Vec::new();
+    // 🚀 OOM 防御：我们只在中间计算层存储 NodeId，绝对不克隆包含 Vector 和 Payload 的巨型 Node 结构！
+    let mut bindings_set: Vec<HashMap<String, u64>> = Vec::new();
 
-    for start_node in start_candidates {
-        let mut binding: HashMap<String, Node<T>> = HashMap::new();
+    for start_id in start_candidates_ids {
+        let mut binding = HashMap::new();
         if let Some(var) = &first_node_pat.var {
-            binding.insert(var.clone(), start_node.clone());
+            binding.insert(var.clone(), start_id);
         }
         bindings_set.push(binding);
     }
@@ -38,47 +39,40 @@ pub fn execute<T: VectorType>(query: &Query, memtable: &MemTable<T>) -> QueryRes
     for i in 0..pattern.edges.len() {
         let edge_pat = &pattern.edges[i];
         let next_node_pat = &pattern.nodes[i + 1];
-        let mut next_bindings = Vec::new();
+        let mut next_bindings = Vec::with_capacity(bindings_set.len());
 
         for binding in &bindings_set {
             // 找到当前层最后一个有名字的节点
             let current_node_pat = &pattern.nodes[i];
-            let current_node = if let Some(var) = &current_node_pat.var {
-                binding.get(var)
+            let current_id = if let Some(var) = &current_node_pat.var {
+                match binding.get(var) {
+                    Some(&id) => id,
+                    None => continue,
+                }
             } else {
-                None
-            };
-
-            let current_id = match current_node {
-                Some(n) => n.id,
-                None => continue,
+                continue;
             };
 
             // 沿边扩展
             if let Some(edges) = memtable.get_edges(current_id) {
                 for edge in edges {
                     // 边标签过滤
-                    if let Some(ref label) = edge_pat.label {
-                        if &edge.label != label {
+                    if let Some(ref label) = edge_pat.label
+                        && &edge.label != label {
                             continue;
                         }
-                    }
 
-                    // 获取目标节点
                     let target_id = edge.target_id;
-                    let target_node = match build_node(target_id, memtable) {
-                        Some(n) => n,
-                        None => continue,
-                    };
 
                     // 节点属性内联过滤
-                    if !matches_node_props(&target_node, next_node_pat) {
+                    if !matches_node_props_by_id(target_id, next_node_pat, memtable) {
                         continue;
                     }
 
+                    // 仅克隆 HashMap<String, u64>
                     let mut new_binding = binding.clone();
                     if let Some(var) = &next_node_pat.var {
-                        new_binding.insert(var.clone(), target_node);
+                        new_binding.insert(var.clone(), target_id);
                     }
                     next_bindings.push(new_binding);
                 }
@@ -90,31 +84,30 @@ pub fn execute<T: VectorType>(query: &Query, memtable: &MemTable<T>) -> QueryRes
 
     // 步骤 3：应用 WHERE 过滤
     if let Some(ref condition) = query.where_clause {
-        bindings_set.retain(|binding| eval_condition(condition, binding));
+        bindings_set.retain(|binding| eval_condition_by_id(condition, binding, memtable));
     }
 
-    // 步骤 4：仅保留 RETURN 中请求的变量
+    // 步骤 4：仅保留 RETURN 中请求的变量，并在此时才进行最终节点的装载（Lazy Evaluation）
     let return_vars = &query.return_vars;
     bindings_set
-        .iter()
-        .map(|binding: &HashMap<String, Node<T>>| {
+        .into_iter()
+        .map(|binding| {
             let mut filtered: HashMap<String, Node<T>> = HashMap::new();
             for var in return_vars {
-                if let Some(node) = binding.get(var) {
-                    filtered.insert(var.clone(), node.clone());
-                }
+                if let Some(&id) = binding.get(var)
+                    && let Some(node) = build_node(id, memtable) {
+                        filtered.insert(var.clone(), node);
+                    }
             }
             filtered
         })
         .collect()
 }
 
-fn find_candidates<T: VectorType>(node_pat: &NodePattern, memtable: &MemTable<T>) -> Vec<Node<T>> {
+fn find_candidates_ids<T: VectorType>(node_pat: &NodePattern, memtable: &MemTable<T>) -> Vec<u64> {
     let mut candidates = Vec::new();
 
     // 🏆 P0 优化：O(1) 主键索引短路扫描
-    // 如果用户的 Cypher 包含确切的 ID，例如：MATCH (a {id: 42})
-    // 我们直接进入 O(1) 的 HashMap get，而不需要全表扫描！
     let exact_id = node_pat.props.iter().find(|p| p.key == "id").and_then(|p| {
         if let LitValue::Int(tid) = &p.value {
             Some(*tid as u64)
@@ -124,30 +117,66 @@ fn find_candidates<T: VectorType>(node_pat: &NodePattern, memtable: &MemTable<T>
     });
 
     if let Some(id) = exact_id {
-        if let Some(node) = build_node(id, memtable) {
-            // 还需要确认通过了包含这个 id 在内的所有 props 的核验（例如有多组合条件）
-            if matches_node_props(&node, node_pat) {
-                candidates.push(node);
+        if memtable.contains(id)
+            && matches_node_props_by_id(id, node_pat, memtable) {
+                candidates.push(id);
             }
-        }
         return candidates;
     }
 
-    // 📉 O(N) 全表扫描（当无法走索引时回退）
+    // 📉 O(N) 全表扫描（暂无字段级索引时的妥协方案）
     let all_ids = memtable.all_node_ids();
     for id in all_ids {
-        if let Some(node) = build_node(id, memtable) {
-            // 检查内联属性过滤
-            if matches_node_props(&node, node_pat) {
-                candidates.push(node);
-            }
+        if matches_node_props_by_id(id, node_pat, memtable) {
+            candidates.push(id);
         }
     }
 
     candidates
 }
 
-/// 从 MemTable 构建完整 Node
+/// 检查节点是否匹配内联属性过滤
+fn matches_node_props_by_id<T: VectorType>(id: u64, pat: &NodePattern, memtable: &MemTable<T>) -> bool {
+    if pat.props.is_empty() {
+        return true;
+    }
+
+    // 优化：优先验证 ID 等无需加载 Payload 的条件
+    for prop in &pat.props {
+        if prop.key == "id" {
+            if let LitValue::Int(target_id) = &prop.value {
+                if id != *target_id as u64 {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+    }
+
+    // 如果还有其他 JSON 字段条件，再去懒加载 payload，避免无谓的内存锁抢占
+    let needs_payload = pat.props.iter().any(|p| p.key != "id");
+    if !needs_payload {
+        return true;
+    }
+
+    let payload = match memtable.get_payload(id) {
+        Some(p) => p,
+        None => return false,
+    };
+
+    for prop in &pat.props {
+        if prop.key != "id" {
+            let json_val = &payload[&prop.key];
+            if !lit_matches_json(&prop.value, json_val) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// 从 MemTable 构建完整 Node (代价极高，只有最终 Return 阶段才调用)
 fn build_node<T: VectorType>(id: u64, memtable: &MemTable<T>) -> Option<Node<T>> {
     let vector = memtable.get_vector(id)?;
     let payload = memtable.get_payload(id)?;
@@ -163,30 +192,6 @@ fn build_node<T: VectorType>(id: u64, memtable: &MemTable<T>) -> Option<Node<T>>
     })
 }
 
-/// 检查节点是否匹配内联属性过滤 {id: 42, name: "Alice"}
-fn matches_node_props<T: VectorType>(node: &Node<T>, pat: &NodePattern) -> bool {
-    for prop in &pat.props {
-        match prop.key.as_str() {
-            "id" => {
-                // 特殊处理 id 字段
-                if let LitValue::Int(target_id) = &prop.value {
-                    if node.id != *target_id as u64 {
-                        return false;
-                    }
-                }
-            }
-            field => {
-                // 从 Payload JSON 中取值比较
-                let json_val = &node.payload[field];
-                if !lit_matches_json(&prop.value, json_val) {
-                    return false;
-                }
-            }
-        }
-    }
-    true
-}
-
 /// 字面量值与 JSON 值比较
 fn lit_matches_json(lit: &LitValue, json: &serde_json::Value) -> bool {
     match lit {
@@ -197,28 +202,32 @@ fn lit_matches_json(lit: &LitValue, json: &serde_json::Value) -> bool {
     }
 }
 
-/// 评估 WHERE 条件
-fn eval_condition<T: VectorType>(cond: &Condition, binding: &HashMap<String, Node<T>>) -> bool {
+/// 评估 WHERE 条件（运行时动态抓取 ID 绑定的属性）
+fn eval_condition_by_id<T: VectorType>(cond: &Condition, binding: &HashMap<String, u64>, memtable: &MemTable<T>) -> bool {
     match cond {
         Condition::Compare { left, op, right } => {
-            let lval = eval_expr(left, binding);
-            let rval = eval_expr(right, binding);
+            let lval = eval_expr_by_id(left, binding, memtable);
+            let rval = eval_expr_by_id(right, binding, memtable);
             compare_values(&lval, op, &rval)
         }
-        Condition::And(a, b) => eval_condition(a, binding) && eval_condition(b, binding),
-        Condition::Or(a, b) => eval_condition(a, binding) || eval_condition(b, binding),
+        Condition::And(a, b) => eval_condition_by_id(a, binding, memtable) && eval_condition_by_id(b, binding, memtable),
+        Condition::Or(a, b) => eval_condition_by_id(a, binding, memtable) || eval_condition_by_id(b, binding, memtable),
     }
 }
 
 /// 评估表达式 → 运行时值
-fn eval_expr<T: VectorType>(expr: &Expr, binding: &HashMap<String, Node<T>>) -> RuntimeValue {
+fn eval_expr_by_id<T: VectorType>(expr: &Expr, binding: &HashMap<String, u64>, memtable: &MemTable<T>) -> RuntimeValue {
     match expr {
         Expr::Property { var, field } => {
-            if let Some(node) = binding.get(var) {
+            if let Some(&id) = binding.get(var) {
                 if field == "id" {
-                    return RuntimeValue::Int(node.id as i64);
+                    return RuntimeValue::Int(id as i64);
                 }
-                json_to_runtime(&node.payload[field])
+                if let Some(payload) = memtable.get_payload(id) {
+                    json_to_runtime(&payload[field])
+                } else {
+                    RuntimeValue::Null
+                }
             } else {
                 RuntimeValue::Null
             }

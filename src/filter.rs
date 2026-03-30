@@ -43,16 +43,16 @@ impl Filter {
             Filter::Ne(key, val) => payload.get(key) != Some(val),
 
             Filter::Gt(key, threshold) => {
-                extract_number(payload, key).map_or(false, |v| v > *threshold)
+                extract_number(payload, key).is_some_and(|v| v > *threshold)
             }
             Filter::Gte(key, threshold) => {
-                extract_number(payload, key).map_or(false, |v| v >= *threshold)
+                extract_number(payload, key).is_some_and(|v| v >= *threshold)
             }
             Filter::Lt(key, threshold) => {
-                extract_number(payload, key).map_or(false, |v| v < *threshold)
+                extract_number(payload, key).is_some_and(|v| v < *threshold)
             }
             Filter::Lte(key, threshold) => {
-                extract_number(payload, key).map_or(false, |v| v <= *threshold)
+                extract_number(payload, key).is_some_and(|v| v <= *threshold)
             }
 
             Filter::In(key, values) => {
@@ -73,11 +73,11 @@ impl Filter {
             Filter::Size(key, size) => payload
                 .get(key)
                 .and_then(|v| v.as_array())
-                .map_or(false, |arr| arr.len() == *size),
+                .is_some_and(|arr| arr.len() == *size),
             Filter::All(key, values) => payload
                 .get(key)
                 .and_then(|v| v.as_array())
-                .map_or(false, |arr| values.iter().all(|val| arr.contains(val))),
+                .is_some_and(|arr| values.iter().all(|val| arr.contains(val))),
             Filter::TypeMatch(key, type_str) => {
                 if let Some(v) = payload.get(key) {
                     let actual_type = match v {

@@ -82,15 +82,14 @@ impl TextIndex {
         // 1. 构建 AC
         let mut keys: Vec<String> = self.keyword_to_nodes.keys().cloned().collect();
         keys.sort_by(|a, b| b.len().cmp(&a.len())); // 优先匹配长词，防止截断
-        if !keys.is_empty() {
-            if let Ok(ac) = AhoCorasickBuilder::new()
+        if !keys.is_empty()
+            && let Ok(ac) = AhoCorasickBuilder::new()
                 .match_kind(MatchKind::LeftmostLongest)
                 .build(&keys)
             {
                 self.ac_matcher = Some(ac);
                 self.keywords = keys;
             }
-        }
 
         // 2. 计算 BM25 AvgDL
         self.total_docs = self.doc_lengths.len();

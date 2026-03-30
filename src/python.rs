@@ -819,6 +819,12 @@ pub mod python {
             dispatch!(self, mut db => db.disable_auto_compaction());
         }
 
+        fn compact(&mut self) -> PyResult<()> {
+            dispatch!(self, mut db => db.compact()).map_err(|e: crate::error::TriviumError| {
+                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+            })
+        }
+
         /// 设置内存上限（MB），超出时自动 flush
         /// 设为 0 表示无限制
         #[pyo3(signature = (mb=0))]

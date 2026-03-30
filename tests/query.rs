@@ -230,3 +230,120 @@ fn 查询_语法错误_应返回Err() {
     drop(db);
     cleanup(&path);
 }
+
+// ════════ 深度边界与异常场景 (SQLite级测试深度) ════════
+
+#[test]
+fn 查询_RETURN未声明变量_应柔性处理不崩溃() {
+    let path = tmp_db("return_unknown_var");
+    cleanup(&path);
+    let (db, ..) = build_graph(&path);
+
+    // 查询中匹配了 a, 但返回未声明的 z
+    let results = db.query("MATCH (a {name: \"alice\"}) RETURN z");
+    // 解析器也许可以通过，也可能在执行器阶段返回 Error
+    // 如果返回 OK, 那么 results 里的 NodeMap 获取 z 应该是 None
+    if let Ok(res) = results {
+        for row in res {
+            assert!(!row.contains_key("z"), "未声明的变量返回值应当是 None");
+        }
+    }
+    drop(db);
+    cleanup(&path);
+}
+
+#[test]
+fn 查询_WHERE过滤_查询不存在的字段_不应Panic() {
+    let path = tmp_db("where_non_existent_field");
+    cleanup(&path);
+    let (db, ..) = build_graph(&path);
+
+    // 查询一个不存的属性
+    let results = db.query(r#"MATCH (a {name: "alice"})-[:knows]->(b) WHERE b.alien_power > 100 RETURN b"#).unwrap();
+    assert!(results.is_empty(), "查询不存在的属性应该平滑返回空，而不是Panic崩毁");
+
+    drop(db);
+    cleanup(&path);
+}
+
+#[test]
+fn 查询_WHERE过滤_类型异常比对_不应Panic() {
+    let path = tmp_db("where_type_mismatch");
+    cleanup(&path);
+    let (db, ..) = build_graph(&path);
+
+    // 故意让 age (int) 与 string 比较
+    let results = db.query(r#"MATCH (a {name: "alice"})-[:knows]->(b) WHERE b.age > "twenty_five" RETURN b"#).unwrap();
+    assert!(results.is_empty(), "类型不匹配的比较应当安全失败");
+
+    drop(db);
+    cleanup(&path);
+}
+
+#[test]
+fn 查询_带环路的三跳深层图谱遍历_防死循环栈溢出() {
+    let path = tmp_db("deep_cyclic_loop");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+
+    // 构建带环路的图谱：n1 -> n2 -> n3 -> n1
+    let ids = {
+        let mut tx = db.begin_tx();
+        tx.insert(&[0.1; 4], serde_json::json!({"vid": 1}));
+        tx.insert(&[0.2; 4], serde_json::json!({"vid": 2}));
+        tx.insert(&[0.3; 4], serde_json::json!({"vid": 3}));
+        tx.commit().unwrap()
+    };
+    {
+        let mut tx = db.begin_tx();
+        tx.link(ids[0], ids[1], "next", 1.0);
+        tx.link(ids[1], ids[2], "next", 1.0);
+        tx.link(ids[2], ids[0], "next", 1.0); // 环
+        tx.commit().unwrap();
+    }
+
+    // 三跳查询：MATCH (a)-[]->(b)-[]->(c)-[]->(d) RETURN d
+    // a=1, b=2, c=3, d=1 -> 应当返回 n1
+    let results = db.query("MATCH (a {vid: 1})-[:next]->(b)-[:next]->(c)-[:next]->(d) RETURN d").unwrap();
+    assert_eq!(results.len(), 1, "环路图谱的三跳漫游应当精准命中起点");
+    assert_eq!(results[0].get("d").unwrap().id, ids[0], "d应当指回n1");
+
+    drop(db);
+    cleanup(&path);
+}
+
+#[test]
+fn 查询_复合WHERE_深层AND与OR嵌套语法解析执行() {
+    let path = tmp_db("where_complex_logic");
+    cleanup(&path);
+    let (db, _, bob_id, _) = build_graph(&path);
+
+    // bob.age == 25
+    let q = r#"MATCH (a)-[:knows]->(b) WHERE b.age == 25 AND (b.name == "bob" OR b.name == "alien") RETURN b"#;
+    let results = db.query(q).unwrap();
+    
+    assert_eq!(results.len(), 1, "复杂的 AND/OR 嵌套应当被正确解析和执行");
+    assert_eq!(results[0].get("b").unwrap().id, bob_id);
+
+    drop(db);
+    cleanup(&path);
+}
+
+#[test]
+fn 查询_括号未闭合_或严重畸形_应当被Parser优雅拦截() {
+    let path = tmp_db("malformed_parentheses");
+    cleanup(&path);
+    let db = Database::<f32>::open(&path, DIM).unwrap();
+
+    let missing_paren = r#"MATCH (a)-[:knows]->(b) WHERE (b.age == 25 AND b.name == "bob" RETURN b"#;
+    let res = db.query(missing_paren);
+    assert!(res.is_err(), "未闭合的括号应当被词法/语法树分析拦截，不应 panic");
+    assert!(res.unwrap_err().to_string().contains("Expected RParen, got Return"));
+
+    let empty_node_props = r#"MATCH (a {}) RETURN a"#;
+    let res2 = db.query(empty_node_props);
+    assert!(res2.is_ok(), "空属性大括号应当被正常容错或当作无条件约束");
+
+    drop(db);
+    cleanup(&path);
+}

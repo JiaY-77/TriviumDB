@@ -57,6 +57,7 @@ impl CompactionThread {
                     tracing::warn!("Compaction thread: MemTable Mutex poisoned, recovering...");
                     p.into_inner()
                 });
+                tracing::info!("Compaction started for {}: foreground queries will be blocked during I/O", db_path);
                 match file_format::save(&mut mt, &db_path, storage_mode) {
                     Ok(_) => {
                         drop(mt); // 先释放 memtable 锁

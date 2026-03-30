@@ -1,6 +1,36 @@
 use crate::VectorType;
 use crate::error::{Result, TriviumError};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+
+/// Windows 下应对杀毒软件瞬态文件锁定的原子重命名（与 file_format.rs 同款）
+#[cfg(windows)]
+fn robust_rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    let max_retries = 10;
+    let mut delay = std::time::Duration::from_millis(1);
+    for attempt in 0..max_retries {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < max_retries - 1 => {
+                let os_err = e.raw_os_error();
+                if os_err == Some(5) || os_err == Some(32) {
+                    std::thread::sleep(delay);
+                    delay = (delay * 2).min(std::time::Duration::from_millis(50));
+                    continue;
+                }
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
+}
+
+#[cfg(not(windows))]
+fn robust_rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::rename(from, to)
+}
 
 /// 分层向量池：将向量存储分为 mmap 基础层 + 内存增量层
 ///
@@ -34,6 +64,34 @@ pub struct VecPool<T: VectorType> {
     merged: Vec<T>,
     /// 合并缓存是否有效
     merged_valid: bool,
+
+    // ═══ 脏页标志 ═══
+    /// 是否有 mmap 基础层的向量被 delete/update 修改（仅影响 COW 私有页，磁盘未变）
+    ///
+    /// flush() 策略选择依据：
+    ///   - false → 追加路径：O(delta) I/O，只写新增数据
+    ///   - true  → 全量重写路径：O(total) I/O，将 COW 脏页固化回磁盘
+    has_dirty_base: bool,
+}
+
+/// 向 OS 内核提交 mmap 访问模式建议（`madvise` 封装）
+///
+/// **平台差异**：
+/// - Linux/macOS：通过 `memmap2::Mmap::advise()` 直接调用 `madvise(2)` 系统调用
+/// - Windows：`memmap2` 不暴露 `advise()` ——编译期彻底排除，零运行时开销
+///
+/// **使用场景**：
+/// | 建议类型 | Advice | 典型触发点 |
+/// |---|---|---|
+/// | 顺序预读 | `Sequential` | mmap 建立后（BruteForce 全量扫描） |
+/// | 主动预加载 | `WillNeed` | `search_hybrid()` 触发前（大数据集） |
+/// | 冷页释放 | `DontNeed` | Compaction 完成后 / 内存压力 |
+/// | 随机访问 | `Random` | HNSW 图遍历（稀疏随机访问） |
+#[cfg(unix)]
+#[inline]
+fn madvise(mmap: &memmap2::MmapMut, advice: memmap2::Advice) {
+    // advise() 是提示性调用，内核可以忽略。失败时静默继续，不影响正确性。
+    let _ = mmap.advise(advice);
 }
 
 impl<T: VectorType> VecPool<T> {
@@ -47,6 +105,7 @@ impl<T: VectorType> VecPool<T> {
             delta: Vec::new(),
             merged: Vec::new(),
             merged_valid: false,
+            has_dirty_base: false,
         }
     }
 
@@ -80,11 +139,20 @@ impl<T: VectorType> VecPool<T> {
                     memmap2::MmapOptions::new()
                         .len(expected_size)
                         .map_copy(&file)
-                        .map_err(|e| TriviumError::Io(e))?
+                        .map_err(TriviumError::Io)?
                 };
 
                 pool.mmap = Some(mmap);
                 pool.mmap_count = expected_count;
+
+                // 建立映射后立刻提交顺序预读建议：
+                // BruteForce 全量扫描是 TriviumDB 的主要访问模式，
+                // MADV_SEQUENTIAL 提示 OS 在读到第 N 页时就预读第 N+k 页，
+                // 有效隐藏 page fault 延迟（在数据集大于 L3 Cache 时收益显著）。
+                #[cfg(unix)]
+                if let Some(ref m) = pool.mmap {
+                    madvise(m, memmap2::Advice::Sequential);
+                }
             }
         }
 
@@ -128,19 +196,20 @@ impl<T: VectorType> VecPool<T> {
     pub fn zero_out(&mut self, index: usize) {
         let offset = index * self.dim;
         if index < self.mmap_count {
-            // mmap 基础层：COW 写入
+            // mmap 基础层：COW 写入（仅影响进程私有页，磁盘文件未变）
             if let Some(ref mut mmap) = self.mmap {
                 let elem_size = std::mem::size_of::<T>();
                 let byte_offset = offset * elem_size;
                 let byte_len = self.dim * elem_size;
                 let slice = &mut mmap[byte_offset..byte_offset + byte_len];
-                // 置零（T: Zeroable 由 VectorType 保证）
                 for b in slice.iter_mut() {
                     *b = 0;
                 }
             }
+            // 基础层被修改：下次 flush 必须走全量重写路径，将 COW 脏页固化回磁盘
+            self.has_dirty_base = true;
         } else {
-            // 增量层
+            // 增量层：直接修改，不影响 flush 策略
             let delta_offset = (index - self.mmap_count) * self.dim;
             for i in delta_offset..delta_offset + self.dim {
                 self.delta[i] = T::zero();
@@ -153,15 +222,17 @@ impl<T: VectorType> VecPool<T> {
     pub fn update(&mut self, index: usize, vector: &[T]) {
         let offset = index * self.dim;
         if index < self.mmap_count {
-            // mmap 基础层：COW 写入
+            // mmap 基础层：COW 写入（仅影响进程私有页，磁盘文件未变）
             if let Some(ref mut mmap) = self.mmap {
                 let elem_size = std::mem::size_of::<T>();
                 let byte_offset = offset * elem_size;
                 let src_bytes = bytemuck::cast_slice(vector);
                 mmap[byte_offset..byte_offset + src_bytes.len()].copy_from_slice(src_bytes);
             }
+            // 基础层被修改：下次 flush 必须走全量重写路径
+            self.has_dirty_base = true;
         } else {
-            // 增量层
+            // 增量层：直接修改，不影响 flush 策略
             let delta_offset = (index - self.mmap_count) * self.dim;
             self.delta[delta_offset..delta_offset + self.dim].copy_from_slice(vector);
         }
@@ -183,7 +254,7 @@ impl<T: VectorType> VecPool<T> {
                 // SAFETY: VectorType 要求 T: Pod，所以从对齐的字节序列转换为 &[T] 是安全的
                 // MAP_PRIVATE 保证了内存映射的完整性
                 let ptr = bytes.as_ptr();
-                if (ptr as usize) % std::mem::align_of::<T>() == 0 {
+                if (ptr as usize).is_multiple_of(std::mem::align_of::<T>()) {
                     // 对齐情况：零拷贝直接引用
                     unsafe { std::slice::from_raw_parts(ptr as *const T, self.dim) }
                 } else {
@@ -260,76 +331,219 @@ impl<T: VectorType> VecPool<T> {
             self.mmap_count = 0;
             self.merged.clear();
             self.merged_valid = false;
+            // 基础层已不存在，清除脏页标志
+            self.has_dirty_base = false;
         }
     }
 
-    /// 将基础层 + 增量层合并写入新的 .vec 文件
+    /// 持久化向量数据到 .vec 文件
     ///
-    /// 写入策略（原子安全）：
-    ///   1. 写入 .vec.tmp 临时文件
-    ///   2. fsync 确保落盘
-    ///   3. rename 原子替换
-    ///   4. 重新 mmap 映射新文件
-    ///   5. 清空增量层
+    /// 根据 `has_dirty_base` 标志自动选择 flush 策略：
+    ///
+    /// **追加路径**（`has_dirty_base == false`，无 delete/update 触碰基础层）：
+    ///   - I/O 代价 = O(delta 大小)，只写新增向量
+    ///   - 适合纯写入场景（AI 记忆系统、批量导入）
+    ///
+    /// **全量重写路径**（`has_dirty_base == true`，或首次写入）：
+    ///   - I/O 代价 = O(总数据量)，将 COW 脏页固化回磁盘
+    ///   - 适合有 delete/update 的场景
     pub fn flush(&mut self, vec_path: &Path) -> Result<usize> {
         let total = self.total_count();
+
+        // ── 边界情况：无数据 ──
         if total == 0 {
-            // 无数据时删除旧文件
-            if vec_path.exists() {
-                std::fs::remove_file(vec_path)?;
-            }
+            // P1 fix: 先释放 mmap，再删文件（Windows 强制锁定）
             self.mmap = None;
             self.mmap_count = 0;
+            if vec_path.exists() {
+                std::fs::remove_file(vec_path).ok();
+            }
             self.delta.clear();
+            self.has_dirty_base = false;
             self.invalidate_cache();
             return Ok(0);
         }
 
-        let tmp_path = vec_path.with_extension("vec.tmp");
+        // ── 策略分支 ──
+        // 追加路径条件：
+        //   1. 基础层无 COW 脏页（没有 delete/update 触碰过 mmap 区域）
+        //   2. 存在已映射的基础层（不是首次写入）
+        //   3. 有新增数据需要追加（delta 非空）
+        if !self.has_dirty_base && self.mmap.is_some() {
+            if self.delta.is_empty() {
+                // 既无脏页也无新增，无需任何 I/O
+                return Ok(self.mmap_count);
+            }
+            self.flush_append(vec_path)
+        } else {
+            self.flush_rewrite(vec_path)
+        }
+    }
+
+    /// 追加路径：仅将 delta 层写入 .vec 文件末尾
+    ///
+    /// 崩溃安全性分析：
+    ///   - 追加成功、.tdb 未更新前崩溃 → .flush_ok 校验失败（vec_size 变大）→
+    ///     降级为安全模式加载（忽略 .vec）→ WAL 回放恢复新节点到 delta 层 → 正确
+    fn flush_append(&mut self, vec_path: &Path) -> Result<usize> {
+        let append_count = self.delta_count();
         let elem_size = std::mem::size_of::<T>();
 
-        // 1. 写入临时文件
+        // 1. 追加 delta 字节到现有 .vec 文件末尾
         {
-            let mut file = std::fs::File::create(&tmp_path)?;
-
-            // 写入基础层向量（从 mmap COW 页读取，包含修改）
-            if let Some(ref mmap) = self.mmap {
-                let base_bytes = self.mmap_count * self.dim * elem_size;
-                std::io::Write::write_all(&mut file, &mmap[..base_bytes])?;
-            }
-
-            // 写入增量层向量
-            if !self.delta.is_empty() {
-                let delta_bytes = bytemuck::cast_slice(&self.delta);
-                std::io::Write::write_all(&mut file, delta_bytes)?;
-            }
-
-            // 2. fsync 落盘
-            file.sync_all()?;
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(vec_path)
+                .map_err(TriviumError::Io)?;
+            let delta_bytes = bytemuck::cast_slice(&self.delta);
+            file.write_all(delta_bytes).map_err(TriviumError::Io)?;
+            file.sync_all().map_err(TriviumError::Io)?;
         }
 
-        // 3. 原子替换
-        std::fs::rename(&tmp_path, vec_path)?;
+        // 2. 释放旧 mmap（映射窗口固定，感知不到文件扩大后的新区域；
+        //    同时满足 Windows 强制锁定：解映射后才能被 OS 正确感知文件长度变化）
+        let new_total = self.mmap_count + append_count;
+        self.mmap = None;
 
-        // 4. 重新映射新文件
-        let new_total = total;
-        let file = std::fs::File::open(vec_path)?;
+        // 3. 重新映射扩大后的完整文件
+        let file = std::fs::File::open(vec_path).map_err(TriviumError::Io)?;
+        let expected_bytes = new_total * self.dim * elem_size;
         let new_mmap = unsafe {
             memmap2::MmapOptions::new()
+                .len(expected_bytes)
                 .map_copy(&file)
-                .map_err(|e| TriviumError::Io(e))?
+                .map_err(TriviumError::Io)?
         };
         self.mmap = Some(new_mmap);
         self.mmap_count = new_total;
 
-        // 5. 清空增量层
+        // 重新映射后重新提交顺序预读建议
+        #[cfg(unix)]
+        if let Some(ref m) = self.mmap {
+            madvise(m, memmap2::Advice::Sequential);
+        }
+
+        // 4. 清空增量层
         self.delta.clear();
-        self.delta.shrink_to_fit(); // 释放增量内存
+        self.delta.shrink_to_fit();
 
         self.vec_path = Some(vec_path.to_path_buf());
+        self.has_dirty_base = false;
         self.invalidate_cache();
 
+        tracing::debug!("[VecPool] 追加写入: +{} 向量, 累计 {} 向量", append_count, new_total);
         Ok(new_total)
+    }
+
+    /// 全量重写路径：将基础层（含 COW 脏页）+ 增量层全部写入新文件并原子替换
+    ///
+    /// 适用于：有 delete/update 修改过基础层，或首次 flush（无现有 .vec 文件）。
+    fn flush_rewrite(&mut self, vec_path: &Path) -> Result<usize> {
+        let total = self.total_count();
+        let elem_size = std::mem::size_of::<T>();
+        let tmp_path = vec_path.with_extension("vec.tmp");
+
+        // 1. 写入临时文件（基础层 COW 页 + 增量层）
+        {
+            let mut file = std::fs::File::create(&tmp_path)?;
+
+            if let Some(ref mmap) = self.mmap {
+                // 基础层：从 COW 私有页读取（包含所有 delete/update 修改后的值）
+                let base_bytes = self.mmap_count * self.dim * elem_size;
+                file.write_all(&mmap[..base_bytes])?;
+            }
+
+            if !self.delta.is_empty() {
+                let delta_bytes = bytemuck::cast_slice(&self.delta);
+                file.write_all(delta_bytes)?;
+            }
+
+            file.sync_all()?;
+        }
+
+        // 2. 释放旧 mmap（P0 fix：Windows 强制锁定，映射存活时 rename 必定失败）
+        //    COW 脏页数据已在步骤 1 写入 .tmp，释放安全。
+        self.mmap = None;
+
+        // 3. 原子替换
+        robust_rename(&tmp_path, vec_path)?;
+
+        // 4. 重新映射新文件
+        let file = std::fs::File::open(vec_path)?;
+        let expected_bytes = total * self.dim * elem_size;
+        let new_mmap = unsafe {
+            memmap2::MmapOptions::new()
+                .len(expected_bytes)
+                .map_copy(&file)
+                .map_err(TriviumError::Io)?
+        };
+        self.mmap = Some(new_mmap);
+        self.mmap_count = total;
+
+        // 重新映射后重新提交顺序预读建议
+        #[cfg(unix)]
+        if let Some(ref m) = self.mmap {
+            madvise(m, memmap2::Advice::Sequential);
+        }
+
+        // 5. 清空增量层
+        self.delta.clear();
+        self.delta.shrink_to_fit();
+
+        self.vec_path = Some(vec_path.to_path_buf());
+        self.has_dirty_base = false;
+        self.invalidate_cache();
+
+        tracing::debug!("[VecPool] 全量重写: {} 向量", total);
+        Ok(total)
+    }
+
+    // ════════ madvise 公开接口 ════════
+
+    /// 主动释放 mmap 冷页（MADV_DONTNEED）
+    ///
+    /// 告知 OS 当前进程短期内不再需要这些页面，可以优先将其换出以释放物理内存。
+    /// 若之后再次访问，OS 会从文件重新 fault-in，有额外的 page fault 代价。
+    ///
+    /// **典型调用时机**：
+    /// - 大规模 Compaction 完成后（旧 mmap 已被替换，主动释放物理内存）
+    /// - 内存压力检测触发时（`check_memory_pressure` 达到阈值）
+    ///
+    /// 非 Unix 平台（Windows）此函数编译为空，零开销。
+    pub fn advise_dontneed(&self) {
+        #[cfg(unix)]
+        if let Some(ref m) = self.mmap {
+            madvise(m, memmap2::Advice::DontNeed);
+            tracing::debug!("[VecPool] madvise(DONTNEED)：释放 {} MB 冷页",
+                self.mmap_count * self.dim * std::mem::size_of::<T>() / (1024 * 1024)
+            );
+        }
+    }
+
+    /// 切换为随机访问模式建议（MADV_RANDOM）
+    ///
+    /// 告知 OS 页面将被随机访问，禁用预读（readahead）。
+    /// 在顺序预读无效时（如 HNSW 稀疏图遍历），可以减少无效 I/O。
+    ///
+    /// 注意：HNSW 模式下向量在 `rebuild()` 时被 `to_vec()` clone 进图结构，
+    /// 真正的 HNSW search 并不直接访问 mmap，因此此调用主要作为
+    /// "一次 rebuild 后不再需要顺序扫描" 的信号。
+    pub fn advise_random(&self) {
+        #[cfg(unix)]
+        if let Some(ref m) = self.mmap {
+            madvise(m, memmap2::Advice::Random);
+        }
+    }
+
+    /// 恢复顺序预读模式（MADV_SEQUENTIAL）
+    ///
+    /// 在 BruteForce 全量搜索前调用，强制重置为顺序预读策略。
+    /// 若之前调用过 `advise_random()`，此方法可以恢复默认行为。
+    pub fn advise_sequential(&self) {
+        #[cfg(unix)]
+        if let Some(ref m) = self.mmap {
+            madvise(m, memmap2::Advice::Sequential);
+        }
     }
 
     // ════════ 内部方法 ════════
@@ -353,7 +567,7 @@ impl<T: VectorType> VecPool<T> {
             let bytes = &mmap[..base_bytes];
             let ptr = bytes.as_ptr();
 
-            if (ptr as usize) % std::mem::align_of::<T>() == 0 {
+            if (ptr as usize).is_multiple_of(std::mem::align_of::<T>()) {
                 // 对齐：直接转换
                 let base_slice = unsafe {
                     std::slice::from_raw_parts(ptr as *const T, self.mmap_count * self.dim)

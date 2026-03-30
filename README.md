@@ -298,6 +298,7 @@ TriviumDB/
 
 > 以下为突破千万节点秒级吞吐的可选技术路线：
 
+- [ ] `create_index()` 字段级轻量索引：为 Payload 中高频查询字段建立 O(1) / O(log N) 的倒排索引（B-Tree / Hash），彻底破除 Cypher 无索引全表扫描瓶颈
 - [ ] Payload 延迟反序列化：启动时仅建立 `(offset, length)` 索引表，首次访问时才解析 JSON 并缓存到 LRU
 - [ ] 索引结构持久化：`ids_to_indices` 映射表持久化到磁盘（mmap B-tree / 有序数组二分查找），避免启动时逐条 HashMap 插入
 - [ ] 零拷贝序列化协议（可选）：Payload 格式从 serde_json 迁移至 rkyv / FlatBuffers，支持不反序列化直接读取字段
@@ -324,7 +325,7 @@ TriviumDB/
 2. **嵌入式优先**：没有 Server、没有端口、没有配置文件。`import triviumdb` 就是全部。
 3. **渐进式复杂度**：小数据集用 BruteForce 暴搜；数据量上去后 `--features hnsw` 一键切换近似索引。
 4. **可预测的性能**：顺序 I/O only（WAL 追加写 + Compaction 顺序重写），SSD 寿命安全。
-5. **Rust 安全边界**：所有公开 API 均为安全代码。内部仅存在 1 处 `unsafe`（mmap 对齐 cast），附完整 SAFETY 注释。
+5. **Rust 安全边界**：所有公开 API 均为安全代码。内部仅存在 6 处经过严格审计的 `unsafe`（主要分布在 mmap 零拷贝与 SIMD 加速），且附有明确的 SAFETY 安全契约注释（详见 `docs/security.md`）。
 
 ---
 

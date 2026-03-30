@@ -179,8 +179,15 @@ impl Parser {
         Ok(left)
     }
 
-    /// 单个比较: expr op expr
+    /// 单个比较: expr op expr, 或者是 ( condition )
     fn parse_comparison(&mut self) -> Result<Condition, String> {
+        if self.peek() == &Token::LParen {
+            self.advance(); // 消费 '('
+            let cond = self.parse_condition()?;
+            self.expect(&Token::RParen)?; // 期待 ')'
+            return Ok(cond);
+        }
+
         let left = self.parse_expr()?;
         let op = self.parse_comp_op()?;
         let right = self.parse_expr()?;

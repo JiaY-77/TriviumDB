@@ -49,6 +49,7 @@ pub enum WalEntry<T> {
 ///
 /// 控制每条 WAL 写入后是否强制落盘，在速度和安全之间权衡。
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Default)]
 pub enum SyncMode {
     /// 每条 WAL 写入后立即 fsync（最安全，防 OS 崩溃丢数据）
     /// 适用于：金融数据、不可丢失的关键业务
@@ -56,16 +57,12 @@ pub enum SyncMode {
     /// 每条写入 flush 到 OS 缓冲区，但不 fsync（平衡模式）
     /// 进程崩溃不丢数据，OS 崩溃可能丢最近几条
     /// 适用于：大多数生产场景
+    #[default]
     Normal,
     /// 不主动 flush，完全依赖 OS 缓冲（最快，仅用于测试）
     Off,
 }
 
-impl Default for SyncMode {
-    fn default() -> Self {
-        SyncMode::Normal
-    }
-}
 
 /// Write-Ahead Logger
 /// 每次变更先追加写入 .wal 文件，保证崩溃时可恢复。
@@ -109,7 +106,7 @@ impl Wal {
     /// 写入后立即 fsync，保证即使 OS 崩溃数据也不丢失
     pub fn append<T: serde::Serialize>(&mut self, entry: &WalEntry<T>) -> Result<()> {
         if let Some(ref mut writer) = self.writer {
-            let data = bincode::serialize(entry).map_err(|e| TriviumError::Serialization(e))?;
+            let data = bincode::serialize(entry).map_err(TriviumError::Serialization)?;
 
             // 计算 CRC32 校验和
             let checksum = crc32fast::hash(&data);
@@ -149,7 +146,7 @@ impl Wal {
     ) -> Result<()> {
         if let Some(ref mut writer) = self.writer {
             let mut write_single = |entry: &WalEntry<T>| -> Result<()> {
-                let data = bincode::serialize(entry).map_err(|e| TriviumError::Serialization(e))?;
+                let data = bincode::serialize(entry).map_err(TriviumError::Serialization)?;
                 let checksum = crc32fast::hash(&data);
                 let len = data.len() as u32;
                 writer.write_all(&len.to_le_bytes())?;
@@ -191,15 +188,16 @@ impl Wal {
     /// 每条记录都会校验 CRC32：
     ///   - 校验通过 → 回放
     ///   - 校验失败 / 截断 → 安全停止，丢弃后续残缺数据
-    pub fn read_entries<T: serde::de::DeserializeOwned>(db_path: &str) -> Result<Vec<WalEntry<T>>> {
+    pub fn read_entries<T: serde::de::DeserializeOwned>(db_path: &str) -> Result<(Vec<WalEntry<T>>, u64)> {
         let wal_path = format!("{}.wal", db_path);
         if !Path::new(&wal_path).exists() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0));
         }
 
         let file = File::open(&wal_path)?;
         let mut reader = BufReader::new(file);
-        let mut entries = Vec::new();
+        let mut entries_with_offset = Vec::new();
+        let mut physical_offset: u64 = 0;
 
         loop {
             // 读取 len
@@ -236,20 +234,23 @@ impl Wal {
                 // CRC 不匹配 → 数据损坏，停止回放
                 tracing::error!(
                     "WAL CRC mismatch at entry {}: stored={:#010x}, computed={:#010x}. Stopping recovery.",
-                    entries.len(),
+                    entries_with_offset.len(),
                     stored_crc,
                     computed_crc
                 );
                 break;
             }
 
+            // 成功读取一条物理上合法的记录，推进物理游标
+            physical_offset += 4 + (len as u64) + 4;
+
             // 反序列化
             match bincode::deserialize::<WalEntry<T>>(&data) {
-                Ok(entry) => entries.push(entry),
+                Ok(entry) => entries_with_offset.push((entry, physical_offset)),
                 Err(e) => {
                     tracing::error!(
                         "WAL Deserialize error at entry {}: {}. Stopping recovery.",
-                        entries.len(),
+                        entries_with_offset.len(),
                         e
                     );
                     break;
@@ -262,28 +263,32 @@ impl Wal {
         let mut pending_tx = Vec::new();
         let mut in_tx = false;
         let mut current_tx_id = 0;
+        let mut safe_commit_offset = 0;
 
-        for entry in entries {
+        for (entry, offset) in entries_with_offset {
             match entry {
                 WalEntry::TxBegin { tx_id } => {
                     in_tx = true;
                     current_tx_id = tx_id;
                     pending_tx.clear(); // 清空，准备接纳新事务
+                    // 游标不推进：未提交事务不能视为安全边界
                 }
                 WalEntry::TxCommit { tx_id } => {
                     if in_tx && tx_id == current_tx_id {
                         // 发现正确的封条，安全转正！
                         committed.append(&mut pending_tx);
                         in_tx = false;
+                        safe_commit_offset = offset; // 整个事务完美闭环，安全推进物理游标
                     }
                 }
                 other => {
                     if in_tx {
-                        // 如果处于事务包裹区，先暂存在 pending 里
+                        // 如果处于事务包裹区，先暂存在 pending 里，游标暂时不动
                         pending_tx.push(other);
                     } else {
-                        // 兼容向后/独立的操作（旧版本数据或单个操作）
+                        // 兼容向后/独立的操作（旧版本数据或单个操作），立刻安全推进！
                         committed.push(other);
+                        safe_commit_offset = offset;
                     }
                 }
             }
@@ -291,24 +296,36 @@ impl Wal {
 
         if in_tx && !pending_tx.is_empty() {
             tracing::warn!(
-                "Discarded a partial transaction ({} operations) due to missing TxCommit (Power loss simulation).",
-                pending_tx.len()
+                "Discarded a partial transaction ({} operations) due to missing TxCommit (Power loss simulation). Truncating WAL to offset {}.",
+                pending_tx.len(),
+                safe_commit_offset
             );
         }
 
-        Ok(committed)
+        Ok((committed, safe_commit_offset))
     }
 
     /// flush 成功后清除 WAL 文件
+    ///
+    /// 使用 truncate（截断）语义而非 remove + create：
+    ///   - 避免 Windows 杀毒软件对"新建文件"的扫描锁定
+    ///   - 文件 inode/句柄不变，减少系统调用次数
     pub fn clear(&mut self) -> Result<()> {
         // 关闭当前 writer
         self.writer.take();
         let mode = self.sync_mode;
-        // 删除旧 WAL
-        if self.wal_path.exists() {
-            std::fs::remove_file(&self.wal_path)?;
+
+        // 截断清空 WAL（而非删除重建）
+        // 对于已存在的文件，truncate 不会触发杀软的"新文件扫描"
+        {
+            let file = OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&self.wal_path)?;
+            file.sync_all()?;
         }
-        // 重新打开空 WAL
+
+        // 重新以追加模式打开
         let file = OpenOptions::new()
             .create(true)
             .append(true)
