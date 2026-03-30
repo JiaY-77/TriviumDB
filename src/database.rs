@@ -2,15 +2,7 @@ use crate::VectorType;
 use crate::filter::Filter;
 use crate::error::{Result, TriviumError};
 
-/// HNSW 墓碑 GC 触发阈值（相对于活跃节点总数的比例）
-/// 当自上次重建以来删除的节点数超过活跃节点数的 20%，自动触发全量 rebuild_index
-#[cfg(feature = "hnsw")]
-const HNSW_GC_THRESHOLD_RATIO: f64 = 0.20;
-
-#[cfg(not(feature = "hnsw"))]
 use crate::index::brute_force;
-#[cfg(feature = "hnsw")]
-use crate::index::hnsw::HnswIndex;
 use crate::node::{NodeId, SearchHit};
 use crate::storage::compaction::CompactionThread;
 use crate::storage::file_format;
@@ -131,8 +123,6 @@ pub struct Database<T: VectorType> {
     db_path: String,
     memtable: Arc<Mutex<MemTable<T>>>,
     wal: Arc<Mutex<Wal>>,
-    #[cfg(feature = "hnsw")]
-    hnsw_index: HnswIndex<T>,
     compaction: Option<CompactionThread>,
     /// 文件锁：防止多进程同时打开同一个数据库
     _lock_file: std::fs::File,
@@ -216,16 +206,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         memtable.rebuild_text_index_from_payloads();
 
         let wal = Wal::open_with_sync(path, config.sync_mode)?;
-
-        #[cfg(feature = "hnsw")]
-        let hnsw_index = HnswIndex::<T>::new(dim);
-
         Ok(Self {
             db_path: path.to_string(),
             memtable: Arc::new(Mutex::new(memtable)),
             wal: Arc::new(Mutex::new(wal)),
-            #[cfg(feature = "hnsw")]
-            hnsw_index,
             compaction: None,
             _lock_file: lock_file,
             memory_limit: 0,
@@ -308,9 +292,6 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             w.clear()?;
         }
 
-        // 强制 HNSW 完整 GC：此时磁盘已落盘，趁锁释放窗口重建图索引
-        self.rebuild_index();
-
         tracing::info!("Manual compaction completed for {}", self.db_path);
         Ok(())
     }
@@ -391,25 +372,6 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         {
             let mut w = lock_or_recover(&self.wal);
             w.append(&WalEntry::Delete::<T> { id })?;
-        }
-
-        // HNSW 墓碑 GC：超阈值自动触发重建，清除图索引中已累积的死节点
-        #[cfg(feature = "hnsw")]
-        {
-            let (deleted, active) = {
-                let mt = lock_or_recover(&self.memtable);
-                (mt.deleted_since_rebuild, mt.node_count())
-            };
-            if active > 0 {
-                let ratio = deleted as f64 / active as f64;
-                if ratio >= HNSW_GC_THRESHOLD_RATIO {
-                    tracing::info!(
-                        "HNSW GC triggered: {} tombstones / {} active nodes ({:.1}% >= {:.0}% threshold), rebuilding index...",
-                        deleted, active, ratio * 100.0, HNSW_GC_THRESHOLD_RATIO * 100.0
-                    );
-                    self.rebuild_index();
-                }
-            }
         }
 
         Ok(())
@@ -588,8 +550,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
         // 2. 如果存在向量查询，进入数学多层筛选管线
         if let Some(query_vector) = query_vector {
-            #[cfg(not(feature = "hnsw"))]
-            let vector_hits: Vec<SearchHit> = {
+                        let vector_hits: Vec<SearchHit> = {
                 let dim = mt.dim();
                 mt.ensure_vectors_cache();
                 let vectors = mt.flat_vectors();
@@ -655,8 +616,24 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                         }
                     }
                     refined
+                } else if let Some(erpc) = &mt.erpc_index {
+                    // --- ERPC 无锁三阶段路由分支（LSM 冷区主力）---
+                    let query_f32: Vec<f32> = query_vector.iter().map(|&x| x.to_f32()).collect();
+                    let candidates = erpc.search(&query_f32, vectors, config.top_k);
+                    
+                    let mut refined = Vec::with_capacity(candidates.len());
+                    for (idx, score) in candidates {
+                        if score >= config.min_score {
+                            let id = mt.get_id_by_index(idx);
+                            if id != 0 && passes_filter(id) {
+                                let payload = mt.get_payload(id).cloned().unwrap_or(serde_json::Value::Null);
+                                refined.push(SearchHit { id, score, payload });
+                            }
+                        }
+                    }
+                    refined
                 } else {
-                    // 原生基础全局爆搜（带预过滤）
+                    // --- 原生基础全局爆搜（MemTable L0 热区）带预过滤 ---
                     brute_force::search(
                         query_vector,
                         vectors,
@@ -670,12 +647,6 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     )
                 }
             };
-            #[cfg(feature = "hnsw")]
-            let vector_hits: Vec<SearchHit> = {
-                self.hnsw_index
-                    .search(query_vector, config.top_k, config.min_score)
-            };
-
             for hit in vector_hits {
                 *seed_map.entry(hit.id).or_insert(0.0) += hit.score;
             }
@@ -708,8 +679,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                         );
                         let r_orig: Vec<T> = residual.iter().map(|&x| T::from_f32(x)).collect();
                         let shadow_hits: Vec<SearchHit> = {
-                            #[cfg(not(feature = "hnsw"))]
-                            {
+                                                        {
                                 let dim = mt.dim();
                                 brute_force::search(
                                     &r_orig,
@@ -720,11 +690,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                                     |idx| mt.get_id_by_index(idx),
                                 )
                             }
-                            #[cfg(feature = "hnsw")]
-                            {
-                                self.hnsw_index
-                                    .search(&r_orig, config.top_k, config.min_score)
-                            }
+                            
                         };
 
                         for sh in shadow_hits {
@@ -947,36 +913,6 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         lock_or_recover(&self.memtable).all_node_ids()
     }
 
-    /// 重建 HNSW 向量索引
-    ///
-    /// 仅在启用 `hnsw` feature 时有效。BruteForce 模式下调用此方法为 no-op。
-    /// 通常在批量插入完成后调用一次，以构建高效的近似搜索索引。
-    /// 此方法也是 HNSW 墓碑 GC 的执行点：重建完成后会重置删除计数器。
-    pub fn rebuild_index(&mut self) {
-        #[cfg(feature = "hnsw")]
-        {
-            let mut mt = lock_or_recover(&self.memtable);
-            let dim = mt.dim();
-            mt.ensure_vectors_cache();
-            let flat = mt.flat_vectors();
-            self.hnsw_index.rebuild(
-                flat,
-                dim,
-                |idx| mt.get_id_by_index(idx),
-                |idx| {
-                    let nid = mt.get_id_by_index(idx);
-                    mt.contains(nid)
-                },
-            );
-            // GC 完成：图索引已清洁，重置墓碑计数器
-            mt.reset_deleted_since_rebuild();
-            tracing::info!("HNSW 索引重建完成，共 {} 个活跃节点，GC 计数器已清零", mt.node_count());
-        }
-        #[cfg(not(feature = "hnsw"))]
-        {
-            tracing::debug!("未启用 HNSW feature，rebuild_index 为 no-op");
-        }
-    }
 
     /// 维度迁移：从当前数据库导出所有节点和边到一个新维度的数据库。
     ///

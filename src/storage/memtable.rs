@@ -42,9 +42,8 @@ pub struct MemTable<T: VectorType> {
     indices_to_ids: Vec<NodeId>,
     ids_to_indices: HashMap<NodeId, usize>,
 
-    // HNSW 墓碑 GC 计数器：记录自上次 rebuild_index 以来被删除的节点数
-    // 当此值超过活跃节点数的 HNSW_GC_THRESHOLD_RATIO 时，应触发自动重建
-    pub deleted_since_rebuild: usize,
+    // 4. ERPC 后台构建的检索加速层（分离模式特化）
+    pub erpc_index: Option<crate::index::erpc::ErpcIndex>,
 }
 
 impl<T: VectorType> MemTable<T> {
@@ -83,7 +82,7 @@ impl<T: VectorType> MemTable<T> {
             in_degrees: HashMap::new(),
             indices_to_ids: Vec::new(),
             ids_to_indices: HashMap::new(),
-            deleted_since_rebuild: 0,
+            erpc_index: None,
         }
     }
 
@@ -108,7 +107,7 @@ impl<T: VectorType> MemTable<T> {
             in_degrees: HashMap::new(),
             indices_to_ids: Vec::new(),
             ids_to_indices: HashMap::new(),
-            deleted_since_rebuild: 0,
+            erpc_index: None,
         }
     }
 
@@ -350,19 +349,9 @@ impl<T: VectorType> MemTable<T> {
         }
         self.in_degrees.remove(&id);
 
-        // BQ 签名已过期，标记需要重建
         self.bq_dirty = true;
 
-        // HNSW GC 计数器递增：此删除使图索引中产生了一个永久墓碑
-        self.deleted_since_rebuild += 1;
-
         Ok(())
-    }
-
-    /// 重置 HNSW 墓碑 GC 计数器（在 rebuild_index 完成后调用）
-    #[inline]
-    pub fn reset_deleted_since_rebuild(&mut self) {
-        self.deleted_since_rebuild = 0;
     }
 
     /// 断开两个节点之间的指定边

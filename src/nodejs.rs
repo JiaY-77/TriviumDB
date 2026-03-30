@@ -276,6 +276,45 @@ pub mod nodejs {
             }
         }
 
+        /// 批量插入节点，返回新分配的 ID 列表
+        #[napi]
+        pub fn batch_insert(
+            &mut self,
+            vectors: Vec<Vec<f64>>,
+            payloads: Vec<serde_json::Value>,
+        ) -> napi::Result<Vec<f64>> {
+            if vectors.len() != payloads.len() {
+                return Err(napi::Error::from_reason("向量列表与负载列表长度不一致"));
+            }
+            let mut ids = Vec::with_capacity(vectors.len());
+            for (v, p) in vectors.into_iter().zip(payloads.into_iter()) {
+                let id = self.insert(v, p)?;
+                ids.push(id);
+            }
+            Ok(ids)
+        }
+
+        /// 批量插入指定 ID 的节点
+        #[napi]
+        pub fn batch_insert_with_ids(
+            &mut self,
+            ids: Vec<f64>,
+            vectors: Vec<Vec<f64>>,
+            payloads: Vec<serde_json::Value>,
+        ) -> napi::Result<()> {
+            if ids.len() != vectors.len() || vectors.len() != payloads.len() {
+                return Err(napi::Error::from_reason("ID、向量与负载列表长度不一致"));
+            }
+            for ((id, v), p) in ids
+                .into_iter()
+                .zip(vectors.into_iter())
+                .zip(payloads.into_iter())
+            {
+                self.insert_with_id(id, v, p)?;
+            }
+            Ok(())
+        }
+
         /// 带指定 ID 插入节点
         #[napi]
         pub fn insert_with_id(
@@ -745,12 +784,6 @@ pub mod nodejs {
                 .into_iter()
                 .map(|id| id as f64)
                 .collect()
-        }
-
-        /// 重建 HNSW 向量索引（BruteForce 模式下为 no-op）
-        #[napi]
-        pub fn rebuild_index(&mut self) {
-            dispatch!(self, mut db => db.rebuild_index());
         }
 
         /// 维度迁移：结构复制到新维度数据库，返回需要更新向量的节点 ID 列表

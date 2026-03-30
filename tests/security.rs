@@ -162,7 +162,7 @@ fn 测试_HNSW阈值GC和人工压实的连贯性() {
         db.delete(i).unwrap();
     }
     
-    // 手工调用 compact，这会强制执行底层 rebuild_index 和墓碑清理 
+    // 手工调用 compact，强制进行磁盘落盘和内存墓碑的深度清理
     db.compact().expect("手工压实 GC 不应该报错");
     
     // 确保内部一致性没有被破坏

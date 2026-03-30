@@ -94,10 +94,6 @@ fn 测试_全业务链路_社交网络复杂流转() {
         let results = db.query(r#"MATCH (a {name: "Alice"})-[:follows]->(b) RETURN b"#).unwrap();
         assert_eq!(results.len(), 2, "Alice 的两次关注结果应当独立可见");
         
-        // **关键点**：混合搜索在开启 HNSW feature 时依赖静态索引的构建
-        // 实际业务中可配置自动后台构建或在前台检索前进行数据同步
-        db.rebuild_index();
-        
         // b. 特征过滤查询：从查理的属性入手，且通过 KNN 混合搜索寻找与其最相近的人，通过 Cypher 进行结果倒排过滤
         // 我们搜索一个倾向于 Charlie 方向 [0.0, 0.0, 1.0] 的向量，过滤时要求 Level > 15 才能计入靶心
         let mix_results = db.search_hybrid(

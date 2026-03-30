@@ -43,13 +43,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        // HNSW 时因为新插入或者回放了 WAL，需要手动重建 index 以保证 search 能查到
-        #[cfg(feature = "hnsw")]
-        {
-            println!("  [Feature: HNSW] Rebuilding vector index...");
-            db.rebuild_index();
-        }
-
         // Verify search still works on reloaded data
         println!("\n  Search for vector near Alice [0.9, 0.1, 0, 0], expand=1:");
         let results = db.search(&[0.9, 0.1, 0.0, 0.0], 1, 1, 0.5)?;

@@ -762,11 +762,6 @@ pub mod python {
             dispatch!(self, db => db.all_node_ids())
         }
 
-        /// 重建 HNSW 向量索引（仅在 hnsw feature 启用时有效）
-        fn rebuild_index(&mut self) {
-            dispatch!(self, mut db => db.rebuild_index());
-        }
-
         /// 维度迁移：将当前数据库的所有节点和边迁移到一个新维度的数据库。
         ///
         /// 向量会被置零（因为维度变了），需要后续调用 update_vector 按节点 ID 逐个更新。

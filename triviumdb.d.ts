@@ -89,6 +89,12 @@ export interface JsSearchConfig {
   enableDpp?: boolean;
   /** DPP 质量权重幂次 (默认 1.0) */
   dppQualityWeight?: number;
+  /** 启用文本/关键词混合检索 (默认 false) */
+  enableTextHybridSearch?: boolean;
+  /** 文本分数的加权系数 (默认 1.5) */
+  textBoost?: number;
+  /** 自定义检索文本（用于跨模态或覆盖 payload 文本） */
+  customQueryText?: string;
 }
 
 // ==========================================
@@ -126,6 +132,22 @@ export class TriviumDB {
    * @param payload 挂载 payload
    */
   insertWithId(id: number, vector: Vector, payload: any): void;
+
+  /**
+   * 批量插入节点（自动生成 ID）
+   * @param vectors  向量数组列表
+   * @param payloads payload 列表
+   * @returns 分配的新 ID 列表
+   */
+  batchInsert(vectors: Vector[], payloads: any[]): number[];
+
+  /**
+   * 批量插入指定 ID 的节点
+   * @param ids      ID 列表
+   * @param vectors  向量数组列表
+   * @param payloads payload 列表
+   */
+  batchInsertWithIds(ids: number[], vectors: Vector[], payloads: any[]): void;
 
   /**
    * 获取任意节点信息
@@ -200,6 +222,36 @@ export class TriviumDB {
   searchAdvanced(queryVector: Vector, config?: JsSearchConfig): JsSearchHit[];
 
   /**
+   * 向量 + 文本双路混合检索：带图扩散的双路检索入口
+   * @param queryVector 查询向量
+   * @param queryText   文本关键词
+   * @param topK        结果数
+   * @param expandDepth 扩散深度
+   * @param minScore    最小分数
+   * @param hybridAlpha 混合权重 (0.0~1.0)，越大向量占比越高。默认 0.7
+   */
+  searchHybrid(queryVector: Vector, queryText: string, topK?: number, expandDepth?: number, minScore?: number, hybridAlpha?: number): JsSearchHit[];
+
+  /**
+   * 建立用于双路召回的长文本 BM25 索引
+   * @param id   节点 ID
+   * @param text 文本内容
+   */
+  indexText(id: number, text: string): void;
+
+  /**
+   * 建立用于精确命中的 AC 自动机高级关键词索引
+   * @param id      节点 ID
+   * @param keyword 关键词内容
+   */
+  indexKeyword(id: number, keyword: string): void;
+
+  /**
+   * 重编译文本索引与词频，在批量插入或重启后必须调用以生效
+   */
+  buildTextIndex(): void;
+
+  /**
    * 像类 MongoDB 一样去条件匹配！
    * @param condition 类似 { age: { $gt: 18 } } 或 { $and: [...] }
    */
@@ -233,9 +285,6 @@ export class TriviumDB {
 
   /** 所有被存入库里的所有 ID 的乱序数组 */
   allNodeIds(): number[];
-
-  /** 在启用 HNSW 模式时使用，在批量灌量数据完成时调用 */
-  rebuildIndex(): void;
 
   /**
    * 维度结构化迁移。将所有关系和 payload 数据迁移到具有新权重要求尺寸的另一个 tdb 数据库！

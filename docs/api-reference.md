@@ -1,6 +1,6 @@
 # TriviumDB API 完整参考
 
-> **版本**: v0.4.2  
+> **版本**: v0.4.6  
 > **语言**: Rust 核心 + Python 绑定 (PyO3) + Node.js 绑定 (napi-rs)  
 > **许可**: Apache-2.0
 
@@ -16,7 +16,7 @@
 - [Cypher 图谱查询](#cypher-图谱查询)
 - [持久化与压缩](#持久化与压缩)
 - [内存管理](#内存管理)
-- [索引维护](#索引维护)
+- [工具方法](#工具方法)
 - [维度迁移](#维度迁移)
 - [事务支持](#事务支持-rust-only)
 - [Pythonic 魔术方法](#pythonic-魔术方法)
@@ -635,7 +635,9 @@ db.index_keyword(id=42, keyword="Rust")
 db.build_text_index()
 ```
 
-## 索引维护
+---
+
+## 工具方法
 
 ### all_node_ids — 获取全部节点 ID
 
@@ -652,27 +654,18 @@ print(f"共 {len(ids)} 个节点")
 let ids = db.all_node_ids();     // Vec<NodeId>
 ```
 
-### rebuild_index — 重建 HNSW 向量索引
+### ERPC 自动索引说明
 
-将当前 MemTable 中所有活跃节点的向量重新构建为 HNSW 图索引，以获得 O(log N) 的近似搜索性能。
+TriviumDB v0.4.6 起采用**全自动双引擎向量索引路由**，不再提供手动 `rebuild_index()` 接口：
 
-- **BruteForce 模式**（默认）：调用此方法为空操作（no-op），无副作用
-- **HNSW 模式**（`--features hnsw`）：从向量池重建完整 HNSW 图，完成后立即生效
+| 条件 | 检索引擎 | 召回行为 |
+|------|----------|----------|
+| < 2 万节点 或 Mmap 未就绪 | **BruteForce** | 100% 精确召回，零误差 |
+| ≥ 2 万节点 + Mmap 模式 + 索引就绪 | **ERPC** | 三阶段近似搜索，Recall@10 > 85% |
 
-**典型使用场景**：批量导入大量数据后调用一次，避免每次插入都触发索引更新。
+ERPC 索引在**后台 Compaction 线程**中自动构建，无需也无法手动触发。索引元数据持久化在 `.tdb` 文件的 ERPC Metadata Block 中，重启后零延迟恢复。
 
-**Python：**
-```python
-# 批量导入（临时关闭 WAL 同步提速）
-with triviumdb.TriviumDB("data.tdb", dim=768, sync_mode="off") as db:
-    ids = db.batch_insert(vectors, payloads)
-    db.rebuild_index()   # 导入完毕后一次性重建索引
-```
-
-**Rust：**
-```rust
-db.rebuild_index();  // 同步调用，完成前阻塞
-```
+> 💡 如果你的业务对 100% 召回率有强需求（如金融/医疗），可以通过 `StorageMode::Rom` 模式强制使用 BruteForce（ERPC 仅在 `Mmap` 模式下激活）。
 
 ---
 

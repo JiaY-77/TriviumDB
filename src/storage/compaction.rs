@@ -58,6 +58,23 @@ impl CompactionThread {
                     p.into_inner()
                 });
                 tracing::info!("Compaction started for {}: foreground queries will be blocked during I/O", db_path);
+
+                // --- ERPC 无锁加速索引异步重建层 ---
+                let node_count = mt.node_count();
+                if matches!(storage_mode, crate::database::StorageMode::Mmap) && node_count >= 20_000 {
+                    mt.ensure_vectors_cache();
+                    let flat = mt.flat_vectors();
+                    let dim = mt.dim();
+                    tracing::info!("[{}] Rebuilding ERPC Accelerated Index (nodes={})...", db_path, node_count);
+                    let start_erpc = std::time::Instant::now();
+                    let effort = 0.6; // 设定一个合理的中坚性能指标
+                    let new_erpc = crate::index::erpc::ErpcIndex::build(flat, dim, effort);
+                    mt.erpc_index = Some(new_erpc);
+                    tracing::info!("[{}] ERPC block finalized in {:?}", db_path, start_erpc.elapsed());
+                } else if matches!(storage_mode, crate::database::StorageMode::Mmap) {
+                    mt.erpc_index = None;
+                }
+
                 match file_format::save(&mut mt, &db_path, storage_mode) {
                     Ok(_) => {
                         drop(mt); // 先释放 memtable 锁

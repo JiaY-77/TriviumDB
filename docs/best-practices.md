@@ -16,7 +16,7 @@
 - [常见使用模式](#常见使用模式)
 - [避坑指南](#避坑指南)
 - [模型升级与维度迁移](#模型升级与维度迁移)
-- [HNSW 索引重建策略](#hnsw-索引重建策略)
+- [ERPC 索引策略与调优](#erpc-索引策略与调优)
 - [架构边界认知与规避策略](#架构边界认知与规避策略)
 
 ---
@@ -58,16 +58,13 @@ python -c "import triviumdb; print('OK')"
 
 ```bash
 cargo add triviumdb
-
-# 若需要启用额外的高级特性，如 HNSW 向量索引算法：
-cargo add triviumdb --features hnsw
 ```
 
 在 `Cargo.toml` 中也会自动生成如下配置：
 
 ```toml
 [dependencies]
-triviumdb = "0.4.2" 
+triviumdb = "0.4.6" 
 ```
 
 ### 30 秒入门模板
@@ -404,6 +401,57 @@ rows = db.query(f'MATCH (a {{id: {anchor_id}}})-[:participant]->(b) RETURN b')
 
 ---
 
+## ERPC 索引策略与调优
+
+TriviumDB v0.4.6 开始采用全自动双引擎 ERPC 索引，开发者**无需也无法手动触发重建**。了解以下策略可以达到最佳检索效果。
+
+### ERPC 自动激活条件
+
+| 条件 | 检索引擎 | 行为 |
+|------|----------|------|
+| Mmap 模式 + < 2 万节点 | BruteForce | 100% 精确召回 |
+| Mmap 模式 + ≥ 2 万节点 + 首次 Compaction 完成 | ERPC | 近似搜索，Recall@10 > 85% |
+| Rom 模式（任意节点数） | BruteForce | 100% 精确召回 |
+
+### 快速达到 ERPC 激活
+
+```python
+# 1. 确保使用 Mmap 模式（Rust 默认）
+# Python 端默认也是 Mmap 模式
+with triviumdb.TriviumDB("data.tdb", dim=1536) as db:
+    # 2. 导入 >= 2 万条数据
+    db.batch_insert(vectors_20k, payloads_20k)
+    # 3. 小负荷 flush，触发一次 Compaction——ERPC 索引将在此期间在后台构建
+    db.flush()
+    # 4. 部署 auto_compaction 持续更新索引
+    db.enable_auto_compaction(interval_secs=60)
+```
+
+### 高精度场景：强制绕过 ERPC
+
+如果你的业务对 100% 召回率有给对要求（如金融风控、医疗诊断），可以用 Rom 模式强制走 BruteForce：
+
+```rust
+// Rom 模式 运行时不需要/不会构建 ERPC
+let db = Database::<f32>::open_with_config("data.tdb", Config {
+    dim: 1536,
+    storage_mode: StorageMode::Rom,  // 强制 BruteForce
+    ..Default::default()
+})?;
+```
+
+### ERPC effort 参数调优
+
+`effort` 参数控制 ERPC 索引的建库开销与检索精度权衡，目前**确定性设定为 0.6**，适合绝大多数生产场景。
+
+| effort | BQ_REFINED_COUNT （5万数据） | K_CLUSTERS | 适用场景 |
+|--------|--------------------------|------------|-----------|
+| 0.3 | ~自动计算 | 小 | 快速响应优先 |
+| **0.6** | **~477** | **~170** | **默认，平衡最佳** |
+| 1.0 | ~自动计算 | 最大 | 高精度优先 |
+
+---
+
 ### 模式一：AI Agent 长期记忆
 
 ```python
@@ -588,35 +636,53 @@ with triviumdb.TriviumDB("knowledge_v2.tdb", dim=NEW_DIM) as new_db:
 
 ---
 
-## HNSW 索引重建策略
+## ERPC 索引策略与调优
 
-*仅在使用 `--features hnsw` 时相关，BruteForce 模式下忽略此章节。*
+TriviumDB v0.4.6 起采用全自动双引擎 ERPC 索引，开发者**无需也无法手动触发重建**。了解以下策略可以取得最佳检索效果。
 
-### 何时需要 rebuild_index？
+### ERPC 自动激活条件
 
-| 场景 | 建议 |
-|------|------|
-| 初次批量导入几十万条数据 | 导入完成后调用一次 `rebuild_index()` |
-| 增量插入少量数据（< 5%） | 通常不需要重建，HNSW 增量维护即可 |
-| 删除了大量节点（> 20%） | 建议重建，清理已失效的图层引用 |
-| 完成维度迁移并更新完向量后 | 必须重建，旧索引对新库无效 |
+| 条件 | 检索引擎 | 行为 |
+|------|----------|------|
+| Mmap 模式 + < 2 万节点 | **BruteForce** | 100% 精确召回 |
+| Mmap 模式 + ≥ 2 万节点 + 首次 Compaction 完成 | **ERPC** | 近似搜索，Recall@10 > 85% |
+| Rom 模式（任意节点数） | **BruteForce** | 100% 精确召回 |
 
-### 批量导入 + 重建的完整模板
+### 快速达到 ERPC 激活
 
 ```python
-# 最优批量导入流程（HNSW 模式）
-with triviumdb.TriviumDB("data.tdb", dim=768, sync_mode="off") as db:
-    # 1. 批量写入（关闭 WAL 同步提速）
-    db.batch_insert(all_vectors, all_payloads)
-    # 2. 切回安全同步模式
-    db.set_sync_mode("normal")
-    # 3. 重建索引（同步阻塞，完成后立即生效）
-    db.rebuild_index()
-    # 4. 落盘（with 退出时也会自动执行）
+# 1. 确保使用 Mmap 模式（Python 端默认也是 Mmap 模式）
+with triviumdb.TriviumDB("data.tdb", dim=1536) as db:
+    # 2. 导入 >= 2 万条数据
+    db.batch_insert(vectors_20k, payloads_20k)
+    # 3. flush 触发一次 Compaction——ERPC 索引将在此期间在后台构建
     db.flush()
+    # 4. 部署 auto_compaction 持续更新索引
+    db.enable_auto_compaction(interval_secs=60)
 ```
 
-> 💡 `rebuild_index()` 是同步操作，重建期间会持有 MemTable 读锁。对于百万级节点建议在低峰期执行。
+### 高精度场景：强制绕过 ERPC
+
+如果业务对 100% 召回率有强要求（如金融风控、医疗诊断），可以用 Rom 模式强制走 BruteForce：
+
+```rust
+// Rom 模式不会构建 ERPC，始终走 BruteForce 100% 精确检索
+let db = Database::<f32>::open_with_config("data.tdb", Config {
+    dim: 1536,
+    storage_mode: StorageMode::Rom,
+    ..Default::default()
+})?;
+```
+
+### ERPC effort 参数说明
+
+`effort` 参数控制 ERPC 索引的建库开销与检索精度权衡，当前**标准内置为 0.6**，适合绝大多数生产场景。
+
+| effort | 聚类数 K | 适用场景 |
+|--------|---------|---------|
+| 0.3 | 小 | 快速响应优先，召回率略低 |
+| **0.6** | **~170（5 万数据时）** | **默认，平衡最佳** |
+| 1.0 | 最大 | 高精度优先，构建时间较长 |
 
 ---
 

@@ -400,14 +400,17 @@ if !self.payloads.contains_key(&id) {
 
 ---
 
-### 24. HNSW 智能阈值墓碑清理（Tombstone GC）
+### 24. ERPC 索引对删除操作的安全保证（零 Ghost Node）
 
-**实现位置**：`database.rs:delete()`，`storage/memtable.rs`
+**实现位置**：`database.rs:delete()`，`storage/memtable.rs`，`index/erpc.rs`
 
-图数据库中被逻辑删除（Tombstone）的幽灵节点会在 HNSW 近似搜索路径上形成"噪音陷阱"。由于基于静态构建的 HNSW 图天然不支持增量删除，随着系统的删除操作堆积，检索引擎性能会大幅度退化。
+传统图索引（如 HNSW）在节点被逻辑删除后，会在索引图中留下幽灵引用，导致检索结果污染和性能退化。ERPC 从架构上彻底消除了这个问题：
 
-为防止此隐蔽的退化攻击/泄露，MemTable 引入 `deleted_since_rebuild` 计数器：
-一旦逻辑删除量攀升至**当前活跃节点总量的 20% (HNSW_GC_THRESHOLD_RATIO)**，`delete()` 便会**同步阻塞触发一次 `rebuild_index()` 全量图重建**作为抗体清理，永久刷除废弃游标并在落盘 `compact` 时做双重托底兜底。这消除了人工配置定时维护的负担。
+- **纯序列化结构**：ERPC 不是图索引，底层是 `logical_sequence: Vec<SeqEntry>` + 聚类中心，不存在"边引用"的概念。删除节点等价于向量池置零 + Payload 移除。
+- **Compaction 时原子切换**：下一次 Compaction 触发 ERPC 重建时，置零节点不会进入新的聚类计算；新序列通过直接赋值到 `mt.erpc_index = Some(new_erpc)` 原子切换，旧序列在 `Option` drop 时安全回收。
+- **搜索时二次 ID 校验**：`search()` 路径在 ERPC 返回候选后，会用 `mt.get_id_by_index(idx) != 0` 对每个候选做活跃性检验，已删除节点（ID == 0）被静默过滤，不会出现在 `SearchHit` 中。
+
+**保证**：删除操作对检索质量零副作用，无需用户手动触发重建，无 Tombstone GC 阈值配置负担。
 
 ---
 
@@ -484,7 +487,9 @@ libc::madvise(ptr, len, libc::MADV_DONTNEED);
 | `vec_pool.rs:get()` | `slice::from_raw_parts()` | 运行时对齐检查；index < mmap_count 守卫 |
 | `vec_pool.rs:rebuild_merged_cache()` | `slice::from_raw_parts()` | 同上 |
 | `file_format.rs:load()` | `Mmap::map()` | 仅读；mmap Drop 前不删文件 |
+| `file_format.rs:load_erpc()` | `ptr::copy_nonoverlapping()` | bytemuck Pod 对齐；dst Vec 已预分配足够容量；src 长度精确边界 |
 | `vector.rs:cosine_similarity_avx2()` | AVX2 SIMD 指令 | 运行时 `is_x86_feature_detected!` 检测通过才调用 |
+| `index/morton.rs:spread_bits_bmi2()` | BMI2 `_pdep_u64` 指令 | 运行时 `is_x86_feature_detected!("bmi2")` 检测通过才调用；`#[target_feature(enable="bmi2")]` 属性保证编译器生成合法指令 |
 
 所有 `unsafe` 块均附有明确的 `// SAFETY:` 注释。整个代码库没有 `unsafe impl Send/Sync`——`Send + Sync` 由 `Arc<Mutex<T>>` 自动推导，类型系统级别安全。
 

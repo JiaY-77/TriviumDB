@@ -52,8 +52,10 @@ fn robust_rename(from: &Path, to: &Path) -> std::io::Result<()> {
 
 // ══════ 文件头常量 ══════
 const MAGIC: &[u8; 4] = b"TVDB";
-const VERSION: u16 = 2; // v2：支持分层存储与单文件格式
-const HEADER_SIZE: u64 = 50;
+const VERSION: u16 = 3; // v3：增加 ERPC 无锁加速索引元数据
+const HEADER_SIZE: u64 = 58;
+
+use crate::index::erpc::{ErpcIndex, ErpcParams, SeqEntry};
 
 /// 向量文件路径（.tdb → .vec）
 fn vec_path_from_db(db_path: &str) -> String {
@@ -188,6 +190,9 @@ fn save_tdb<T: VectorType>(
     };
     let edge_offset = payload_offset + payload_size + vector_size;
 
+    let edge_size = all_edges.iter().map(|(_, e)| (8 + 8 + 2 + e.label.len() + 4) as u64).sum::<u64>();
+    let erpc_offset = edge_offset + edge_size;
+
     // 1. Header
     w.write_all(MAGIC)?;
     w.write_all(&VERSION.to_le_bytes())?;
@@ -197,6 +202,7 @@ fn save_tdb<T: VectorType>(
     w.write_all(&payload_offset.to_le_bytes())?;
     w.write_all(&vector_offset.to_le_bytes())?;
     w.write_all(&edge_offset.to_le_bytes())?;
+    w.write_all(&erpc_offset.to_le_bytes())?;
 
     // 2. Payload Block 包含 Tombstones
     for &nid in internal_indices {
@@ -227,6 +233,20 @@ fn save_tdb<T: VectorType>(
         w.write_all(&(label_bytes.len() as u16).to_le_bytes())?;
         w.write_all(label_bytes)?;
         w.write_all(&edge.weight.to_le_bytes())?;
+    }
+
+    // 5. ERPC Metadata Block (If exists)
+    if let Some(erpc) = &memtable.erpc_index {
+        w.write_all(bytemuck::bytes_of(&erpc.params))?;
+        for pc in &erpc.pca_basis {
+            // PCA 基底扁平化
+            for &fv in pc { w.write_all(&fv.to_le_bytes())?; }
+        }
+        for c in &erpc.centers {
+            // 中心点扁平化
+            for &fv in c { w.write_all(&fv.to_le_bytes())?; }
+        }
+        w.write_all(bytemuck::cast_slice(&erpc.sequence))?;
     }
 
     w.flush()?;
@@ -271,6 +291,13 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
     let payload_offset = u64::from_le_bytes(bytes[26..34].try_into().unwrap()) as usize;
     let vector_offset = u64::from_le_bytes(bytes[34..42].try_into().unwrap()) as usize;
     let edge_offset = u64::from_le_bytes(bytes[42..50].try_into().unwrap()) as usize;
+    
+    // 兼容旧版 V2 的情况下补齐 erpc_offset 游标
+    let erpc_offset = if mmap.len() >= 58 {
+        u64::from_le_bytes(bytes[50..58].try_into().unwrap()) as usize
+    } else {
+        mmap.len()
+    };
 
     let vec_file_path = vec_path_from_db(path);
 
@@ -302,6 +329,7 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
                 node_count,
                 payload_offset,
                 edge_offset,
+                erpc_offset,
                 &vec_file_path,
                 &mmap,
             )
@@ -320,6 +348,7 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
                 payload_offset,
                 vector_offset,
                 edge_offset,
+                erpc_offset,
                 &mmap,
             )
         }
@@ -332,6 +361,7 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
             payload_offset,
             vector_offset,
             edge_offset,
+            erpc_offset,
             &mmap,
         )
     }
@@ -345,8 +375,9 @@ fn load_v2<T: VectorType>(
     node_count: usize,
     payload_offset: usize,
     edge_offset: usize,
+    erpc_offset: usize,
     vec_file_path: &str,
-    tdb_mmap: &Mmap,
+    _tdb_mmap: &Mmap,
 ) -> Result<MemTable<T>> {
     let vec_pool = VecPool::<T>::open(Path::new(vec_file_path), dim, node_count)?;
     let mut memtable = MemTable::new_with_vec_pool(dim, next_id, vec_pool);
@@ -357,7 +388,8 @@ fn load_v2<T: VectorType>(
         payload_offset,
         edge_offset,
     )?;
-    load_edges(&mut memtable, bytes, edge_offset, tdb_mmap.len())?;
+    load_edges(&mut memtable, bytes, edge_offset, erpc_offset)?;
+    memtable.erpc_index = load_erpc(bytes, erpc_offset, dim)?;
     Ok(memtable)
 }
 
@@ -370,6 +402,7 @@ fn load_v1_rom<T: VectorType>(
     payload_offset: usize,
     vector_offset: usize,
     edge_offset: usize,
+    erpc_offset: usize,
     tdb_mmap: &Mmap,
 ) -> Result<MemTable<T>> {
     let mut memtable = MemTable::new_with_next_id(dim, next_id);
@@ -412,7 +445,8 @@ fn load_v1_rom<T: VectorType>(
         memtable.vec_pool_mut().push(&v);
     }
 
-    load_edges(&mut memtable, bytes, edge_offset, tdb_mmap.len())?;
+    load_edges(&mut memtable, bytes, edge_offset, erpc_offset)?;
+    memtable.erpc_index = load_erpc(bytes, erpc_offset, dim)?;
     Ok(memtable)
 }
 
@@ -476,4 +510,64 @@ fn load_edges<T: VectorType>(
         memtable.link(src_id, dst_id, label, weight)?;
     }
     Ok(())
+}
+
+fn load_erpc(bytes: &[u8], erpc_offset: usize, dim: usize) -> Result<Option<ErpcIndex>> {
+    if erpc_offset >= bytes.len() || bytes.len() - erpc_offset < 32 {
+        return Ok(None);
+    }
+    let mut cursor = erpc_offset;
+    
+    // 强制按 byte 对齐拷贝
+    let params: ErpcParams = bytemuck::pod_read_unaligned(&bytes[cursor..cursor + 32]);
+    cursor += 32;
+
+    let pca_dims = crate::index::erpc::PCA_DIMS;
+    let mut pca_basis = Vec::with_capacity(pca_dims);
+    for _ in 0..pca_dims {
+        let size = dim * 4;
+        let mut pc = Vec::with_capacity(dim);
+        for i in 0..dim {
+            let offset = cursor + i * 4;
+            let val = f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+            pc.push(val);
+        }
+        pca_basis.push(pc);
+        cursor += size;
+    }
+
+    let k_clusters = params.k_clusters as usize;
+    let mut centers = Vec::with_capacity(k_clusters);
+    for _ in 0..k_clusters {
+        let size = dim * 4;
+        let mut c = Vec::with_capacity(dim);
+        for i in 0..dim {
+            let offset = cursor + i * 4;
+            let val = f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+            c.push(val);
+        }
+        centers.push(c);
+        cursor += size;
+    }
+
+    let sequence_bytes = &bytes[cursor..];
+    let expected_entry_size = std::mem::size_of::<SeqEntry>();
+    let count = sequence_bytes.len() / expected_entry_size;
+    let mut sequence: Vec<SeqEntry> = vec![bytemuck::Zeroable::zeroed(); count];
+    
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            sequence_bytes.as_ptr(),
+            sequence.as_mut_ptr() as *mut u8,
+            count * expected_entry_size,
+        );
+    }
+
+    Ok(Some(ErpcIndex {
+        pca_basis,
+        centers,
+        sequence,
+        dim,
+        params,
+    }))
 }
