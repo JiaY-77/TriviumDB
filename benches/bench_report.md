@@ -1,4 +1,4 @@
-# TriviumDB v0.4.81 索引性能与精度评测报告
+# TriviumDB v0.4.82 索引性能与精度评测报告
 
 > 测试环境：Windows 11 x86_64 / Rust 1.93.1 (release profile, LTO=true)  
 > 测试时间：2026-03-30  
@@ -8,7 +8,7 @@
 
 ## 一、背景
 
-TriviumDB v0.4.81 引入了全新的 **ERPC（Electoral Residual Projection Code）** 近似索引，
+TriviumDB v0.4.82 引入了全新的 **ERPC（Electoral Residual Projection Code）** 近似索引，
 替代了原有的 HNSW 方案。本报告通过三组实验，量化评估 ERPC 在不同数据规模和维度下的
 **精度（Recall@K）** 与 **性能（QPS / 延迟）** 表现，并与工业级 HNSW 实现（`instant-distance`）做正面对比。
 

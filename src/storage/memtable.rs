@@ -37,6 +37,10 @@ pub struct MemTable<T: VectorType> {
     // 入度统计表：用于快速查询目标节点的被连接数（支持图谱反向抑制算法）
     in_degrees: HashMap<NodeId, usize>,
 
+    // 节点不应期（疲劳状态）映射表：
+    // 0 = 正常；1 = 疲劳中（被激活后，下一轮扩散大幅衰减，消费一次后清零）
+    fatigue_map: std::sync::RwLock<HashMap<NodeId, u8>>,
+
     // 映射表：内部索引 (0, 1, 2...) 到 NodeId
     // 用于在 vectors 数组里定位数据位置
     indices_to_ids: Vec<NodeId>,
@@ -80,6 +84,7 @@ impl<T: VectorType> MemTable<T> {
             payloads: HashMap::new(),
             edges: HashMap::new(),
             in_degrees: HashMap::new(),
+            fatigue_map: std::sync::RwLock::new(HashMap::new()),
             indices_to_ids: Vec::new(),
             ids_to_indices: HashMap::new(),
             erpc_index: None,
@@ -105,6 +110,7 @@ impl<T: VectorType> MemTable<T> {
             payloads: HashMap::new(),
             edges: HashMap::new(),
             in_degrees: HashMap::new(),
+            fatigue_map: std::sync::RwLock::new(HashMap::new()),
             indices_to_ids: Vec::new(),
             ids_to_indices: HashMap::new(),
             erpc_index: None,
@@ -253,6 +259,47 @@ impl<T: VectorType> MemTable<T> {
         *self.in_degrees.entry(dst).or_insert(0) += 1;
 
         Ok(())
+    }
+
+    // ── 节点不应期（疲劳）接口 ────────────────────────────────────────────────
+
+    /// 将一批节点标记为「疲劳」（被本轮扩散激活的节点）
+    pub fn mark_fatigued(&self, ids: &[NodeId]) {
+        if let Ok(mut map) = self.fatigue_map.write() {
+            for &id in ids {
+                map.insert(id, 1);
+            }
+        }
+    }
+
+    /// 查询指定节点的疲劳状态
+    /// 0 = 正常，1 = 疲劳中
+    pub fn get_fatigue(&self, id: NodeId) -> u8 {
+        if let Ok(map) = self.fatigue_map.read() {
+            *map.get(&id).unwrap_or(&0)
+        } else {
+            0
+        }
+    }
+
+    /// 消耗一次疲劳（在扩散使用后调用，清零不应期）
+    pub fn consume_fatigue(&self, id: NodeId) {
+        if let Ok(mut map) = self.fatigue_map.write() {
+            if let Some(f) = map.get_mut(&id) {
+                *f = 0;
+            }
+        }
+    }
+
+    /// 批量消耗疲劳（由扩散引擎在每轮迭代末调用）
+    pub fn consume_fatigue_batch(&self, ids: &[NodeId]) {
+        if let Ok(mut map) = self.fatigue_map.write() {
+            for &id in ids {
+                if let Some(f) = map.get_mut(&id) {
+                    *f = 0;
+                }
+            }
+        }
     }
 
     /// 确保向量合并缓存已构建（需要 &mut self）

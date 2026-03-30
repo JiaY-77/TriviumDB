@@ -21,6 +21,9 @@ pub fn expand_graph<T: crate::VectorType>(
     // `current_tier` 用于保存当前轮次正在向外辐射边界节点的增量能量
     let mut current_tier = HashMap::<NodeId, f32>::new();
 
+    // 用于收集在漫游期间真实遇到过并生效削弱的疲劳节点
+    let mut active_fatigue = Vec::new();
+
     for seed in &seeds {
         total_activation.insert(seed.id, seed.score);
         current_tier.insert(seed.id, seed.score);
@@ -41,10 +44,20 @@ pub fn expand_graph<T: crate::VectorType>(
                 }
 
                 for edge in edges {
-                    // 反向抑制：基于目标节点的入度构建阻力
+                    // 反向抑制（边特异性）：基于目标节点的入度构建阻力
                     let inhibition_factor = if enable_inverse_inhibition {
                         let in_degree = db.get_in_degree(edge.target_id).max(1) as f32;
-                        1.0 / (1.0 + in_degree.log10())
+                        // powf(0.55) 代替原有的缓慢 log10，既有效压制黑洞节点，也不会让真重要节点彻底失联
+                        1.0 / in_degree.powf(0.55)
+                    } else {
+                        1.0
+                    };
+
+                    // 不应期判定（疲劳状态）：若目标节点处于疲劳期，本次能量传导严重衰减
+                    let target_fatigue = db.get_fatigue(edge.target_id);
+                    let fatigue_discount = if target_fatigue > 0 {
+                        active_fatigue.push(edge.target_id);
+                        0.15 // 遭遇疲劳节点，接下来的单次能量传导衰减 85%
                     } else {
                         1.0
                     };
@@ -52,9 +65,9 @@ pub fn expand_graph<T: crate::VectorType>(
                     // 发散传播的能量片段
                     let transmitted = if edge.label == "inhibition" {
                         // 负面边不仅不贡献，还会扣除能量
-                        -(spread_energy * edge.weight * inhibition_factor)
+                        -(spread_energy * edge.weight * inhibition_factor * fatigue_discount)
                     } else {
-                        spread_energy * edge.weight * inhibition_factor
+                        spread_energy * edge.weight * inhibition_factor * fatigue_discount
                     };
 
                     // 1. 将收到的片段累加到下一轮发射台
@@ -102,5 +115,18 @@ pub fn expand_graph<T: crate::VectorType>(
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+
+    // === 不应期（疲劳）的更新与结算机制 ===
+    
+    // 1. 消耗本轮真实触发削弱了的疲劳节点（解除标记）
+    active_fatigue.sort_unstable();
+    active_fatigue.dedup();
+    db.consume_fatigue_batch(&active_fatigue);
+
+    // 2. 将本次漫游排位最高的赢家节点（Top 15）打入物理疲劳冷却期
+    // 这将迫使下一轮近乎相同的查询能量不会再无限流入黑洞，进而孕育新的亚支路
+    let top_ids: Vec<NodeId> = expanded_results.iter().take(15).map(|h| h.id).collect();
+    db.mark_fatigued(&top_ids);
+
     expanded_results
 }

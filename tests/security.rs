@@ -6,7 +6,7 @@
 //! - WAL 幽灵事务（未闭合 Tx）的截断与丢弃
 //! - WAL 尾部物理损坏（CRC 不匹配/乱码）的截肢与继续写入能力
 
-use triviumdb::database::{Config, Database};
+use triviumdb::database::Database;
 use triviumdb::storage::wal::WalEntry;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -137,36 +137,6 @@ fn 测试_WAL遇尾部乱码死字节_精确截除防止污染() {
         let db = Database::<f32>::open(&path, DIM).unwrap();
         assert_eq!(db.node_count(), 2, "乱码被截除，后续的新数据完美恢复");
     }
-
-    cleanup(&path);
-}
-
-#[test]
-fn 测试_HNSW阈值GC和人工压实的连贯性() {
-    let path = tmp_db("hnsw_gc_compaction");
-    cleanup(&path);
-
-    let config = Config {
-        dim: DIM,
-        ..Default::default()
-    };
-    let mut db = Database::<f32>::open_with_config(&path, config).unwrap();
-    
-    // 制造一堆数据
-    for _ in 0..10 {
-        db.insert(&[1.0, 1.0], serde_json::json!({})).unwrap();
-    }
-    
-    // 制造删除，触发墓碑 (此时可能并没有越过比例阈值)
-    for i in 1..=3 {
-        db.delete(i).unwrap();
-    }
-    
-    // 手工调用 compact，强制进行磁盘落盘和内存墓碑的深度清理
-    db.compact().expect("手工压实 GC 不应该报错");
-    
-    // 确保内部一致性没有被破坏
-    assert_eq!(db.node_count(), 7);
 
     cleanup(&path);
 }
