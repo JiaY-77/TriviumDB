@@ -353,15 +353,31 @@ impl ErpcIndex {
 
         // ═══ Stage 3: 对通过门禁的全局候选做 f32 精算 ═══
         let mut candidates: Vec<(usize, f32)> = Vec::with_capacity(refine_len);
-        for &(phys_idx, _) in &global_bq_candidates[..refine_len] {
-            let offset = phys_idx * self.dim;
-            let vec_slice = &flat_data[offset..offset + self.dim];
-            let mut f32_vec = Vec::with_capacity(self.dim);
-            for x in vec_slice {
-                f32_vec.push(x.to_f32());
+        let is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
+
+        if is_f32 {
+            for &(phys_idx, _) in &global_bq_candidates[..refine_len] {
+                let offset = phys_idx * self.dim;
+                let vec_slice = &flat_data[offset..offset + self.dim];
+                // SAFETY: 运行时已确认 T 的真实类型为 f32，且底层严格对齐
+                let f32_slice: &[f32] = unsafe {
+                    std::slice::from_raw_parts(vec_slice.as_ptr() as *const f32, self.dim)
+                };
+                let sim = cosine_sim(query, f32_slice);
+                candidates.push((phys_idx, sim));
             }
-            let sim = cosine_sim(query, &f32_vec);
-            candidates.push((phys_idx, sim));
+        } else {
+            for &(phys_idx, _) in &global_bq_candidates[..refine_len] {
+                let offset = phys_idx * self.dim;
+                let vec_slice = &flat_data[offset..offset + self.dim];
+                // 对于 f16 / u64：分配并转换
+                let mut f32_vec = Vec::with_capacity(self.dim);
+                for x in vec_slice {
+                    f32_vec.push(x.to_f32());
+                }
+                let sim = cosine_sim(query, &f32_vec);
+                candidates.push((phys_idx, sim));
+            }
         }
 
         // 取 Top-K
