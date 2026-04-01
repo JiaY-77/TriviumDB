@@ -23,9 +23,17 @@ mod inner {
         }
     }
 
-    fn gen_vec_1536(rng: &mut StdRng) -> Vec<f32> {
+    // 生成聚类特征的数据集，模拟真实的 Embeddings 分布，而非绝对均匀的对抗随机噪声
+    fn gen_vec_1536(rng: &mut StdRng, center: Option<&[f32]>) -> Vec<f32> {
         let mut v = vec![0.0f32; 1536];
-        for x in v.iter_mut() { *x = rng.gen_range(-1.0..1.0); }
+        if let Some(c) = center {
+            for (i, x) in v.iter_mut().enumerate() { 
+                // 数据由聚类中心与局部噪声混合
+                *x = c[i]*0.7 + rng.gen_range(-1.0..1.0)*0.3; 
+            }
+        } else {
+            for x in v.iter_mut() { *x = rng.gen_range(-1.0..1.0); }
+        }
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
         for x in v.iter_mut() { *x /= norm; }
         v
@@ -42,17 +50,26 @@ mod inner {
         let dim = 1536;
         let mut rng = StdRng::seed_from_u64(42);
 
-        eprintln!("\n[对比测试] 正在准备 {} 条 {} 维数据集...", n, dim);
-        let dataset: Vec<Vec<f32>> = (0..n).map(|_| gen_vec_1536(&mut rng)).collect();
-        let query_vec = gen_vec_1536(&mut rng);
+        eprintln!("\n[对比测试] 正在准备 {} 条 {} 维具备聚类分布特征的数据集...", n, dim);
+        let num_clusters = 50;
+        let mut centers = Vec::new();
+        for _ in 0..num_clusters {
+            centers.push(gen_vec_1536(&mut rng, None));
+        }
+
+        let dataset: Vec<Vec<f32>> = (0..n).map(|i| {
+            gen_vec_1536(&mut rng, Some(&centers[i % num_clusters]))
+        }).collect();
+        let query_vec = gen_vec_1536(&mut rng, Some(&centers[0]));
+        
         let hnsw_points: Vec<Vector1536> = dataset.iter().map(|v| to_fixed_1536(v)).collect();
         let hnsw_query = to_fixed_1536(&query_vec);
 
-        // ── HNSW 构建 ──
+        // ── HNSW 的图构建 ──
         let t_h_build = std::time::Instant::now();
         let hnsw = Builder::default().build(hnsw_points, (0..n).map(|i| i as u64).collect());
         let h_build_time = t_h_build.elapsed();
-        eprintln!("✅ HNSW 构建耗时: {:?}", h_build_time);
+        eprintln!("✅ HNSW 图结构真实构建耗时: {:?}", h_build_time);
 
         // ── ERPC 构建 ──
         let db_path = "bench_hnsw_cmp.tdb";
@@ -62,17 +79,20 @@ mod inner {
         let mut db = Database::<f32>::open(db_path, dim).unwrap();
         db.disable_auto_compaction();
         
-        let t_e_build = std::time::Instant::now();
         for v in &dataset { db.insert(v, serde_json::json!({})).unwrap(); }
-        db.flush().unwrap();
+        // 这一步之前仅仅是写入了内存连续段和WAL。调用 compact() 强制触发并包含 ErpcIndex 的真实建立时间。
+        let t_e_build = std::time::Instant::now();
+        db.compact().unwrap(); 
         let e_build_time = t_e_build.elapsed();
-        eprintln!("✅ ERPC 构建耗时 (含IO写入): {:?}", e_build_time);
+        eprintln!("✅ ERPC 索引真实构建耗时 (含IO写入): {:?}", e_build_time);
 
-        // ── 准备搜索 ──
-        let erpc_cfg_1 = SearchConfig { top_k: 10, enable_bq_coarse_search: true, bq_candidate_ratio: 0.01, ..Default::default() };
-        let erpc_cfg_5 = SearchConfig { top_k: 10, enable_bq_coarse_search: true, bq_candidate_ratio: 0.05, ..Default::default() };
+        // ── 准备搜索对比 ──
+        // 真实的三段式管线索引检索
+        let erpc_true_cfg = SearchConfig { top_k: 10, enable_bq_coarse_search: false, ..Default::default() };
+        // 纯线性空间的 Hamming BQ 量化强行全量扫描过滤
+        let bq_linear_cfg_5 = SearchConfig { top_k: 10, enable_bq_coarse_search: true, bq_candidate_ratio: 0.05, ..Default::default() };
 
-        let mut group = c.benchmark_group("HNSW_vs_ERPC_20k_1536D");
+        let mut group = c.benchmark_group(format!("HNSW_vs_ERPC_{}k_1536D_Clustered", n / 1000));
 
         group.bench_function("HNSW Search (instant-distance)", |b| {
             b.iter(|| {
@@ -82,15 +102,15 @@ mod inner {
             })
         });
 
-        group.bench_function("ERPC Search (1% Scan)", |b| {
+        group.bench_function("BQ Linear Scan (5% Refine)", |b| {
             b.iter(|| {
-                db.search_hybrid(None, Some(black_box(query_vec.as_slice())), &erpc_cfg_1).unwrap()
+                db.search_hybrid(None, Some(black_box(query_vec.as_slice())), &bq_linear_cfg_5).unwrap()
             })
         });
 
-        group.bench_function("ERPC Search (5% Scan)", |b| {
+        group.bench_function("True ERPC Index Search", |b| {
             b.iter(|| {
-                db.search_hybrid(None, Some(black_box(query_vec.as_slice())), &erpc_cfg_5).unwrap()
+                db.search_hybrid(None, Some(black_box(query_vec.as_slice())), &erpc_true_cfg).unwrap()
             })
         });
 

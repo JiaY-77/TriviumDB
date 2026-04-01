@@ -284,6 +284,24 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         {
             let mut mt = lock_or_recover(&self.memtable);
             tracing::info!("Manual compaction started for {}", self.db_path);
+
+            // --- 强制重建 ERPC 索引 ---
+            // 无论节点数多少，手动压实都应该尝试重建（供 Bench 和 CLI 强制使用）
+            if matches!(self.storage_mode, crate::database::StorageMode::Mmap) {
+                let node_count = mt.node_count();
+                if node_count > 0 {
+                    mt.ensure_vectors_cache();
+                    let flat = mt.flat_vectors();
+                    let dim = mt.dim();
+                    tracing::info!("[{}] Rebuilding ERPC Accelerated Index manually (nodes={})...", self.db_path, node_count);
+                    let start_erpc = std::time::Instant::now();
+                    let effort = 0.6; // 默认 effort
+                    let new_erpc = crate::index::erpc::ErpcIndex::build(flat, dim, effort);
+                    mt.erpc_index = Some(new_erpc);
+                    tracing::info!("[{}] ERPC block finalized in {:?}", self.db_path, start_erpc.elapsed());
+                }
+            }
+
             file_format::save(&mut mt, &self.db_path, self.storage_mode)?;
         } // 先释放内存锁，让前台后续读写快速获取
 
