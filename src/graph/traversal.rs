@@ -10,6 +10,7 @@ pub fn expand_graph<T: crate::VectorType>(
     teleport_alpha: f32,                 // PPR 阻尼因子/回家概率
     enable_inverse_inhibition: bool,     // 是否启用的入度惩罚
     lateral_inhibition_threshold: usize, // 侧向截断阈值，若是 0 则无限制
+    enable_refractory_fatigue: bool,     // 是否启用生物不应期（疲劳冷却）
 ) -> Vec<SearchHit> {
     if max_depth == 0 {
         return seeds;
@@ -54,10 +55,14 @@ pub fn expand_graph<T: crate::VectorType>(
                     };
 
                     // 不应期判定（疲劳状态）：若目标节点处于疲劳期，本次能量传导严重衰减
-                    let target_fatigue = db.get_fatigue(edge.target_id);
-                    let fatigue_discount = if target_fatigue > 0 {
-                        active_fatigue.push(edge.target_id);
-                        0.15 // 遭遇疲劳节点，接下来的单次能量传导衰减 85%
+                    let fatigue_discount = if enable_refractory_fatigue {
+                        let target_fatigue = db.get_fatigue(edge.target_id);
+                        if target_fatigue > 0 {
+                            active_fatigue.push(edge.target_id);
+                            0.15 // 遭遇疲劳节点，接下来的单次能量传导衰减 85%
+                        } else {
+                            1.0
+                        }
                     } else {
                         1.0
                     };
@@ -117,16 +122,21 @@ pub fn expand_graph<T: crate::VectorType>(
     });
 
     // === 不应期（疲劳）的更新与结算机制 ===
-    
-    // 1. 消耗本轮真实触发削弱了的疲劳节点（解除标记）
-    active_fatigue.sort_unstable();
-    active_fatigue.dedup();
-    db.consume_fatigue_batch(&active_fatigue);
+    if enable_refractory_fatigue {
+        // 1. 消耗本轮真实触发削弱了的疲劳节点（解除标记）
+        if !active_fatigue.is_empty() {
+            active_fatigue.sort_unstable();
+            active_fatigue.dedup();
+            db.consume_fatigue_batch(&active_fatigue);
+        }
 
-    // 2. 将本次漫游排位最高的赢家节点（Top 15）打入物理疲劳冷却期
-    // 这将迫使下一轮近乎相同的查询能量不会再无限流入黑洞，进而孕育新的亚支路
-    let top_ids: Vec<NodeId> = expanded_results.iter().take(15).map(|h| h.id).collect();
-    db.mark_fatigued(&top_ids);
+        // 2. 将本次漫游排位最高的赢家节点（Top 15）打入物理疲劳冷却期
+        // 这将迫使下一轮近乎相同的查询能量不会再无限流入黑洞，进而孕育新的亚支路
+        if !expanded_results.is_empty() {
+            let top_ids: Vec<NodeId> = expanded_results.iter().take(15).map(|h| h.id).collect();
+            db.mark_fatigued(&top_ids);
+        }
+    }
 
     expanded_results
 }

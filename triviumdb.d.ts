@@ -89,6 +89,8 @@ export interface JsSearchConfig {
   enableDpp?: boolean;
   /** DPP 质量权重幂次 (默认 1.0) */
   dppQualityWeight?: number;
+  /** 启用物理神经不应期（Fatigue），强制避免对高频节点的死循环访问 (默认 false) */
+  enableRefractoryFatigue?: boolean;
   /** 启用文本/关键词混合检索 (默认 false) */
   enableTextHybridSearch?: boolean;
   /** 文本分数的加权系数 (默认 1.5) */

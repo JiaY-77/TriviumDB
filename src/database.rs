@@ -60,6 +60,8 @@ pub struct SearchConfig {
     pub dpp_quality_weight: f32,
 
     // --- 高级认知选项 (完全 Opt-in) ---
+    /// 启用物理神经不应期（Fatigue），强制避免对高频节点的死循环访问，提供极强的长期多样性
+    pub enable_refractory_fatigue: bool,
     /// 启用时，将使用 `1.0 / (1.0 + log10(in_degree))` 对泛化扩散节点施加反向惩罚
     pub enable_inverse_inhibition: bool,
     /// 当 > 0 时，作为侧向抑制起保护作用，自动截断扩散网络 (如传入 5000)
@@ -96,6 +98,7 @@ impl Default for SearchConfig {
             fista_threshold: 0.30,
             enable_dpp: false,
             dpp_quality_weight: 1.0,
+            enable_refractory_fatigue: false,
             enable_inverse_inhibition: false,
             lateral_inhibition_threshold: 0,
             enable_bq_coarse_search: false,
@@ -281,9 +284,13 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// 业务层可以在凌晨或系统空闲时调用，避免后台压实带来的不可控前台延迟。
     /// 压实结束时强制 rebuild_index，确保 HNSW 图索引中不遗留任何墓碑。
     pub fn compact(&mut self) -> Result<()> {
-        {
+        let (should_build_erpc, flat_snapshot, dim, db_path_clone) = {
             let mut mt = lock_or_recover(&self.memtable);
             tracing::info!("Manual compaction started for {}", self.db_path);
+
+            let mut snapshot = Vec::new();
+            let d = mt.dim();
+            let mut should_build = false;
 
             // --- 强制重建 ERPC 索引 ---
             // 无论节点数多少，手动压实都应该尝试重建（供 Bench 和 CLI 强制使用）
@@ -291,24 +298,37 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 let node_count = mt.node_count();
                 if node_count > 0 {
                     mt.ensure_vectors_cache();
-                    let flat = mt.flat_vectors();
-                    let dim = mt.dim();
-                    tracing::info!("[{}] Rebuilding ERPC Accelerated Index manually (nodes={})...", self.db_path, node_count);
-                    let start_erpc = std::time::Instant::now();
-                    let effort = 0.6; // 默认 effort
-                    let new_erpc = crate::index::erpc::ErpcIndex::build(flat, dim, effort);
-                    mt.erpc_index = Some(new_erpc);
-                    tracing::info!("[{}] ERPC block finalized in {:?}", self.db_path, start_erpc.elapsed());
+                    snapshot = mt.flat_vectors().to_vec(); // 🏎️ Extract snapshot, drop lock!
+                    should_build = true;
                 }
             }
+            (should_build, snapshot, d, self.db_path.clone())
+        };
 
-            file_format::save(&mut mt, &self.db_path, self.storage_mode)?;
-        } // 先释放内存锁，让前台后续读写快速获取
+        if should_build_erpc {
+            tracing::info!("[{}] Rebuilding ERPC Accelerated Index manually...", db_path_clone);
+            let start_erpc = std::time::Instant::now();
+            let effort = 0.6; // 默认 effort
+            let new_erpc = crate::index::erpc::ErpcIndex::build(&flat_snapshot, dim, effort);
+            
+            // Re-acquire lock to insert new index
+            let mut mt = lock_or_recover(&self.memtable);
+            mt.erpc_index = Some(new_erpc);
+            tracing::info!("[{}] ERPC block finalized in {:?}", db_path_clone, start_erpc.elapsed());
+        }
 
         {
+            // 🔥 必须严格按特定顺序加锁，解决无锁竞态丢失：
+            let mut mt = lock_or_recover(&self.memtable);
+            file_format::save(&mut mt, &self.db_path, self.storage_mode)?;
+            
+            // 💀 警告：绝对不能在这里提早 drop(mt)！
+            // 因为如果在这条线上 drop(mt)，前台立即拿到 mt 继续插入向量，并且写入新 WAL。
+            // 随后下方的 wal.clear() 会将刚刚这 1 毫秒内前台写入 WAL 的合法数据一并抹除，造成永久数据丢失！
             let mut w = lock_or_recover(&self.wal);
             w.clear()?;
-        }
+            
+        } // 此时大括号结束，同时释放内存锁与 WAL 锁。
 
         tracing::info!("Manual compaction completed for {}", self.db_path);
         Ok(())
@@ -643,12 +663,44 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     for (idx, score) in candidates {
                         if score >= config.min_score {
                             let id = mt.get_id_by_index(idx);
-                            if id != 0 && passes_filter(id) {
+                            if mt.contains(id) && passes_filter(id) {
                                 let payload = mt.get_payload(id).cloned().unwrap_or(serde_json::Value::Null);
                                 refined.push(SearchHit { id, score, payload });
                             }
                         }
                     }
+
+                    // --- Delta 补充扫描 (The Invisible Horizon Guard) ---
+                    // 当后台建树未锁住前台时，新插入的向量不会在当前的 erpc_index 内部。
+                    // 它们存在于 MemTable 的尾部，我们需要在此补上一次局部暴力组扫！
+                    let erpc_size = erpc.sequence.len();
+                    let total_slots = mt.internal_slot_count();
+                    
+                    if total_slots > erpc_size {
+                        let mut delta_hits = brute_force::search(
+                            query_vector,
+                            &vectors[erpc_size * dim .. total_slots * dim],
+                            dim,
+                            config.top_k,
+                            config.min_score,
+                            |idx| {
+                                let real_idx = erpc_size + idx;
+                                let id = mt.get_id_by_index(real_idx);
+                                if mt.contains(id) && passes_filter(id) { id } else { 0 }
+                            },
+                        );
+                        // Populate payloads for Delta hits
+                        for hit in &mut delta_hits {
+                            if let Some(p) = mt.get_payload(hit.id) {
+                                hit.payload = p.clone();
+                            }
+                        }
+                        
+                        refined.extend(delta_hits);
+                        refined.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                        refined.truncate(config.top_k);
+                    }
+                    
                     refined
                 } else {
                     // --- 原生基础全局爆搜（MemTable L0 热区）带预过滤 ---
@@ -724,7 +776,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             if score >= config.min_score {
                 // 确保所有来源（文本/HNSW/残差）的结果都在最终聚合前经过过滤检查
                 let passes = match filter_ref {
-                    None => true,
+                    None => mt.contains(id), // 🔥 修复：如果无过滤条件，必须确保节点没被删除！
                     Some(f) => mt.get_payload(id).is_some_and(|p| f.matches(p)),
                 };
                 if passes {
@@ -760,7 +812,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             }
         }
 
-        // --- L6 & L7: PPR 结合内向原生边漫游 ---
+        // --- L6 & L7: PPR 结合内向原生边漫游 + 疲劳 ---
         let mut expanded = crate::graph::traversal::expand_graph(
             &mt,
             seeds,
@@ -768,6 +820,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             config.teleport_alpha,
             config.enable_inverse_inhibition,
             config.lateral_inhibition_threshold,
+            config.enable_refractory_fatigue,
         );
 
         // L8 (时间衰减与多维重排) 已被设计哲学剥离：不应在此侵入 JSON 业务字段，交由上层 Agent 侧处理。

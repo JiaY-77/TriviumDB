@@ -20,6 +20,7 @@ fn test_fatigue_and_specificity_ablation() {
         top_k: 20,
         enable_advanced_pipeline: true,
         enable_dpp: false,
+        enable_refractory_fatigue: true, // 必须开启防死循环机制
         teleport_alpha: 0.1, // 允许能量有效传播
         ..Default::default()
     };

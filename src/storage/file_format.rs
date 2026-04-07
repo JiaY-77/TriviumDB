@@ -238,9 +238,10 @@ fn save_tdb<T: VectorType>(
     // 5. ERPC Metadata Block (If exists)
     if let Some(erpc) = &memtable.erpc_index {
         w.write_all(bytemuck::bytes_of(&erpc.params))?;
-        for pc in &erpc.pca_basis {
-            // PCA 基底扁平化
-            for &fv in pc { w.write_all(&fv.to_le_bytes())?; }
+        for chunk_centers in &erpc.pq_centers {
+            for c in chunk_centers {
+                for &fv in c { w.write_all(&fv.to_le_bytes())?; }
+            }
         }
         for c in &erpc.centers {
             // 中心点扁平化
@@ -522,18 +523,35 @@ fn load_erpc(bytes: &[u8], erpc_offset: usize, dim: usize) -> Result<Option<Erpc
     let params: ErpcParams = bytemuck::pod_read_unaligned(&bytes[cursor..cursor + 32]);
     cursor += 32;
 
-    let pca_dims = crate::index::erpc::PCA_DIMS;
-    let mut pca_basis = Vec::with_capacity(pca_dims);
-    for _ in 0..pca_dims {
-        let size = dim * 4;
-        let mut pc = Vec::with_capacity(dim);
-        for i in 0..dim {
-            let offset = cursor + i * 4;
-            let val = f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-            pc.push(val);
+    let chunks = crate::index::erpc::CHUNKS;
+    let pq_k = crate::index::erpc::PQ_K;
+    
+    let mut chunk_bounds = Vec::with_capacity(chunks);
+    let base = dim / chunks;
+    let mut remainder = dim % chunks;
+    let mut start = 0;
+    for _ in 0..chunks {
+        let len = base + if remainder > 0 { 1 } else { 0 };
+        if remainder > 0 { remainder -= 1; }
+        chunk_bounds.push((start, start + len));
+        start += len;
+    }
+
+    let mut pq_centers = Vec::with_capacity(chunks);
+    for c in 0..chunks {
+        let (s, e) = chunk_bounds[c];
+        let sub_dim = e - s;
+        let mut pc = Vec::with_capacity(pq_k);
+        for _ in 0..pq_k {
+            let mut pt = Vec::with_capacity(sub_dim);
+            for _ in 0..sub_dim {
+                let offset = cursor;
+                pt.push(f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()));
+                cursor += 4;
+            }
+            pc.push(pt);
         }
-        pca_basis.push(pc);
-        cursor += size;
+        pq_centers.push(pc);
     }
 
     let k_clusters = params.k_clusters as usize;
@@ -564,10 +582,12 @@ fn load_erpc(bytes: &[u8], erpc_offset: usize, dim: usize) -> Result<Option<Erpc
     }
 
     Ok(Some(ErpcIndex {
-        pca_basis,
+        lsh_basis: Vec::new(),
         centers,
         sequence,
         dim,
         params,
+        pq_centers,
+        chunk_bounds,
     }))
 }

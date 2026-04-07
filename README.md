@@ -192,7 +192,7 @@ with triviumdb.TriviumDB("memory.tdb", dim=3) as db:
 | 🧠 **认知管线**     | 内置九层认知管线：FISTA 残差寻隐 / PPR 图扩散 / DPP 多样性采样，运行时可开关 |
 | 🔋 **不应期机制**   | 高频激活节点将进入物理疲劳冷却期（85% 能量削减），强制扩散探索新亚支路，解决「记忆僵化」问题 |
 | 📦 **统一数据模型** | 每个节点同时持有向量（f32×dim）、JSON 元数据和图谱边，共享全局 `u64` 主键   |
-| ⚡ **ERPC 自适应索引** | 自研 Electoral Residual Projection Code 向量索引，2 万节点以上自动激活，无需配置，最高支持 512 聚类 + 三阶段搜索管线 |
+| ⚡ **ERPC 自适应索引** | 自研 Electoral Residual Product Code 向量索引，2 万节点以上自动激活，无需配置，最高支持 512 聚类 + 三阶段搜索管线 |
 | 💾 **双模式存储**   | Mmap（大模型极速分体冷启动） / Rom（传统 SQLite 级单文件打包携带），无缝热切换 |
 | 🛡️ **四层灾备防御** | 预写日志(WAL) + 写入原子替换 + 事务预检干跑(Dry-Run) + OS 内存写时复制隔离    |
 | 🔄 **零开销事务**   | `begin_tx()` 验证前置架构，中途报错绝不污染内存，实现真正的零代价原子回滚   |
@@ -214,7 +214,7 @@ TriviumDB 采用**智能自适应双引擎**向量索引，全程自动路由，
 | **小规模热区** | BruteForce | < 2 万节点（或 ERPC 未就绪） | 100% 精确召回，rayon 多核，延迟极低 |
 | **大规模冷区** | **ERPC**（自研） | ≥ 2 万节点，Mmap 模式，后台自动构建 | 三阶段加速管线：多村长 Multi-Probe → BQ Hamming 粗筛 → f32 精算，无需重建 |
 
-**ERPC（Electoral Residual Projection Code）** 是 TriviumDB 的自研向量索引引擎，与 HNSW 等图结构索引相比：
+**ERPC（Electoral Residual Product Code）** 是 TriviumDB 的自研向量索引引擎，与 HNSW 等图结构索引相比：
 - ✅ **零图维护开销**：删除/更新节点不破坏索引，没有 Ghost Node 陷阱
 - ✅ **SSD 友好**：索引元数据落入 `.tdb` 头部，重启零开销恢复（bytemuck 零拷贝）
 - ✅ **全自动**：2 万节点以上后台 Compaction 时自动重建，前台查询透明路由
@@ -303,7 +303,7 @@ TriviumDB/
 - [x] 认知检索管线内置（FISTA 残差搜索 / PPR 图扩散 / DPP 多样性采样）
 - [x] 运行时可开关 `SearchConfig`，逐查询粒度动态控制管线各层
 - [x] 向量 / 配置 NaN / Inf / 维度容错拦截
-- [x] **ERPC 自研向量索引**：Electoral Residual Projection Code 三阶段搜索管线
+- [x] **ERPC 自研向量索引**：Electoral Residual Product Code 三阶段搜索管线
 - [x] **HNSW 完全移除**：零依赖，架构大幅精简，无图索引维护负担
 - [x] **ERPC 自动化**：Compaction 守护线程自动重建，2 万节点自动激活，前台透明
 - [x] **BMI2 PDEP 硬件加速莫顿码**：x86_64 运行时检测，自动使用单条硬件指令

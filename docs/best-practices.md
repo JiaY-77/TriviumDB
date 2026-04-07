@@ -64,7 +64,7 @@ cargo add triviumdb
 
 ```toml
 [dependencies]
-triviumdb = "0.4.6" 
+triviumdb = "0.4.90" 
 ```
 
 ### 30 秒入门模板
@@ -401,57 +401,6 @@ rows = db.query(f'MATCH (a {{id: {anchor_id}}})-[:participant]->(b) RETURN b')
 
 ---
 
-## ERPC 索引策略与调优
-
-TriviumDB v0.4.6 开始采用全自动双引擎 ERPC 索引，开发者**无需也无法手动触发重建**。了解以下策略可以达到最佳检索效果。
-
-### ERPC 自动激活条件
-
-| 条件 | 检索引擎 | 行为 |
-|------|----------|------|
-| Mmap 模式 + < 2 万节点 | BruteForce | 100% 精确召回 |
-| Mmap 模式 + ≥ 2 万节点 + 首次 Compaction 完成 | ERPC | 近似搜索，Recall@10 > 85% |
-| Rom 模式（任意节点数） | BruteForce | 100% 精确召回 |
-
-### 快速达到 ERPC 激活
-
-```python
-# 1. 确保使用 Mmap 模式（Rust 默认）
-# Python 端默认也是 Mmap 模式
-with triviumdb.TriviumDB("data.tdb", dim=1536) as db:
-    # 2. 导入 >= 2 万条数据
-    db.batch_insert(vectors_20k, payloads_20k)
-    # 3. 小负荷 flush，触发一次 Compaction——ERPC 索引将在此期间在后台构建
-    db.flush()
-    # 4. 部署 auto_compaction 持续更新索引
-    db.enable_auto_compaction(interval_secs=60)
-```
-
-### 高精度场景：强制绕过 ERPC
-
-如果你的业务对 100% 召回率有给对要求（如金融风控、医疗诊断），可以用 Rom 模式强制走 BruteForce：
-
-```rust
-// Rom 模式 运行时不需要/不会构建 ERPC
-let db = Database::<f32>::open_with_config("data.tdb", Config {
-    dim: 1536,
-    storage_mode: StorageMode::Rom,  // 强制 BruteForce
-    ..Default::default()
-})?;
-```
-
-### ERPC effort 参数调优
-
-`effort` 参数控制 ERPC 索引的建库开销与检索精度权衡，目前**确定性设定为 0.6**，适合绝大多数生产场景。
-
-| effort | BQ_REFINED_COUNT （5万数据） | K_CLUSTERS | 适用场景 |
-|--------|--------------------------|------------|-----------|
-| 0.3 | ~自动计算 | 小 | 快速响应优先 |
-| **0.6** | **~477** | **~170** | **默认，平衡最佳** |
-| 1.0 | ~自动计算 | 最大 | 高精度优先 |
-
----
-
 ### 模式一：AI Agent 长期记忆
 
 ```python
@@ -638,7 +587,7 @@ with triviumdb.TriviumDB("knowledge_v2.tdb", dim=NEW_DIM) as new_db:
 
 ## ERPC 索引策略与调优
 
-TriviumDB v0.4.6 起采用全自动双引擎 ERPC 索引，开发者**无需也无法手动触发重建**。了解以下策略可以取得最佳检索效果。
+TriviumDB v0.4.90 起采用全自动双引擎 ERPC 索引，开发者**无需也无法手动触发重建**。了解以下策略可以取得最佳检索效果。
 
 ### ERPC 自动激活条件
 

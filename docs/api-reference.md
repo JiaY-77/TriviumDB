@@ -1,6 +1,6 @@
 # TriviumDB API 完整参考
 
-> **版本**: v0.4.6  
+> **版本**: v0.4.90  
 > **语言**: Rust 核心 + Python 绑定 (PyO3) + Node.js 绑定 (napi-rs)  
 > **许可**: Apache-2.0
 
@@ -656,7 +656,7 @@ let ids = db.all_node_ids();     // Vec<NodeId>
 
 ### ERPC 自动索引说明
 
-TriviumDB v0.4.6 起采用**全自动双引擎向量索引路由**，不再提供手动 `rebuild_index()` 接口：
+TriviumDB v0.4.90 起采用**全自动双引擎向量索引路由**，不再提供手动 `rebuild_index()` 接口：
 
 | 条件 | 检索引擎 | 召回行为 |
 |------|----------|----------|

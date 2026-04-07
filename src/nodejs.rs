@@ -56,6 +56,7 @@ pub mod nodejs {
         pub fista_threshold: Option<f64>,
         pub enable_dpp: Option<bool>,
         pub dpp_quality_weight: Option<f64>,
+        pub enable_refractory_fatigue: Option<bool>,
         pub enable_text_hybrid_search: Option<bool>,
         pub text_boost: Option<f64>,
         pub custom_query_text: Option<String>,
@@ -504,6 +505,7 @@ pub mod nodejs {
                 fista_threshold: None,
                 enable_dpp: None,
                 dpp_quality_weight: None,
+                enable_refractory_fatigue: None,
                 custom_query_text: None,
                 enable_text_hybrid_search: None,
                 text_boost: None,
@@ -520,6 +522,7 @@ pub mod nodejs {
                 fista_threshold: cfg.fista_threshold.unwrap_or(0.3) as f32,
                 enable_dpp: cfg.enable_dpp.unwrap_or(false),
                 dpp_quality_weight: cfg.dpp_quality_weight.unwrap_or(1.0) as f32,
+                enable_refractory_fatigue: cfg.enable_refractory_fatigue.unwrap_or(false),
                 enable_text_hybrid_search: cfg.enable_text_hybrid_search.unwrap_or(false),
                 text_boost: cfg.text_boost.unwrap_or(1.5) as f32,
                 ..Default::default()
