@@ -1,6 +1,6 @@
 [package]
 name = "triviumdb"
-version = "0.4.90"
+version = "0.4.91"
 edition = "2024"
 authors = ["YoKONCy <2752026184@qq.com>"]
 description = "A high-performance memory-mmap hybrid search engine built for AI, combining dense vector, sparse text, graph relations, and JSON metadata."
@@ -18,7 +18,6 @@ default = []
 python = ["dep:pyo3"]
 nodejs = ["dep:napi", "dep:napi-derive"]
 cli = [] # 仅供终端工具使用
-bench-hnsw = [] # 仅在手动运行 HNSW 对比 bench 时启用：cargo bench --bench hnsw_vs_erpc --features bench-hnsw
 
 [[bin]]
 name = "triviumdb"
@@ -56,11 +55,11 @@ name = "benchmark"
 harness = false
 
 [[bench]]
-name = "erpc_vs_brute"
+name = "bq_vs_brute"
 harness = false
 
 [[bench]]
-name = "hnsw_vs_erpc"
+name = "bench_500k"
 harness = false
 
 [profile.release]

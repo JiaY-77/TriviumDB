@@ -59,7 +59,16 @@ pub mod nodejs {
         pub enable_refractory_fatigue: Option<bool>,
         pub enable_text_hybrid_search: Option<bool>,
         pub text_boost: Option<f64>,
+        pub bq_candidate_ratio: Option<f64>,
         pub custom_query_text: Option<String>,
+    }
+
+    /// 节点关系边
+    #[napi(object)]
+    pub struct JsEdge {
+        pub target_id: f64,
+        pub label: String,
+        pub weight: f64,
     }
 
     /// 节点完整视图
@@ -68,6 +77,7 @@ pub mod nodejs {
         pub id: f64,
         pub vector: Vec<f64>,
         pub payload: serde_json::Value,
+        pub edges: Vec<JsEdge>,
         pub num_edges: u32,
     }
 
@@ -350,23 +360,50 @@ pub mod nodejs {
         pub fn get(&self, id: f64) -> Option<JsNodeView> {
             let id = id as u64;
             match &self.inner {
-                DbBackend::F32(db) => db.get(id).map(|n| JsNodeView {
-                    id: n.id as f64,
-                    vector: n.vector.iter().map(|&x| x as f64).collect(),
-                    payload: n.payload,
-                    num_edges: n.edges.len() as u32,
+                DbBackend::F32(db) => db.get(id).map(|n| {
+                    let num_edges = n.edges.len() as u32;
+                    let edges_arr = n.edges.into_iter().map(|e| JsEdge {
+                        target_id: e.target_id as f64,
+                        label: e.label.clone(),
+                        weight: e.weight as f64,
+                    }).collect();
+                    JsNodeView {
+                        id: n.id as f64,
+                        vector: n.vector.iter().map(|&x| x as f64).collect(),
+                        payload: n.payload,
+                        edges: edges_arr,
+                        num_edges,
+                    }
                 }),
-                DbBackend::F16(db) => db.get(id).map(|n| JsNodeView {
-                    id: n.id as f64,
-                    vector: n.vector.iter().map(|x| x.to_f64()).collect(),
-                    payload: n.payload,
-                    num_edges: n.edges.len() as u32,
+                DbBackend::F16(db) => db.get(id).map(|n| {
+                    let num_edges = n.edges.len() as u32;
+                    let edges_arr = n.edges.into_iter().map(|e| JsEdge {
+                        target_id: e.target_id as f64,
+                        label: e.label.clone(),
+                        weight: e.weight as f64,
+                    }).collect();
+                    JsNodeView {
+                        id: n.id as f64,
+                        vector: n.vector.iter().map(|x| x.to_f64()).collect(),
+                        payload: n.payload,
+                        edges: edges_arr,
+                        num_edges,
+                    }
                 }),
-                DbBackend::U64(db) => db.get(id).map(|n| JsNodeView {
-                    id: n.id as f64,
-                    vector: n.vector.iter().map(|&x| x as f64).collect(),
-                    payload: n.payload,
-                    num_edges: n.edges.len() as u32,
+                DbBackend::U64(db) => db.get(id).map(|n| {
+                    let num_edges = n.edges.len() as u32;
+                    let edges_arr = n.edges.into_iter().map(|e| JsEdge {
+                        target_id: e.target_id as f64,
+                        label: e.label.clone(),
+                        weight: e.weight as f64,
+                    }).collect();
+                    JsNodeView {
+                        id: n.id as f64,
+                        vector: n.vector.iter().map(|&x| x as f64).collect(),
+                        payload: n.payload,
+                        edges: edges_arr,
+                        num_edges,
+                    }
                 }),
             }
         }
@@ -509,6 +546,7 @@ pub mod nodejs {
                 custom_query_text: None,
                 enable_text_hybrid_search: None,
                 text_boost: None,
+                bq_candidate_ratio: None,
             });
 
             let core_config = crate::database::SearchConfig {
@@ -525,6 +563,7 @@ pub mod nodejs {
                 enable_refractory_fatigue: cfg.enable_refractory_fatigue.unwrap_or(false),
                 enable_text_hybrid_search: cfg.enable_text_hybrid_search.unwrap_or(false),
                 text_boost: cfg.text_boost.unwrap_or(1.5) as f32,
+                bq_candidate_ratio: cfg.bq_candidate_ratio.unwrap_or(0.05) as f32,
                 ..Default::default()
             };
 
@@ -647,31 +686,64 @@ pub mod nodejs {
                 DbBackend::F32(db) => db
                     .filter_where(&filter)
                     .into_iter()
-                    .map(|n| JsNodeView {
-                        id: n.id as f64,
-                        vector: n.vector.iter().map(|&x| x as f64).collect(),
-                        payload: n.payload,
-                        num_edges: n.edges.len() as u32,
+                    .map(|n| {
+                        let edges_arr = n.edges
+                            .into_iter()
+                            .map(|e| JsEdge {
+                                target_id: e.target_id as f64,
+                                label: e.label,
+                                weight: e.weight as f64,
+                            })
+                            .collect::<Vec<_>>();
+                        JsNodeView {
+                            id: n.id as f64,
+                            vector: n.vector.iter().map(|&x| x as f64).collect(),
+                            payload: n.payload,
+                            num_edges: edges_arr.len() as u32,
+                            edges: edges_arr,
+                        }
                     })
                     .collect::<Vec<_>>(),
                 DbBackend::F16(db) => db
                     .filter_where(&filter)
                     .into_iter()
-                    .map(|n| JsNodeView {
-                        id: n.id as f64,
-                        vector: n.vector.iter().map(|x| x.to_f64()).collect(),
-                        payload: n.payload,
-                        num_edges: n.edges.len() as u32,
+                    .map(|n| {
+                        let edges_arr = n.edges
+                            .into_iter()
+                            .map(|e| JsEdge {
+                                target_id: e.target_id as f64,
+                                label: e.label,
+                                weight: e.weight as f64,
+                            })
+                            .collect::<Vec<_>>();
+                        JsNodeView {
+                            id: n.id as f64,
+                            vector: n.vector.iter().map(|x| x.to_f64()).collect(),
+                            payload: n.payload,
+                            num_edges: edges_arr.len() as u32,
+                            edges: edges_arr,
+                        }
                     })
                     .collect::<Vec<_>>(),
                 DbBackend::U64(db) => db
                     .filter_where(&filter)
                     .into_iter()
-                    .map(|n| JsNodeView {
-                        id: n.id as f64,
-                        vector: n.vector.iter().map(|&x| x as f64).collect(),
-                        payload: n.payload,
-                        num_edges: n.edges.len() as u32,
+                    .map(|n| {
+                        let edges_arr = n.edges
+                            .into_iter()
+                            .map(|e| JsEdge {
+                                target_id: e.target_id as f64,
+                                label: e.label,
+                                weight: e.weight as f64,
+                            })
+                            .collect::<Vec<_>>();
+                        JsNodeView {
+                            id: n.id as f64,
+                            vector: n.vector.iter().map(|&x| x as f64).collect(),
+                            payload: n.payload,
+                            num_edges: edges_arr.len() as u32,
+                            edges: edges_arr,
+                        }
                     })
                     .collect::<Vec<_>>(),
             };

@@ -46,6 +46,17 @@ pub mod python {
         pub payload: PyObject,
     }
 
+    #[pyclass(name = "Edge")]
+    #[derive(Clone)]
+    pub struct PyEdge {
+        #[pyo3(get)]
+        pub target_id: u64,
+        #[pyo3(get)]
+        pub label: String,
+        #[pyo3(get)]
+        pub weight: f32,
+    }
+
     /// Python 侧的节点完整视图
     #[pyclass(name = "NodeView")]
     pub struct PyNodeView {
@@ -55,6 +66,8 @@ pub mod python {
         pub vector: PyObject, // 可能是 f32/f16(透传给py仍是float)/u64
         #[pyo3(get)]
         pub payload: PyObject,
+        #[pyo3(get)]
+        pub edges: Vec<PyEdge>,
         #[pyo3(get)]
         pub num_edges: usize,
     }
@@ -494,6 +507,7 @@ pub mod python {
             enable_refractory_fatigue=false,
             enable_text_hybrid_search=false,
             text_boost=1.5,
+            bq_candidate_ratio=0.05,
             custom_query_text=None,
             payload_filter=None
         ))]
@@ -514,6 +528,7 @@ pub mod python {
             enable_refractory_fatigue: bool,
             enable_text_hybrid_search: bool,
             text_boost: f32,
+            bq_candidate_ratio: f32,
             custom_query_text: Option<String>,
             payload_filter: Option<&Bound<'_, PyDict>>,
         ) -> PyResult<Vec<PySearchHit>> {
@@ -537,6 +552,7 @@ pub mod python {
                 enable_refractory_fatigue,
                 enable_text_hybrid_search,
                 text_boost,
+                bq_candidate_ratio,
                 payload_filter: rust_filter,
                 ..Default::default()
             };
@@ -712,6 +728,11 @@ pub mod python {
                             id: n.id,
                             vector: n.vector.into_pyobject(py).unwrap().into_any().unbind(),
                             payload: json_to_pyobject(py, &n.payload),
+                            edges: n.edges.iter().map(|e| PyEdge {
+                                target_id: e.target_id,
+                                label: e.label.clone(),
+                                weight: e.weight,
+                            }).collect(),
                             num_edges: n.edges.len(),
                         }));
                     }
@@ -723,6 +744,11 @@ pub mod python {
                             id: n.id,
                             vector: f32_vec.into_pyobject(py).unwrap().into_any().unbind(),
                             payload: json_to_pyobject(py, &n.payload),
+                            edges: n.edges.iter().map(|e| PyEdge {
+                                target_id: e.target_id,
+                                label: e.label.clone(),
+                                weight: e.weight,
+                            }).collect(),
                             num_edges: n.edges.len(),
                         }));
                     }
@@ -733,6 +759,11 @@ pub mod python {
                             id: n.id,
                             vector: n.vector.into_pyobject(py).unwrap().into_any().unbind(),
                             payload: json_to_pyobject(py, &n.payload),
+                            edges: n.edges.iter().map(|e| PyEdge {
+                                target_id: e.target_id,
+                                label: e.label.clone(),
+                                weight: e.weight,
+                            }).collect(),
                             num_edges: n.edges.len(),
                         }));
                     }

@@ -102,7 +102,7 @@ impl Default for SearchConfig {
             enable_inverse_inhibition: false,
             lateral_inhibition_threshold: 0,
             enable_bq_coarse_search: false,
-            bq_candidate_ratio: 0.1,
+            bq_candidate_ratio: 0.05,
             text_boost: 1.5,
             enable_text_hybrid_search: false,
             bm25_k1: 1.2,
@@ -284,37 +284,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// 业务层可以在凌晨或系统空闲时调用，避免后台压实带来的不可控前台延迟。
     /// 压实结束时强制 rebuild_index，确保 HNSW 图索引中不遗留任何墓碑。
     pub fn compact(&mut self) -> Result<()> {
-        let (should_build_erpc, flat_snapshot, dim, db_path_clone) = {
+        {
             let mut mt = lock_or_recover(&self.memtable);
             tracing::info!("Manual compaction started for {}", self.db_path);
-
-            let mut snapshot = Vec::new();
-            let d = mt.dim();
-            let mut should_build = false;
-
-            // --- 强制重建 ERPC 索引 ---
-            // 无论节点数多少，手动压实都应该尝试重建（供 Bench 和 CLI 强制使用）
-            if matches!(self.storage_mode, crate::database::StorageMode::Mmap) {
-                let node_count = mt.node_count();
-                if node_count > 0 {
-                    mt.ensure_vectors_cache();
-                    snapshot = mt.flat_vectors().to_vec(); // 🏎️ Extract snapshot, drop lock!
-                    should_build = true;
-                }
-            }
-            (should_build, snapshot, d, self.db_path.clone())
-        };
-
-        if should_build_erpc {
-            tracing::info!("[{}] Rebuilding ERPC Accelerated Index manually...", db_path_clone);
-            let start_erpc = std::time::Instant::now();
-            let effort = 0.6; // 默认 effort
-            let new_erpc = crate::index::erpc::ErpcIndex::build(&flat_snapshot, dim, effort);
-            
-            // Re-acquire lock to insert new index
-            let mut mt = lock_or_recover(&self.memtable);
-            mt.erpc_index = Some(new_erpc);
-            tracing::info!("[{}] ERPC block finalized in {:?}", db_path_clone, start_erpc.elapsed());
+            mt.ensure_vectors_cache();
         }
 
         {
@@ -603,33 +576,148 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     }
                 };
 
-                if config.enable_bq_coarse_search {
-                    // --- BQ 混沌检索分支: L1 1-bit Hamming 粗排 ---
+                // ═══════════════════════════════════════════════════════
+                // 动态引擎路由：基于数据规模的自适应多级管线
+                // 1. N <= 20,000 => 暴力全扫 (AVX2 极限，必定全命中 Cache)
+                // 2. 20,000 < N <= 100,000 => BQ 双级管线 (堆排 + 物理重排预取)
+                // 3. 100,000 < N => BQ 三级火箭 (新增 Int8 中间层掩盖 L3 Miss)
+                // ═══════════════════════════════════════════════════════
+                let total_nodes = mt.node_count();
+                // 允许 config.enable_bq_coarse_search 强制开启，或者根据规模自动开启
+                let use_bq = config.enable_bq_coarse_search || total_nodes > 20_000;
+                let use_int8_rocket = total_nodes > 100_000;
+
+                if use_bq {
+                    // --- BQ 极速检索分支: L1 1-bit Hamming 粗排（堆优化版） ---
+                    use std::collections::BinaryHeap;
+
                     let q_bq = crate::index::bq::BqSignature::from_vector(query_vector);
                     let slot_count = mt.internal_slot_count();
                     let candidate_cnt = (((mt.node_count() as f32) * config.bq_candidate_ratio)
                         .ceil() as usize)
                         .max(config.top_k);
 
-                    let mut bq_scores: Vec<(usize, u32)> = (0..slot_count)
-                        .filter(|&i| {
-                            let id = mt.get_id_by_index(i);
-                            id != 0 && passes_filter(id) // 预过滤
-                        })
-                        .filter_map(|i| {
-                            mt.get_bq_signature(i)
-                                .map(|sig| (i, sig.hamming_distance(&q_bq)))
-                        })
-                        .collect();
+                    // 直接获取 BQ 签名和 ID 映射的连续内存切片，零开销访问
+                    let bq_sigs = mt.bq_signatures_slice();
+                    let id_map = mt.internal_indices();
+                    let has_filter = config.payload_filter.is_some();
 
-                    bq_scores.sort_unstable_by_key(|&(_, dist)| dist);
-                    bq_scores.truncate(candidate_cnt);
+                    // 使用大小为 K 的大根堆（MaxHeap on distance），O(N log K) 替代 O(N log N) 全排序
+                    // 堆元素：(hamming_distance, slot_index)
+                    // BinaryHeap 默认是大根堆，距离最大的在顶部，方便淘汰
+                    let mut heap: BinaryHeap<(u32, usize)> = BinaryHeap::with_capacity(candidate_cnt + 1);
 
-                    // --- BQ 混沌检索分支: L2 f32/f16 Cosine 精排 ---
-                    let mut refined = Vec::with_capacity(candidate_cnt);
-                    for (i, _dist) in bq_scores {
+                    // 热循环：纯裸索引扫描，无 Option 解包，无闭包调用
+                    let scan_len = slot_count.min(bq_sigs.len());
+                    for i in 0..scan_len {
+                        // 跳过 tombstone 节点（id == 0）
+                        let node_id = id_map[i];
+                        if node_id == 0 { continue; }
+
+                        // Payload 过滤仅在需要时执行（绝大多数场景无过滤，跳过此分支）
+                        if has_filter && !passes_filter(node_id) { continue; }
+
+                        // 核心：直接内存地址读取 BQ 签名，执行 XOR + POPCNT
+                        let dist = bq_sigs[i].hamming_distance(&q_bq);
+
+                        // 堆未满时直接压入；堆已满时仅当新距离更小才替换堆顶
+                        if heap.len() < candidate_cnt {
+                            heap.push((dist, i));
+                        } else if let Some(&(worst_dist, _)) = heap.peek() {
+                            if dist < worst_dist {
+                                heap.pop();
+                                heap.push((dist, i));
+                            }
+                        }
+                    }
+
+                    // ═══════════════════════════════════════════════════════
+                    // Stage 2: Int8 量化精筛（三级火箭中间级）
+                    // 用 1/4 内存的 Int8 做快速粗评，将 BQ 的 ~5% 候选
+                    // 大幅削减至仅 top_k * 10 个精英，再交给 AVX2 f32 终判
+                    // ═══════════════════════════════════════════════════════
+                    let mut bq_winners: Vec<usize> = heap.into_iter().map(|(_, idx)| idx).collect();
+                    // 核心魔法 1：重排候选者内存物理下标，单调递增顺序读取
+                    bq_winners.sort_unstable();
+
+                    #[cfg(target_arch = "x86_64")]
+                    use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+
+                    // 尝试获取 Int8 量化池，结合数据规模自动判定是否启用三级火箭
+                    let int8_pool_ref = mt.int8_pool();
+
+                    let final_candidates: Vec<usize> = if use_int8_rocket && int8_pool_ref.is_some() {
+                        let i8pool = int8_pool_ref.unwrap();
+                        // Int8 可用：三级火箭模式！
+                        let query_i8 = i8pool.quantize_query(query_vector);
+                        let int8_top_n = (config.top_k * 10).max(50);
+
+                        // Int8 堆排精筛：大小为 top_k*10 的小根堆（小分数在堆顶淘汰）
+                        let mut i8_heap: BinaryHeap<std::cmp::Reverse<(i32, usize)>> =
+                            BinaryHeap::with_capacity(int8_top_n + 1);
+
+                        for (iter_idx, &slot_idx) in bq_winners.iter().enumerate() {
+                            if !i8pool.is_valid_index(slot_idx) { continue; }
+
+                            // 核心魔法 2：Int8 数据预取
+                            #[cfg(target_arch = "x86_64")]
+                            if iter_idx + 2 < bq_winners.len() {
+                                let prefetch_idx = bq_winners[iter_idx + 2];
+                                if i8pool.is_valid_index(prefetch_idx) {
+                                    let prefetch_offset = prefetch_idx * dim;
+                                    unsafe {
+                                        _mm_prefetch(
+                                            i8pool.data.as_ptr().add(prefetch_offset) as *const i8,
+                                            _MM_HINT_T0,
+                                        );
+                                    }
+                                }
+                            }
+
+                            let i8_score = i8pool.dot_score(slot_idx, &query_i8);
+
+                            if i8_heap.len() < int8_top_n {
+                                i8_heap.push(std::cmp::Reverse((i8_score, slot_idx)));
+                            } else if let Some(&std::cmp::Reverse((worst_score, _))) = i8_heap.peek() {
+                                if i8_score > worst_score {
+                                    i8_heap.pop();
+                                    i8_heap.push(std::cmp::Reverse((i8_score, slot_idx)));
+                                }
+                            }
+                        }
+
+                        // 从 Int8 堆中提取精英，按物理地址重排后交给 f32 终判
+                        let mut elites: Vec<usize> = i8_heap.into_iter().map(|std::cmp::Reverse((_, idx))| idx).collect();
+                        elites.sort_unstable();
+                        elites
+                    } else {
+                        // Int8 不可用：退化为双级管线（BQ → f32）
+                        bq_winners
+                    };
+
+                    // ═══════════════════════════════════════════════════════
+                    // Stage 3: f32 AVX2+FMA 终极裁判
+                    // 仅对 Int8 精筛后的极少数精英执行全精度余弦相似度
+                    // ═══════════════════════════════════════════════════════
+                    let mut refined = Vec::with_capacity(final_candidates.len());
+
+                    for (iter_idx, &i) in final_candidates.iter().enumerate() {
                         let offset = i * dim;
                         if offset + dim <= vectors.len() {
+                            // 核心魔法 3：f32 向量预取
+                            #[cfg(target_arch = "x86_64")]
+                            if iter_idx + 1 < final_candidates.len() {
+                                let next_offset = final_candidates[iter_idx + 1] * dim;
+                                if next_offset + dim <= vectors.len() {
+                                    unsafe {
+                                        _mm_prefetch(
+                                            vectors.as_ptr().add(next_offset) as *const i8,
+                                            _MM_HINT_T0,
+                                        );
+                                    }
+                                }
+                            }
+
                             let score = T::similarity(query_vector, &vectors[offset..offset + dim]);
                             if score >= config.min_score {
                                 refined.push(SearchHit {
@@ -640,7 +728,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                             }
                         }
                     }
-                    refined.sort_by(|a, b| {
+                    refined.sort_unstable_by(|a, b| {
                         b.score
                             .partial_cmp(&a.score)
                             .unwrap_or(std::cmp::Ordering::Equal)
@@ -653,54 +741,6 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                             hit.payload = p.clone();
                         }
                     }
-                    refined
-                } else if let Some(erpc) = &mt.erpc_index {
-                    // --- ERPC 无锁三阶段路由分支（LSM 冷区主力）---
-                    let query_f32: Vec<f32> = query_vector.iter().map(|&x| x.to_f32()).collect();
-                    let candidates = erpc.search(&query_f32, vectors, config.top_k);
-                    
-                    let mut refined = Vec::with_capacity(candidates.len());
-                    for (idx, score) in candidates {
-                        if score >= config.min_score {
-                            let id = mt.get_id_by_index(idx);
-                            if mt.contains(id) && passes_filter(id) {
-                                let payload = mt.get_payload(id).cloned().unwrap_or(serde_json::Value::Null);
-                                refined.push(SearchHit { id, score, payload });
-                            }
-                        }
-                    }
-
-                    // --- Delta 补充扫描 (The Invisible Horizon Guard) ---
-                    // 当后台建树未锁住前台时，新插入的向量不会在当前的 erpc_index 内部。
-                    // 它们存在于 MemTable 的尾部，我们需要在此补上一次局部暴力组扫！
-                    let erpc_size = erpc.sequence.len();
-                    let total_slots = mt.internal_slot_count();
-                    
-                    if total_slots > erpc_size {
-                        let mut delta_hits = brute_force::search(
-                            query_vector,
-                            &vectors[erpc_size * dim .. total_slots * dim],
-                            dim,
-                            config.top_k,
-                            config.min_score,
-                            |idx| {
-                                let real_idx = erpc_size + idx;
-                                let id = mt.get_id_by_index(real_idx);
-                                if mt.contains(id) && passes_filter(id) { id } else { 0 }
-                            },
-                        );
-                        // Populate payloads for Delta hits
-                        for hit in &mut delta_hits {
-                            if let Some(p) = mt.get_payload(hit.id) {
-                                hit.payload = p.clone();
-                            }
-                        }
-                        
-                        refined.extend(delta_hits);
-                        refined.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-                        refined.truncate(config.top_k);
-                    }
-                    
                     refined
                 } else {
                     // --- 原生基础全局爆搜（MemTable L0 热区）带预过滤 ---

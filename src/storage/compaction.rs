@@ -53,52 +53,22 @@ impl CompactionThread {
                 }
 
                 // 1. 取出短命锁（Short-lived Lock），提取构建所需的内存副本快照
-                let (should_build_erpc, flat_snapshot, dim, node_count, db_path_clone, effort) = {
+                {
                     let mut mt = memtable.lock().unwrap_or_else(|p| {
                         tracing::warn!("Compaction thread: MemTable Mutex poisoned, recovering...");
                         p.into_inner()
                     });
-                    
-                    let count = mt.node_count();
-                    let should_build = matches!(storage_mode, crate::database::StorageMode::Mmap) && count >= 20_000;
-                    
-                    let mut snapshot = Vec::new();
-                    let d = mt.dim();
-                    
-                    if should_build {
-                        mt.ensure_vectors_cache();
-                        snapshot = mt.flat_vectors().to_vec(); // 拷贝 &[T] 副本，耗时极短
-                    }
-                    (should_build, snapshot, d, count, db_path.clone(), 0.6)
-                }; // 👑👑👑 锁在此刻被丢弃，前台彻底解放！
+                    mt.ensure_vectors_cache();
+                } // 👑👑👑 锁在此刻被丢弃，前台彻底解放！
 
-                // 2. 长时间无锁计算区（重工业 K-Means 聚类）
-                let mut new_erpc = None;
-                if should_build_erpc {
-                    tracing::info!("[{}] Rebuilding ERPC Accelerated Index (nodes={})...", db_path_clone, node_count);
-                    let start_erpc = std::time::Instant::now();
-                    
-                    let erpc = crate::index::erpc::ErpcIndex::build(&flat_snapshot, dim, effort);
-                    new_erpc = Some(erpc);
-                    
-                    tracing::info!("[{}] ERPC block finalized in {:?} (Lock-Free)", db_path_clone, start_erpc.elapsed());
-                }
+                // 2. 长时间无锁计算区（原旧版索引用，已废除，这里留出空白阶段）
 
                 // 3. 次级落盘锁阶段（用于写文件和热插拔指针）
                 let mut mt = memtable.lock().unwrap_or_else(|p| {
                     tracing::warn!("Compaction thread: MemTable Mutex poisoned, recovering...");
                     p.into_inner()
                 });
-                tracing::info!("Compaction I/O started for {}: foreground queries will be blocked during I/O", db_path_clone);
-
-                // --- ERPC 无缝热插拔 (1 毫秒) ---
-                if matches!(storage_mode, crate::database::StorageMode::Mmap) {
-                    if new_erpc.is_some() {
-                        mt.erpc_index = new_erpc;
-                    } else if node_count < 20_000 {
-                        mt.erpc_index = None;
-                    }
-                }
+                tracing::info!("Compaction I/O started for {}: foreground queries will be blocked during I/O", db_path.clone());
 
                 match file_format::save(&mut mt, &db_path, storage_mode) {
                     Ok(_) => {
@@ -112,7 +82,7 @@ impl CompactionThread {
                         
                         drop(w); // 优先释放 WAL 写锁
                         drop(mt); // 其次释放 内存大锁
-                        tracing::debug!("Auto-compaction completed for {}", db_path_clone);
+                        tracing::debug!("Auto-compaction completed for {}", db_path);
                     }
                     Err(e) => {
                         tracing::error!("Auto-compaction failed for {}: {}", db_path, e);

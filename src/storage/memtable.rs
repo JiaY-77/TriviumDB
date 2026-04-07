@@ -1,6 +1,7 @@
 use crate::VectorType;
 use crate::error::{Result, TriviumError};
 use crate::index::bq::BqSignature;
+use crate::index::int8::Int8Pool;
 use crate::index::text::TextIndex;
 use crate::node::{Edge, NodeId};
 use crate::storage::vec_pool::VecPool;
@@ -46,8 +47,9 @@ pub struct MemTable<T: VectorType> {
     indices_to_ids: Vec<NodeId>,
     ids_to_indices: HashMap<NodeId, usize>,
 
-    // 4. ERPC 后台构建的检索加速层（分离模式特化）
-    pub erpc_index: Option<crate::index::erpc::ErpcIndex>,
+    // 4. Int8 标量量化池（三级火箭 Stage 2 助推器）
+    //    惰性构建：仅当 BQ 检索路径启用时，跟随 BQ 签名池同步重建
+    int8_pool: Option<Int8Pool>,
 }
 
 impl<T: VectorType> MemTable<T> {
@@ -87,7 +89,7 @@ impl<T: VectorType> MemTable<T> {
             fatigue_map: std::sync::RwLock::new(HashMap::new()),
             indices_to_ids: Vec::new(),
             ids_to_indices: HashMap::new(),
-            erpc_index: None,
+            int8_pool: None,
         }
     }
 
@@ -113,7 +115,7 @@ impl<T: VectorType> MemTable<T> {
             fatigue_map: std::sync::RwLock::new(HashMap::new()),
             indices_to_ids: Vec::new(),
             ids_to_indices: HashMap::new(),
-            erpc_index: None,
+            int8_pool: None,
         }
     }
 
@@ -314,6 +316,7 @@ impl<T: VectorType> MemTable<T> {
         let total = self.vec_pool.total_count();
         if self.bq_signatures.len() != total || self.bq_dirty {
             self.rebuild_bq_signatures(total);
+            self.rebuild_int8_pool();
             self.bq_dirty = false;
         }
     }
@@ -335,9 +338,38 @@ impl<T: VectorType> MemTable<T> {
         self.bq_signatures = new_bq;
     }
 
+    /// 重建 Int8 量化池（与 BQ 签名池同步触发）
+    fn rebuild_int8_pool(&mut self) {
+        let dim = self.dim();
+        let flat = self.vec_pool.flat_vectors();
+        if flat.is_empty() {
+            self.int8_pool = None;
+            return;
+        }
+        self.int8_pool = Some(Int8Pool::from_generic_vectors(flat, dim));
+    }
+
     /// 获取 BQ 量化初筛签名
     pub fn get_bq_signature(&self, index: usize) -> Option<BqSignature> {
         self.bq_signatures.get(index).copied()
+    }
+
+    /// 直接暴露 BQ 签名数组的连续内存切片，用于热循环零开销扫描
+    #[inline]
+    pub fn bq_signatures_slice(&self) -> &[BqSignature] {
+        &self.bq_signatures
+    }
+
+    /// 从持久化文件恢复 BQ 签名数组（跳过重建）
+    pub fn set_bq_signatures(&mut self, sigs: Vec<BqSignature>) {
+        self.bq_signatures = sigs;
+        self.bq_dirty = false; // 刚恢复的签名是干净的
+    }
+
+    /// 获取 Int8 量化池引用（三级火箭 Stage 2 中间精筛层）
+    #[inline]
+    pub fn int8_pool(&self) -> Option<&Int8Pool> {
+        self.int8_pool.as_ref()
     }
 
     /// 暴露底层向量数组供检索层消费（只需 &self）

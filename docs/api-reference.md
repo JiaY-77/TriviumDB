@@ -1,6 +1,6 @@
 # TriviumDB API 完整参考
 
-> **版本**: v0.4.90  
+> **版本**: v0.4.91  
 > **语言**: Rust 核心 + Python 绑定 (PyO3) + Node.js 绑定 (napi-rs)  
 > **许可**: Apache-2.0
 
@@ -654,18 +654,18 @@ print(f"共 {len(ids)} 个节点")
 let ids = db.all_node_ids();     // Vec<NodeId>
 ```
 
-### ERPC 自动索引说明
+### BQ 自动索引说明
 
-TriviumDB v0.4.90 起采用**全自动双引擎向量索引路由**，不再提供手动 `rebuild_index()` 接口：
+TriviumDB v0.4.91 起采用**全自动双引擎向量索引路由**，不再提供手动 `rebuild_index()` 接口：
 
 | 条件 | 检索引擎 | 召回行为 |
 |------|----------|----------|
 | < 2 万节点 或 Mmap 未就绪 | **BruteForce** | 100% 精确召回，零误差 |
-| ≥ 2 万节点 + Mmap 模式 + 索引就绪 | **ERPC** | 三阶段近似搜索，Recall@10 > 85% |
+| ≥ 2 万节点 + Mmap 模式 + 索引就绪 | **BQ 三阶段火箭** | 二进制粗排 + f32 精排，Recall@10 > 97% |
 
-ERPC 索引在**后台 Compaction 线程**中自动构建，无需也无法手动触发。索引元数据持久化在 `.tdb` 文件的 ERPC Metadata Block 中，重启后零延迟恢复。
+BQ 索引在**后台 Compaction 线程**中自动构建，无需也无法手动触发。索引元数据持久化在 `.tdb` 文件的 BQ Metadata Block 中，重启后零延迟恢复。
 
-> 💡 如果你的业务对 100% 召回率有强需求（如金融/医疗），可以通过 `StorageMode::Rom` 模式强制使用 BruteForce（ERPC 仅在 `Mmap` 模式下激活）。
+> 💡 如果你的业务对 100% 召回率有强需求（如金融/医疗），可以通过 `StorageMode::Rom` 模式强制使用 BruteForce（BQ 仅在 `Mmap` 模式下激活）。
 
 ---
 

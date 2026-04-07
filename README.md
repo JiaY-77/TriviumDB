@@ -38,8 +38,8 @@ TriviumDB 是一个用纯 Rust 编写的**嵌入式单文件数据库引擎**，
 - 🧠 **为 AI 而生** —— 可选启用“AC自动机+BM25稀疏文本”与“Dense Vector稠密向量”的**多路召回**来触发图谱扩散检索，并内置多层认知管线（FISTA / DPP / PPR）
 - 🛡️ **四层物理防弹衣** —— 原子替换 + WAL日志 + 事务干跑验证（Dry-Run）+ Mmap COW 隔离，断电断存不毁库
 - 🐍 **Python / Node.js 原生** —— `pip install` 或 `npm install` 后直接使用，类 MongoDB 查询语法
-- ⚡ **高性能检索** —— rayon 并行暴力搜索（小规模 100% 精确）+ ERPC 自适应索引（2 万节点以上自动加速），无需手动配置
-- 💾 **SSD 友好** —— Append-Only WAL + 后台 Compaction 线程（同时自动重建 ERPC 索引），杜绝随机写入磨损
+- ⚡ **高性能检索** —— rayon 并行暴力搜索（小规模 100% 精确）+ BQ 三阶段火箭自适应索引（2 万节点以上自动加速），无需手动配置
+- 💾 **SSD 友好** —— Append-Only WAL + 后台 Compaction 线程（同时自动重建 BQ 索引），杜绝随机写入磨损
 
 ---
 
@@ -74,7 +74,7 @@ flowchart TD
         DB1[(SQL DB<br/>文本/属性)]:::old
         DB2[(Vector DB<br/>稠密向量)]:::old
         DB3[(Graph DB<br/>知识图谱)]:::old
-        
+
         App1 <-.网路 / 跨库 JOIN.-> DB1
         App1 <-.RPC / 独立服务.-> DB2
         App1 <-.另一套重运行时.-> DB3
@@ -94,7 +94,7 @@ flowchart TD
         direction TB
         App2((Agent App)):::app
         TV[(TriviumDB<br/>单一引擎 / 单一文件 / 单一 ID 空间)]:::new
-        
+
         App2 ==`insert()` 向量+文本+元数据+图关系原子写入==> TV
         TV ==`search_hybrid()` 双路混合归一锚定+图谱扩散一次返回==> App2
         TV -.`flush()` Mmap零拷贝极速热启动.-> TV
@@ -186,20 +186,20 @@ with triviumdb.TriviumDB("memory.tdb", dim=3) as db:
 
 ## 核心特性
 
-| 特性                | 说明                                                                        |
-| ------------------- | --------------------------------------------------------------------------- |
-| 🔍 **混合检索**     | 向量锚定 → Top-K → 图谱扩散（Spreading Activation）→ 最终排序               |
-| 🧠 **认知管线**     | 内置九层认知管线：FISTA 残差寻隐 / PPR 图扩散 / DPP 多样性采样，运行时可开关 |
-| 🔋 **不应期机制**   | 高频激活节点将进入物理疲劳冷却期（85% 能量削减），强制扩散探索新亚支路，解决「记忆僵化」问题 |
-| 📦 **统一数据模型** | 每个节点同时持有向量（f32×dim）、JSON 元数据和图谱边，共享全局 `u64` 主键   |
+| 特性                   | 说明                                                                                                              |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| 🔍 **混合检索**        | 向量锚定 → Top-K → 图谱扩散（Spreading Activation）→ 最终排序                                                     |
+| 🧠 **认知管线**        | 内置九层认知管线：FISTA 残差寻隐 / PPR 图扩散 / DPP 多样性采样，运行时可开关                                      |
+| 🔋 **不应期机制**      | 高频激活节点将进入物理疲劳冷却期（85% 能量削减），强制扩散探索新亚支路，解决「记忆僵化」问题                      |
+| 📦 **统一数据模型**    | 每个节点同时持有向量（f32×dim）、JSON 元数据和图谱边，共享全局 `u64` 主键                                         |
 | ⚡ **ERPC 自适应索引** | 自研 Electoral Residual Product Code 向量索引，2 万节点以上自动激活，无需配置，最高支持 512 聚类 + 三阶段搜索管线 |
-| 💾 **双模式存储**   | Mmap（大模型极速分体冷启动） / Rom（传统 SQLite 级单文件打包携带），无缝热切换 |
-| 🛡️ **四层灾备防御** | 预写日志(WAL) + 写入原子替换 + 事务预检干跑(Dry-Run) + OS 内存写时复制隔离    |
-| 🔄 **零开销事务**   | `begin_tx()` 验证前置架构，中途报错绝不污染内存，实现真正的零代价原子回滚   |
-| 🔎 **高级过滤**     | 类 MongoDB 语法：`$eq/$ne/$gt/$lt/$in/$and/$or`                             |
-| 📝 **图谱查询**     | 内置类 Cypher 查询引擎：`MATCH (a)-[:knows]->(b) WHERE b.age > 18 RETURN b` |
-| 🐍 **Python 原生**  | PyO3 绑定，`pip install` 后直接 `import triviumdb`                          |
-| 🌐 **Node.js 原生** | napi-rs 绑定，`npm install` 后直接 `require('triviumdb')`                    |
+| 💾 **双模式存储**      | Mmap（大模型极速分体冷启动） / Rom（传统 SQLite 级单文件打包携带），无缝热切换                                    |
+| 🛡️ **四层灾备防御**    | 预写日志(WAL) + 写入原子替换 + 事务预检干跑(Dry-Run) + OS 内存写时复制隔离                                        |
+| 🔄 **零开销事务**      | `begin_tx()` 验证前置架构，中途报错绝不污染内存，实现真正的零代价原子回滚                                         |
+| 🔎 **高级过滤**        | 类 MongoDB 语法：`$eq/$ne/$gt/$lt/$in/$and/$or`                                                                   |
+| 📝 **图谱查询**        | 内置类 Cypher 查询引擎：`MATCH (a)-[:knows]->(b) WHERE b.age > 18 RETURN b`                                       |
+| 🐍 **Python 原生**     | PyO3 绑定，`pip install` 后直接 `import triviumdb`                                                                |
+| 🌐 **Node.js 原生**    | napi-rs 绑定，`npm install` 后直接 `require('triviumdb')`                                                         |
 
 > 📖 深入了解架构设计和技术细节请查看 **[支持特性详解](docs/features.md)**。
 
@@ -209,15 +209,17 @@ with triviumdb.TriviumDB("memory.tdb", dim=3) as db:
 
 TriviumDB 采用**智能自适应双引擎**向量索引，全程自动路由，无需手动配置：
 
-| 阶段 | 引擎 | 激活条件 | 特点 |
-| ---- | ---- | -------- | ---- |
-| **小规模热区** | BruteForce | < 2 万节点（或 ERPC 未就绪） | 100% 精确召回，rayon 多核，延迟极低 |
-| **大规模冷区** | **ERPC**（自研） | ≥ 2 万节点，Mmap 模式，后台自动构建 | 三阶段加速管线：多村长 Multi-Probe → BQ Hamming 粗筛 → f32 精算，无需重建 |
+| 阶段           | 引擎                      | 激活条件                            | 特点                                                               |
+| -------------- | ------------------------- | ----------------------------------- | ------------------------------------------------------------------ |
+| **小规模热区** | BruteForce                | < 2 万节点（或 BQ 未就绪）          | 100% 精确召回，rayon 多核，延迟极低                                |
+| **大规模冷区** | **BQ 三阶段火箭**（自研） | ≥ 2 万节点，Mmap 模式，后台自动构建 | 三阶段加速管线：二进制指纹粗排 → Hamming 筛选 → f32 精排，无需重建 |
 
-**ERPC（Electoral Residual Product Code）** 是 TriviumDB 的自研向量索引引擎，与 HNSW 等图结构索引相比：
+**BQ（Binary Quantization）** 是 TriviumDB 的自研向量索引引擎，与 HNSW 等图结构索引相比：
+
 - ✅ **零图维护开销**：删除/更新节点不破坏索引，没有 Ghost Node 陷阱
 - ✅ **SSD 友好**：索引元数据落入 `.tdb` 头部，重启零开销恢复（bytemuck 零拷贝）
 - ✅ **全自动**：2 万节点以上后台 Compaction 时自动重建，前台查询透明路由
+- ✅ **硬件亲和**：纯线性扫描 + CPU 原生 Popcount 指令，完美适配硬件 Prefetcher，缓存命中率接近 100%
 
 ```toml
 # 启用 Python 绑定
@@ -239,16 +241,14 @@ TriviumDB/
 │   ├── filter.rs           # 高级过滤引擎 ($gt/$lt/$in/$and/$or)
 │   ├── error.rs            # 统一错误类型
 │   ├── storage/
-│   │   ├── memtable.rs     # 内存工作区 (SoA 向量池 + HashMap + ERPC 索引)
+│   │   ├── memtable.rs     # 内存工作区 (SoA 向量池 + HashMap + BQ 索引)
 │   │   ├── wal.rs          # Write-Ahead Log（崩溃恢复）
-│   │   ├── file_format.rs  # .tdb 单文件读写（含 ERPC Metadata Block）
+│   │   ├── file_format.rs  # .tdb 单文件读写（含 BQ Metadata Block）
 │   │   ├── vec_pool.rs     # 分层向量池（mmap 基础层 + delta 增量层）
-│   │   └── compaction.rs   # 后台 Compaction 守护线程（含 ERPC 自动重建）
+│   │   └── compaction.rs   # 后台 Compaction 守护线程（含 BQ 自动重建）
 │   ├── index/
 │   │   ├── brute_force.rs  # rayon 并行暴力精确搜索
-│   │   ├── erpc.rs         # ERPC 自研向量索引（三阶段搜索管线）
-│   │   ├── bq.rs           # Binary Quantization 指纹（2048 位 Hamming 粗筛）
-│   │   └── morton.rs       # 莫顿码（Z-Order Curve，含 BMI2 PDEP 硬件加速）
+│   │   └── bq.rs           # BQ 二进制量化索引（三阶段搜索管线）
 │   ├── graph/
 │   │   └── traversal.rs    # PPR 图扩散 (Spreading Activation)
 │   ├── python.rs           # PyO3 绑定（完整 Pythonic API）
@@ -258,7 +258,6 @@ TriviumDB/
 ├── tests/
 │   ├── workflow.rs         # 业务全链路集成测试
 │   ├── search.rs           # 向量检索正确性测试
-│   ├── morton.rs           # 莫顿码单元测试
 │   └── ...                 # 其他集成测试
 ├── Cargo.toml
 ├── pyproject.toml          # Maturin 构建配置
@@ -292,8 +291,6 @@ TriviumDB/
 - [x] 高级 Payload 过滤扩展 ($exists/$nin/$size/$all/$type)
 - [x] AVX2 + FMA SIMD 加速余弦相似度（运行时自动检测，标量回退）
 - [x] 性能基准测试套件 (Criterion benchmark)
-- [ ] 子图导出 / 批量导入
-- [ ] CLI 工具 (`triviumdb-cli`)
 
 ### v0.4 — 百万级架构 + 认知管线 + ERPC 索引 ✅
 
@@ -303,11 +300,10 @@ TriviumDB/
 - [x] 认知检索管线内置（FISTA 残差搜索 / PPR 图扩散 / DPP 多样性采样）
 - [x] 运行时可开关 `SearchConfig`，逐查询粒度动态控制管线各层
 - [x] 向量 / 配置 NaN / Inf / 维度容错拦截
-- [x] **ERPC 自研向量索引**：Electoral Residual Product Code 三阶段搜索管线
+- [x] **BQ 自研向量索引**：Binary Quantization 三阶段火箭搜索管线
 - [x] **HNSW 完全移除**：零依赖，架构大幅精简，无图索引维护负担
-- [x] **ERPC 自动化**：Compaction 守护线程自动重建，2 万节点自动激活，前台透明
-- [x] **BMI2 PDEP 硬件加速莫顿码**：x86_64 运行时检测，自动使用单条硬件指令
-- [x] **ERPC 元数据持久化**：bytemuck 零拷贝落入 .tdb header，重启极速恢复
+- [x] **BQ 自动化**：Compaction 守护线程自动重建，2 万节点自动激活，前台透明
+- [x] **BQ 元数据持久化**：bytemuck 零拷贝落入 .tdb header，重启极速恢复
 - [x] **边特异性强化**：入度惩罚从 `log10` 改为 `powf(0.55)` 非线性衰减，显著压制高入度「黑洞节点」对扩散能量的虹吸效应
 - [x] **不应期（疲劳）机制**：Top-15 热点节点在本轮扩散后进入不应期，下轮传导能量削减 85%，一次性消耗后自动恢复，有效解决长期使用中的「记忆僵化」与「能量坍缩」问题
 
@@ -320,20 +316,22 @@ TriviumDB/
 - [ ] 索引结构持久化：`ids_to_indices` 映射表持久化到磁盘（mmap B-tree / 有序数组二分查找），避免启动时逐条 HashMap 插入
 - [ ] 零拷贝序列化协议（可选）：Payload 格式从 serde_json 迁移至 rkyv / FlatBuffers，支持不反序列化直接读取字段
 - [ ] 分布式分片存储
+- [ ] 数据库可视化 UI 工具
+- [ ] CLI 工具 (`triviumdb-cli`)
 
 ---
 
 ## 与现有方案对比
 
-| 维度          | SQLite       | Qdrant      | Neo4j       | SurrealDB    | **TriviumDB**        |
-| ------------- | ------------ | ----------- | ----------- | ------------ | -------------------- |
-| 关系型数据    | ✅ SQL       | ❌ 仅过滤   | ⚠️ 属性     | ✅ SurrealQL | ✅ JSON + $gt/$in    |
-| 向量检索      | ❌ 需外挂    | ✅ HNSW     | ❌ 需插件   | ✅ ANN       | ✅ 自研 ERPC 自适应  |
-| 图谱遍历      | ❌ JOIN 模拟 | ❌          | ✅ Cypher   | ✅ 图查询    | ✅ 原生邻接表        |
-| 嵌入式单文件  | ✅           | ❌ 独立服务 | ❌ JVM 服务 | ⚠️ RocksDB   | ✅ 单 .tdb           |
-| 混合检索      | ❌           | ❌          | ❌          | ⚠️ 手动      | ✅ 向量+图扩散       |
-| 零 C/C++ 依赖 | ❌           | ✅          | ❌ JVM      | ❌ RocksDB   | ✅ 纯 Rust           |
-| 删除代价      | ✅ O(1)      | ⚠️ 重建索引 | ⚠️ 重连图边 | ⚠️ 墓碑GC    | ✅ 零图维护，墓碑占位|
+| 维度          | SQLite       | Qdrant      | Neo4j       | SurrealDB    | **TriviumDB**         |
+| ------------- | ------------ | ----------- | ----------- | ------------ | --------------------- |
+| 关系型数据    | ✅ SQL       | ❌ 仅过滤   | ⚠️ 属性     | ✅ SurrealQL | ✅ JSON + $gt/$in     |
+| 向量检索      | ❌ 需外挂    | ✅ HNSW     | ❌ 需插件   | ✅ ANN       | ✅ 自研 BQ 自适应     |
+| 图谱遍历      | ❌ JOIN 模拟 | ❌          | ✅ Cypher   | ✅ 图查询    | ✅ 原生邻接表         |
+| 嵌入式单文件  | ✅           | ❌ 独立服务 | ❌ JVM 服务 | ⚠️ RocksDB   | ✅ 单 .tdb            |
+| 混合检索      | ❌           | ❌          | ❌          | ⚠️ 手动      | ✅ 向量+图扩散        |
+| 零 C/C++ 依赖 | ❌           | ✅          | ❌ JVM      | ❌ RocksDB   | ✅ 纯 Rust            |
+| 删除代价      | ✅ O(1)      | ⚠️ 重建索引 | ⚠️ 重连图边 | ⚠️ 墓碑GC    | ✅ 零图维护，墓碑占位 |
 
 ---
 
@@ -343,8 +341,8 @@ TriviumDB/
 2. **嵌入式优先**：没有 Server、没有端口、没有配置文件。`import triviumdb` 就是全部。
 3. **全自动性能路由**：数据量不足 2 万时走 100% 精确 BruteForce，超过后引擎后台自动构建 ERPC 索引并无缝切换，开发者无感知。
 4. **可预测的性能**：顺序 I/O only（WAL 追加写 + Compaction 顺序重写），SSD 寿命安全。
-5. **索引即加速层**：ERPC 是可丢弃的派生数据，重启后从 .tdb header 零拷贝恢复，不依赖也不污染 WAL 真相源。
-6. **Rust 安全边界**：所有公开 API 均为安全代码。内部仅存在少量经过严格审计的 `unsafe`（主要分布在 mmap 零拷贝与 SIMD / BMI2 PDEP 硬件加速），且附有明确的 SAFETY 安全契约注释。
+5. **索引即加速层**：BQ 是可丢弃的派生数据，重启后从 .tdb header 零拷贝恢复，不依赖也不污染 WAL 真相源。
+6. **Rust 安全边界**：所有公开 API 均为安全代码。内部仅存在少量经过严格审计的 `unsafe`（主要分布在 mmap 零拷贝与 SIMD 硬件加速），且附有明确的 SAFETY 安全契约注释。
 
 ---
 

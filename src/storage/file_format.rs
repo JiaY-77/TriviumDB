@@ -1,6 +1,7 @@
 use crate::VectorType;
 use crate::database::StorageMode;
 use crate::error::{Result, TriviumError};
+use crate::index::bq::BqSignature;
 use crate::node::{Edge, NodeId};
 use crate::storage::memtable::MemTable;
 use crate::storage::vec_pool::VecPool;
@@ -52,10 +53,8 @@ fn robust_rename(from: &Path, to: &Path) -> std::io::Result<()> {
 
 // ══════ 文件头常量 ══════
 const MAGIC: &[u8; 4] = b"TVDB";
-const VERSION: u16 = 3; // v3：增加 ERPC 无锁加速索引元数据
+const VERSION: u16 = 5; // v5: 新增 BQ Metadata Block 持久化，header 扩展至 58 字节
 const HEADER_SIZE: u64 = 58;
-
-use crate::index::erpc::{ErpcIndex, ErpcParams, SeqEntry};
 
 /// 向量文件路径（.tdb → .vec）
 fn vec_path_from_db(db_path: &str) -> String {
@@ -137,9 +136,8 @@ fn save_tdb<T: VectorType>(
     vec_count: usize,
     is_mmap_mode: bool,
 ) -> Result<()> {
-    if !is_mmap_mode {
-        memtable.ensure_vectors_cache();
-    }
+    // 始终确保 BQ 签名和向量缓存已构建（v5 持久化需要写入 BQ Block）
+    memtable.ensure_vectors_cache();
 
     let tmp_path = format!("{}.tmp", path);
     let file = File::create(&tmp_path)?;
@@ -190,10 +188,15 @@ fn save_tdb<T: VectorType>(
     };
     let edge_offset = payload_offset + payload_size + vector_size;
 
-    let edge_size = all_edges.iter().map(|(_, e)| (8 + 8 + 2 + e.label.len() + 4) as u64).sum::<u64>();
-    let erpc_offset = edge_offset + edge_size;
+    // 预计算 Edge Block 大小，以便确定 BQ Block 的 offset
+    let mut edge_block_size: u64 = 0;
+    for (_src_id, edge) in &all_edges {
+        // src(8) + dst(8) + label_len(2) + label_bytes + weight(4)
+        edge_block_size += 8 + 8 + 2 + edge.label.as_bytes().len() as u64 + 4;
+    }
+    let bq_offset = edge_offset + edge_block_size;
 
-    // 1. Header
+    // 1. Header (v5: 58 字节)
     w.write_all(MAGIC)?;
     w.write_all(&VERSION.to_le_bytes())?;
     w.write_all(&(dim as u32).to_le_bytes())?;
@@ -202,7 +205,7 @@ fn save_tdb<T: VectorType>(
     w.write_all(&payload_offset.to_le_bytes())?;
     w.write_all(&vector_offset.to_le_bytes())?;
     w.write_all(&edge_offset.to_le_bytes())?;
-    w.write_all(&erpc_offset.to_le_bytes())?;
+    w.write_all(&bq_offset.to_le_bytes())?; // v5 新增
 
     // 2. Payload Block 包含 Tombstones
     for &nid in internal_indices {
@@ -235,19 +238,15 @@ fn save_tdb<T: VectorType>(
         w.write_all(&edge.weight.to_le_bytes())?;
     }
 
-    // 5. ERPC Metadata Block (If exists)
-    if let Some(erpc) = &memtable.erpc_index {
-        w.write_all(bytemuck::bytes_of(&erpc.params))?;
-        for chunk_centers in &erpc.pq_centers {
-            for c in chunk_centers {
-                for &fv in c { w.write_all(&fv.to_le_bytes())?; }
-            }
-        }
-        for c in &erpc.centers {
-            // 中心点扁平化
-            for &fv in c { w.write_all(&fv.to_le_bytes())?; }
-        }
-        w.write_all(bytemuck::cast_slice(&erpc.sequence))?;
+    // 5. BQ Metadata Block（v5 新增）
+    //    确保 BQ 签名已构建，然后 bytemuck 零拷贝写入
+    let bq_sigs = memtable.bq_signatures_slice();
+    let bq_count = bq_sigs.len() as u64;
+    w.write_all(&bq_count.to_le_bytes())?; // 8 字节：签名数量
+    if !bq_sigs.is_empty() {
+        // SAFETY: BqSignature 实现了 Pod + Zeroable，且为 #[repr(C)]，
+        // bytemuck::cast_slice 保证合法的字节级重新解释
+        w.write_all(bytemuck::cast_slice(bq_sigs))?;
     }
 
     w.flush()?;
@@ -260,9 +259,10 @@ fn save_tdb<T: VectorType>(
     robust_rename(Path::new(&tmp_path), Path::new(path))?;
 
     tracing::info!(
-        "持久化完成: {} 个槽位(含删除), {} 个向量, Mode: {}",
+        "持久化完成: {} 个槽位(含删除), {} 个向量, {} 个 BQ 签名, Mode: {}",
         node_count,
         vec_count,
+        bq_count,
         if is_mmap_mode { "Mmap" } else { "Rom" }
     );
 
@@ -286,15 +286,26 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
         )));
     }
 
+    let version = u16::from_le_bytes(bytes[4..6].try_into().unwrap());
     let dim = u32::from_le_bytes(bytes[6..10].try_into().unwrap()) as usize;
     let next_id = u64::from_le_bytes(bytes[10..18].try_into().unwrap());
     let node_count = u64::from_le_bytes(bytes[18..26].try_into().unwrap()) as usize;
     let payload_offset = u64::from_le_bytes(bytes[26..34].try_into().unwrap()) as usize;
     let vector_offset = u64::from_le_bytes(bytes[34..42].try_into().unwrap()) as usize;
     let edge_offset = u64::from_le_bytes(bytes[42..50].try_into().unwrap()) as usize;
-    
-    // 兼容旧版 V2 的情况下补齐 erpc_offset 游标
-    let erpc_offset = if mmap.len() >= 58 {
+
+    // v5: 新增 BQ Block offset；v4 及以下兼容旧格式
+    let bq_offset = if version >= 5 && mmap.len() >= 58 {
+        u64::from_le_bytes(bytes[50..58].try_into().unwrap()) as usize
+    } else {
+        0 // 0 表示无 BQ Block
+    };
+
+    // 兼容旧版 V3 及以下的冗余区块
+    let edge_limit_offset = if version >= 4 {
+        // v4/v5: edge block 的上限由 bq_offset（v5）或 文件末尾（v4）决定
+        if version >= 5 && bq_offset > 0 { bq_offset } else { mmap.len() }
+    } else if mmap.len() >= 58 {
         u64::from_le_bytes(bytes[50..58].try_into().unwrap()) as usize
     } else {
         mmap.len()
@@ -323,24 +334,25 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
         .unwrap_or(false);
 
         if flush_ok_valid {
-            load_v2(
+            let mut mt = load_v2(
                 bytes,
                 dim,
                 next_id,
                 node_count,
                 payload_offset,
                 edge_offset,
-                erpc_offset,
+                edge_limit_offset,
                 &vec_file_path,
                 &mmap,
-            )
+            )?;
+            // 尝试从 BQ Block 恢复签名
+            load_bq_block(&mut mt, bytes, bq_offset, mmap.len());
+            return Ok(mt);
         } else {
             tracing::warn!(
                 "检测到 .tdb/.vec 跨文件撕裂（.flush_ok 标记缺失或不匹配），\
                  降级为忽略 .vec 的安全模式加载，增量数据将由 WAL 回放恢复"
             );
-            // 降级：忽略 .vec，仅从 .tdb 的 payload/edge 恢复骨架
-            // node_count 仍有效，但向量数据丢失，需要 WAL 或下次 flush 重建
             load_v1_rom(
                 bytes,
                 dim,
@@ -349,12 +361,12 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
                 payload_offset,
                 vector_offset,
                 edge_offset,
-                erpc_offset,
+                edge_limit_offset,
                 &mmap,
             )
         }
     } else {
-        load_v1_rom(
+        let mut mt = load_v1_rom(
             bytes,
             dim,
             next_id,
@@ -362,9 +374,12 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
             payload_offset,
             vector_offset,
             edge_offset,
-            erpc_offset,
+            edge_limit_offset,
             &mmap,
-        )
+        )?;
+        // 尝试从 BQ Block 恢复签名
+        load_bq_block(&mut mt, bytes, bq_offset, mmap.len());
+        Ok(mt)
     }
 }
 
@@ -376,7 +391,7 @@ fn load_v2<T: VectorType>(
     node_count: usize,
     payload_offset: usize,
     edge_offset: usize,
-    erpc_offset: usize,
+    edge_limit_offset: usize,
     vec_file_path: &str,
     _tdb_mmap: &Mmap,
 ) -> Result<MemTable<T>> {
@@ -389,8 +404,7 @@ fn load_v2<T: VectorType>(
         payload_offset,
         edge_offset,
     )?;
-    load_edges(&mut memtable, bytes, edge_offset, erpc_offset)?;
-    memtable.erpc_index = load_erpc(bytes, erpc_offset, dim)?;
+    load_edges(&mut memtable, bytes, edge_offset, edge_limit_offset)?;
     Ok(memtable)
 }
 
@@ -403,7 +417,7 @@ fn load_v1_rom<T: VectorType>(
     payload_offset: usize,
     vector_offset: usize,
     edge_offset: usize,
-    erpc_offset: usize,
+    edge_limit_offset: usize,
     tdb_mmap: &Mmap,
 ) -> Result<MemTable<T>> {
     let mut memtable = MemTable::new_with_next_id(dim, next_id);
@@ -446,8 +460,7 @@ fn load_v1_rom<T: VectorType>(
         memtable.vec_pool_mut().push(&v);
     }
 
-    load_edges(&mut memtable, bytes, edge_offset, erpc_offset)?;
-    memtable.erpc_index = load_erpc(bytes, erpc_offset, dim)?;
+    load_edges(&mut memtable, bytes, edge_offset, edge_limit_offset)?;
     Ok(memtable)
 }
 
@@ -513,81 +526,60 @@ fn load_edges<T: VectorType>(
     Ok(())
 }
 
-fn load_erpc(bytes: &[u8], erpc_offset: usize, dim: usize) -> Result<Option<ErpcIndex>> {
-    if erpc_offset >= bytes.len() || bytes.len() - erpc_offset < 32 {
-        return Ok(None);
-    }
-    let mut cursor = erpc_offset;
-    
-    // 强制按 byte 对齐拷贝
-    let params: ErpcParams = bytemuck::pod_read_unaligned(&bytes[cursor..cursor + 32]);
-    cursor += 32;
-
-    let chunks = crate::index::erpc::CHUNKS;
-    let pq_k = crate::index::erpc::PQ_K;
-    
-    let mut chunk_bounds = Vec::with_capacity(chunks);
-    let base = dim / chunks;
-    let mut remainder = dim % chunks;
-    let mut start = 0;
-    for _ in 0..chunks {
-        let len = base + if remainder > 0 { 1 } else { 0 };
-        if remainder > 0 { remainder -= 1; }
-        chunk_bounds.push((start, start + len));
-        start += len;
+/// 从 .tdb 的 BQ Block 中恢复 BQ 签名数组（v5+ 格式）
+///
+/// 如果 bq_offset 为 0 或数据不完整，静默跳过（首次查询时惰性重建）。
+fn load_bq_block<T: VectorType>(
+    memtable: &mut MemTable<T>,
+    bytes: &[u8],
+    bq_offset: usize,
+    file_len: usize,
+) {
+    if bq_offset == 0 || bq_offset + 8 > file_len {
+        return; // 无 BQ Block 或文件不完整
     }
 
-    let mut pq_centers = Vec::with_capacity(chunks);
-    for c in 0..chunks {
-        let (s, e) = chunk_bounds[c];
-        let sub_dim = e - s;
-        let mut pc = Vec::with_capacity(pq_k);
-        for _ in 0..pq_k {
-            let mut pt = Vec::with_capacity(sub_dim);
-            for _ in 0..sub_dim {
-                let offset = cursor;
-                pt.push(f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()));
-                cursor += 4;
-            }
-            pc.push(pt);
-        }
-        pq_centers.push(pc);
+    let bq_count = u64::from_le_bytes(
+        bytes[bq_offset..bq_offset + 8].try_into().unwrap_or([0; 8])
+    ) as usize;
+
+    if bq_count == 0 {
+        return;
     }
 
-    let k_clusters = params.k_clusters as usize;
-    let mut centers = Vec::with_capacity(k_clusters);
-    for _ in 0..k_clusters {
-        let size = dim * 4;
-        let mut c = Vec::with_capacity(dim);
-        for i in 0..dim {
-            let offset = cursor + i * 4;
-            let val = f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-            c.push(val);
-        }
-        centers.push(c);
-        cursor += size;
-    }
+    let sig_size = std::mem::size_of::<BqSignature>();
+    let data_start = bq_offset + 8;
+    let data_end = data_start + bq_count * sig_size;
 
-    let sequence_bytes = &bytes[cursor..];
-    let expected_entry_size = std::mem::size_of::<SeqEntry>();
-    let count = sequence_bytes.len() / expected_entry_size;
-    let mut sequence: Vec<SeqEntry> = vec![bytemuck::Zeroable::zeroed(); count];
-    
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            sequence_bytes.as_ptr(),
-            sequence.as_mut_ptr() as *mut u8,
-            count * expected_entry_size,
+    if data_end > file_len {
+        tracing::warn!(
+            "BQ Block 数据不完整（需要 {} 字节，文件仅剩 {} 字节），跳过恢复",
+            bq_count * sig_size,
+            file_len.saturating_sub(data_start)
         );
+        return;
     }
 
-    Ok(Some(ErpcIndex {
-        lsh_basis: Vec::new(),
-        centers,
-        sequence,
-        dim,
-        params,
-        pq_centers,
-        chunk_bounds,
-    }))
+    let bq_bytes = &bytes[data_start..data_end];
+
+    // 检查对齐（BqSignature 为 [u64; 32]，需要 8 字节对齐）
+    let is_aligned = (bq_bytes.as_ptr() as usize) % std::mem::align_of::<BqSignature>() == 0;
+
+    let sigs: Vec<BqSignature> = if is_aligned {
+        // SAFETY: BqSignature: Pod + Zeroable + #[repr(C)]，对齐已验证，长度精确
+        let slice: &[BqSignature] = bytemuck::cast_slice(bq_bytes);
+        slice.to_vec()
+    } else {
+        // 不对齐时逐个 pod_read_unaligned
+        let mut v = Vec::with_capacity(bq_count);
+        for i in 0..bq_count {
+            let off = i * sig_size;
+            let sig: BqSignature = bytemuck::pod_read_unaligned(&bq_bytes[off..off + sig_size]);
+            v.push(sig);
+        }
+        v
+    };
+
+    memtable.set_bq_signatures(sigs);
+    tracing::info!("从 .tdb 恢复了 {} 个 BQ 签名（零拷贝加载）", bq_count);
 }

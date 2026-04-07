@@ -16,7 +16,7 @@
 - [常见使用模式](#常见使用模式)
 - [避坑指南](#避坑指南)
 - [模型升级与维度迁移](#模型升级与维度迁移)
-- [ERPC 索引策略与调优](#erpc-索引策略与调优)
+- [BQ 索引策略与调优](#bq-索引策略与调优)
 - [架构边界认知与规避策略](#架构边界认知与规避策略)
 
 ---
@@ -64,7 +64,7 @@ cargo add triviumdb
 
 ```toml
 [dependencies]
-triviumdb = "0.4.90" 
+triviumdb = "0.4.91" 
 ```
 
 ### 30 秒入门模板
@@ -585,37 +585,37 @@ with triviumdb.TriviumDB("knowledge_v2.tdb", dim=NEW_DIM) as new_db:
 
 ---
 
-## ERPC 索引策略与调优
+## BQ 索引策略与调优
 
-TriviumDB v0.4.90 起采用全自动双引擎 ERPC 索引，开发者**无需也无法手动触发重建**。了解以下策略可以取得最佳检索效果。
+TriviumDB v0.4.91 起采用全自动双引擎 BQ（Binary Quantization）索引，开发者**无需也无法手动触发重建**。了解以下策略可以取得最佳检索效果。
 
-### ERPC 自动激活条件
+### BQ 自动激活条件
 
 | 条件 | 检索引擎 | 行为 |
 |------|----------|------|
 | Mmap 模式 + < 2 万节点 | **BruteForce** | 100% 精确召回 |
-| Mmap 模式 + ≥ 2 万节点 + 首次 Compaction 完成 | **ERPC** | 近似搜索，Recall@10 > 85% |
+| Mmap 模式 + ≥ 2 万节点 + 首次 Compaction 完成 | **BQ 三阶段火箭** | 二进制粗排 + 精排，Recall@10 > 97% |
 | Rom 模式（任意节点数） | **BruteForce** | 100% 精确召回 |
 
-### 快速达到 ERPC 激活
+### 快速达到 BQ 激活
 
 ```python
 # 1. 确保使用 Mmap 模式（Python 端默认也是 Mmap 模式）
 with triviumdb.TriviumDB("data.tdb", dim=1536) as db:
     # 2. 导入 >= 2 万条数据
     db.batch_insert(vectors_20k, payloads_20k)
-    # 3. flush 触发一次 Compaction——ERPC 索引将在此期间在后台构建
+    # 3. flush 触发一次 Compaction——BQ 索引将在此期间在后台构建
     db.flush()
     # 4. 部署 auto_compaction 持续更新索引
     db.enable_auto_compaction(interval_secs=60)
 ```
 
-### 高精度场景：强制绕过 ERPC
+### 高精度场景：强制绕过 BQ
 
 如果业务对 100% 召回率有强要求（如金融风控、医疗诊断），可以用 Rom 模式强制走 BruteForce：
 
 ```rust
-// Rom 模式不会构建 ERPC，始终走 BruteForce 100% 精确检索
+// Rom 模式不会构建 BQ，始终走 BruteForce 100% 精确检索
 let db = Database::<f32>::open_with_config("data.tdb", Config {
     dim: 1536,
     storage_mode: StorageMode::Rom,
@@ -623,15 +623,14 @@ let db = Database::<f32>::open_with_config("data.tdb", Config {
 })?;
 ```
 
-### ERPC effort 参数说明
+### BQ 精查率参数说明
 
-`effort` 参数控制 ERPC 索引的建库开销与检索精度权衡，当前**标准内置为 0.6**，适合绝大多数生产场景。
+`bq_candidate_ratio` 参数控制 BQ 粗排后送入精排的候选比例，直接影响速度与精度的权衡：
 
-| effort | 聚类数 K | 适用场景 |
-|--------|---------|---------|
-| 0.3 | 小 | 快速响应优先，召回率略低 |
-| **0.6** | **~170（5 万数据时）** | **默认，平衡最佳** |
-| 1.0 | 最大 | 高精度优先，构建时间较长 |
+| `bq_candidate_ratio` | 候选池大小（20万时） | Recall@10 | QPS | 适用场景 |
+|-----------------------|-------------------|-----------|------|----------|
+| **0.05（5%）** | 10,000 | **99.50%** | 69.8 | **精准 RAG / AI 记忆（默认推荐）** |
+| 0.01（1%） | 2,000 | 89.32% | 174.6 | 游戏 NPC 联想 / 模糊推荐 |
 
 ---
 
