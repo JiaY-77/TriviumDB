@@ -600,7 +600,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     // 直接获取 BQ 签名和 ID 映射的连续内存切片，零开销访问
                     let bq_sigs = mt.bq_signatures_slice();
                     let id_map = mt.internal_indices();
+                    let fast_tags = mt.fast_tags_slice();
                     let has_filter = config.payload_filter.is_some();
+                    let bloom_mask = config.payload_filter.as_ref().map(|f| f.extract_must_have_mask()).unwrap_or(0);
 
                     // 使用大小为 K 的大根堆（MaxHeap on distance），O(N log K) 替代 O(N log N) 全排序
                     // 堆元素：(hamming_distance, slot_index)
@@ -608,13 +610,18 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     let mut heap: BinaryHeap<(u32, usize)> = BinaryHeap::with_capacity(candidate_cnt + 1);
 
                     // 热循环：纯裸索引扫描，无 Option 解包，无闭包调用
-                    let scan_len = slot_count.min(bq_sigs.len());
+                    let scan_len = slot_count.min(bq_sigs.len()).min(fast_tags.len());
                     for i in 0..scan_len {
                         // 跳过 tombstone 节点（id == 0）
                         let node_id = id_map[i];
                         if node_id == 0 { continue; }
 
-                        // Payload 过滤仅在需要时执行（绝大多数场景无过滤，跳过此分支）
+                        // 行级特征布隆拦截器 (Parallel Bit-Tag Array O(1) 过滤)
+                        if bloom_mask != 0 && (fast_tags[i] & bloom_mask) != bloom_mask {
+                            continue; // 彻底无视 JSON，瞬间踢出 True Negative
+                        }
+
+                        // Payload 精确复核（仅容错漏网之鱼）
                         if has_filter && !passes_filter(node_id) { continue; }
 
                         // 核心：直接内存地址读取 BQ 签名，执行 XOR + POPCNT
@@ -744,6 +751,8 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     refined
                 } else {
                     // --- 原生基础全局爆搜（MemTable L0 热区）带预过滤 ---
+                    let bloom_mask = config.payload_filter.as_ref().map(|f| f.extract_must_have_mask()).unwrap_or(0);
+                    let fast_tags = mt.fast_tags_slice();
                     brute_force::search(
                         query_vector,
                         vectors,
@@ -752,6 +761,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                         config.min_score,
                         |idx| {
                             let id = mt.get_id_by_index(idx);
+                            if bloom_mask != 0 && idx < fast_tags.len() && (fast_tags[idx] & bloom_mask) != bloom_mask {
+                                return 0; // True Negative
+                            }
                             if passes_filter(id) { id } else { 0 }
                         },
                     )
@@ -1113,7 +1125,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         let ast = crate::query::parser::parse(cypher)
             .map_err(|e| crate::error::TriviumError::Generic(format!("查询语句解析失败: {}", e)))?;
         let mt = lock_or_recover(&self.memtable);
-        Ok(crate::query::executor::execute(&ast, &mt))
+        Ok(crate::query::executor::execute(&ast, &mt)?)
     }
 }
 

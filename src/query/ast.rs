@@ -14,6 +14,7 @@ pub struct Query {
     pub pattern: Pattern,
     pub where_clause: Option<Condition>,
     pub return_vars: Vec<String>,
+    pub limit: Option<usize>,
 }
 
 /// 路径模式：交替的 节点模式 和 边模式

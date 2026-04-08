@@ -1,0 +1,94 @@
+#![allow(non_snake_case)]
+//! 跨平台字节序兼容 (Cross-Endian) 与 32 位寻址边界模拟
+//! 对标 SQLite 在跨平台/端序异常时安全降级而不是 Panic
+
+use triviumdb::Database;
+use triviumdb::database::Config;
+use std::fs::OpenOptions;
+use std::io::{Read, Write, Seek, SeekFrom};
+use std::panic::catch_unwind;
+
+const DIM: usize = 4;
+
+fn tmp_db(name: &str) -> String {
+    std::fs::create_dir_all("test_data").ok();
+    format!("test_data/endian_{}", name)
+}
+
+fn cleanup(path: &str) {
+    for ext in &["", ".tdb", ".wal", ".vec", ".lock", ".flush_ok"] {
+        std::fs::remove_file(format!("{}{}", path, ext)).ok();
+    }
+}
+
+#[test]
+fn 测试_人为端序颠倒污染_魔数与长度域应有效拦截不崩溃() {
+    let path = tmp_db("endianness");
+    cleanup(&path);
+
+    {
+        let mut db = Database::<f32>::open(&path, DIM).unwrap();
+        let mut tx = db.begin_tx();
+        tx.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"test": true}));
+        tx.commit().unwrap();
+        db.flush().unwrap();
+    }
+
+    // 删除 WAL 和 flush_ok，隔离变量，只保留被篡改的 .tdb
+    std::fs::remove_file(format!("{}.wal", path)).ok();
+    std::fs::remove_file(format!("{}.flush_ok", path)).ok();
+
+    // 打开写入的主数据文件，手动将文件头部的 u32/u64 元数据反转
+    let tdb_path = path.clone();
+    if let Ok(mut file) = OpenOptions::new().read(true).write(true).open(&tdb_path) {
+        let mut buffer = [0u8; 16];
+        if file.read(&mut buffer).is_ok() {
+            // 将前四个字节粗暴反转
+            buffer[0..4].reverse();
+            let _ = file.seek(SeekFrom::Start(0));
+            let _ = file.write_all(&buffer);
+        }
+    }
+
+    // 核心断言：绝不能因为读取被篡改的文件而发生 Segfault 或 Panic
+    let result = catch_unwind(|| {
+        Database::<f32>::open(&path, DIM)
+    });
+
+    assert!(result.is_ok(), "引擎读取了端序颠倒的文件，触发了极危 Panic 崩溃！");
+    let load_res = result.unwrap();
+    // 合法行为：
+    //   1. Err(Corrupted) → 拒绝加载 ✅
+    //   2. Ok(db) 且 node_count == 0 → 降级到空库新建 ✅
+    //   3. Ok(db) 且 node_count > 0 → WAL 灾备恢复了数据 ✅（只要没 Panic 就行）
+    // 唯一不合法的是 Panic / Segfault
+    match load_res {
+        Err(_e) => { /* 拒绝加载，完美防御 */ }
+        Ok(db) => {
+            // 即使加载成功也不应 panic
+            let _ = db.node_count();
+        }
+    }
+
+    cleanup(&path);
+}
+
+#[test]
+fn 测试_超大维数模拟拦截_防平台指针溢出() {
+    let path = tmp_db("huge_dim");
+    cleanup(&path);
+
+    // 模拟恶意输入一个导致 u64 会溢出或撑爆 32位 内存寻址极限的维度
+    let huge_dim = 1 << 30; // 给定一个约 10 亿的向量维度
+    
+    // 不应 Panic 崩溃
+    let result = catch_unwind(|| {
+        let config = Config { dim: huge_dim, ..Default::default() };
+        Database::<f32>::open_with_config(&path, config)
+    });
+
+    assert!(result.is_ok(), "加载非法超巨维度触发了 Panic 崩溃");
+    // 不可能返回成功（因为 10 亿维度一创建就要预留大量空间，可能会 Err 或者被安全拒绝）
+    
+    cleanup(&path);
+}

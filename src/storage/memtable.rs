@@ -7,6 +7,46 @@ use crate::node::{Edge, NodeId};
 use crate::storage::vec_pool::VecPool;
 use std::collections::HashMap;
 
+/// 计算给定 JSON 对象的行级特征布隆签名（共 64 位）
+fn calculate_json_signature(value: &serde_json::Value) -> u64 {
+    let mut sig = 0u64;
+    flatten_and_hash_json("", value, &mut sig);
+    sig
+}
+
+fn flatten_and_hash_json(prefix: &str, value: &serde_json::Value, sig: &mut u64) {
+    use std::hash::{Hash, Hasher};
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                let new_prefix = if prefix.is_empty() { k.clone() } else { format!("{}.{}", prefix, k) };
+                flatten_and_hash_json(&new_prefix, v, sig);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                flatten_and_hash_json(prefix, v, sig);
+            }
+        }
+        serde_json::Value::String(s) => {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            format!("{}:{}", prefix, s).hash(&mut hasher);
+            *sig |= 1u64 << (hasher.finish() % 64);
+        }
+        serde_json::Value::Bool(b) => {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            format!("{}:{}", prefix, b).hash(&mut hasher);
+            *sig |= 1u64 << (hasher.finish() % 64);
+        }
+        serde_json::Value::Number(n) => {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            format!("{}:{}", prefix, n).hash(&mut hasher);
+            *sig |= 1u64 << (hasher.finish() % 64);
+        }
+        serde_json::Value::Null => {}
+    }
+}
+
 /// 内存工作区，扮演类似 LSM Tree 中 MemTable 的角色。
 ///
 /// v0.4 改进：向量存储委托给 VecPool（分层 mmap + 内存增量），
@@ -38,6 +78,9 @@ pub struct MemTable<T: VectorType> {
     // 入度统计表：用于快速查询目标节点的被连接数（支持图谱反向抑制算法）
     in_degrees: HashMap<NodeId, usize>,
 
+    // 反向入度哈希网：用于 O(1) 解决删除节点时的全库雪崩扫表
+    incoming_edges: HashMap<NodeId, Vec<NodeId>>,
+
     // 节点不应期（疲劳状态）映射表：
     // 0 = 正常；1 = 疲劳中（被激活后，下一轮扩散大幅衰减，消费一次后清零）
     fatigue_map: std::sync::RwLock<HashMap<NodeId, u8>>,
@@ -46,6 +89,12 @@ pub struct MemTable<T: VectorType> {
     // 用于在 vectors 数组里定位数据位置
     indices_to_ids: Vec<NodeId>,
     ids_to_indices: HashMap<NodeId, usize>,
+
+    // 行级哈希阵列：与 indices 同步，提供 O(1) 的布隆屏蔽检查，跳过极其昂贵的 JSON 反序列化
+    fast_tags: Vec<u64>,
+
+    // 空闲索引回收槽：O(1) 回收墓碑位置，防止物理大数组无尽膨胀
+    free_slots: Vec<usize>,
 
     // 4. Int8 标量量化池（三级火箭 Stage 2 助推器）
     //    惰性构建：仅当 BQ 检索路径启用时，跟随 BQ 签名池同步重建
@@ -86,9 +135,12 @@ impl<T: VectorType> MemTable<T> {
             payloads: HashMap::new(),
             edges: HashMap::new(),
             in_degrees: HashMap::new(),
+            incoming_edges: HashMap::new(),
             fatigue_map: std::sync::RwLock::new(HashMap::new()),
             indices_to_ids: Vec::new(),
             ids_to_indices: HashMap::new(),
+            fast_tags: Vec::new(),
+            free_slots: Vec::new(),
             int8_pool: None,
         }
     }
@@ -112,9 +164,12 @@ impl<T: VectorType> MemTable<T> {
             payloads: HashMap::new(),
             edges: HashMap::new(),
             in_degrees: HashMap::new(),
+            incoming_edges: HashMap::new(),
             fatigue_map: std::sync::RwLock::new(HashMap::new()),
             indices_to_ids: Vec::new(),
             ids_to_indices: HashMap::new(),
+            fast_tags: Vec::new(),
+            free_slots: Vec::new(),
             int8_pool: None,
         }
     }
@@ -156,27 +211,43 @@ impl<T: VectorType> MemTable<T> {
             });
         }
 
-        let idx = self.indices_to_ids.len();
-        self.vec_pool.push(vector);
+        // 优先从空闲槽复活
+        let sig = calculate_json_signature(&payload);
+        let idx = if let Some(free_idx) = self.free_slots.pop() {
+            self.vec_pool.update(free_idx, vector);
+            self.indices_to_ids[free_idx] = id;
+            self.fast_tags[free_idx] = sig;
+            free_idx
+        } else {
+            let i = self.indices_to_ids.len();
+            self.vec_pool.push(vector);
+            self.indices_to_ids.push(id);
+            self.fast_tags.push(sig);
+            i
+        };
         self.payloads.insert(id, payload);
-        self.indices_to_ids.push(id);
         self.ids_to_indices.insert(id, idx);
         Ok(())
     }
 
     /// 从 mmap 加载时使用：仅注册映射关系，不推入向量（向量已在 VecPool 中）
     pub fn register_node(&mut self, id: NodeId, payload: serde_json::Value) -> Result<()> {
+        let sig = calculate_json_signature(&payload);
         let idx = self.indices_to_ids.len();
         self.payloads.insert(id, payload);
         self.indices_to_ids.push(id);
+        self.fast_tags.push(sig);
         self.ids_to_indices.insert(id, idx);
         Ok(())
     }
 
     /// 从持久化文件加载时遇到逻辑删除节点（Tombstone），仅推进内部索引映射空洞
     pub fn register_tombstone(&mut self) -> Result<()> {
+        let idx = self.indices_to_ids.len();
         // NodeId=0 仅作为位置占位符，不在 payloads/ids_to_indices 中建立映射
         self.indices_to_ids.push(0);
+        self.fast_tags.push(0);
+        self.free_slots.push(idx); // 加入环保回收池
         Ok(())
     }
 
@@ -193,15 +264,25 @@ impl<T: VectorType> MemTable<T> {
         let id = self.next_id;
         self.next_id += 1;
 
-        // 1. 记录向量（推入 VecPool 增量层）
-        let idx = self.indices_to_ids.len();
-        self.vec_pool.push(vector);
+        // 1. 记录向量（优先尝试从空闲槽复活，否则推入尾部增量层）
+        let sig = calculate_json_signature(&payload);
+        let idx = if let Some(free_idx) = self.free_slots.pop() {
+            self.vec_pool.update(free_idx, vector); // 原地重生
+            self.indices_to_ids[free_idx] = id;
+            self.fast_tags[free_idx] = sig;
+            free_idx
+        } else {
+            let i = self.indices_to_ids.len();
+            self.vec_pool.push(vector); // 追尾拓展
+            self.indices_to_ids.push(id);
+            self.fast_tags.push(sig);
+            i
+        };
 
         // 2. 更新关系型负载
         self.payloads.insert(id, payload);
 
-        // 3. 构建映射
-        self.indices_to_ids.push(id);
+        // 3. 构建反向映射
         self.ids_to_indices.insert(id, idx);
 
         Ok(id)
@@ -226,11 +307,21 @@ impl<T: VectorType> MemTable<T> {
         }
         Self::validate_vector(vector)?;
 
-        // 推入 VecPool 并映射
-        let idx = self.indices_to_ids.len();
-        self.vec_pool.push(vector);
+        // 优先从空闲槽复活
+        let sig = calculate_json_signature(&payload);
+        let idx = if let Some(free_idx) = self.free_slots.pop() {
+            self.vec_pool.update(free_idx, vector);
+            self.indices_to_ids[free_idx] = id;
+            self.fast_tags[free_idx] = sig;
+            free_idx
+        } else {
+            let i = self.indices_to_ids.len();
+            self.vec_pool.push(vector);
+            self.indices_to_ids.push(id);
+            self.fast_tags.push(sig);
+            i
+        };
         self.payloads.insert(id, payload);
-        self.indices_to_ids.push(id);
         self.ids_to_indices.insert(id, idx);
 
         // 防御性推进分配器指针，避免后续普通 insert 撞车
@@ -257,8 +348,9 @@ impl<T: VectorType> MemTable<T> {
         };
         self.edges.entry(src).or_default().push(edge);
 
-        // 增加目标节点的入度计数
+        // 增加目标节点的入度计数与反向哈希网记录
         *self.in_degrees.entry(dst).or_insert(0) += 1;
+        self.incoming_edges.entry(dst).or_default().push(src);
 
         Ok(())
     }
@@ -360,6 +452,12 @@ impl<T: VectorType> MemTable<T> {
         &self.bq_signatures
     }
 
+    /// 直接暴露 Fast Tags (Bloom 签名) 数组切片，O(1) 极大加速属性过滤
+    #[inline]
+    pub fn fast_tags_slice(&self) -> &[u64] {
+        &self.fast_tags
+    }
+
     /// 从持久化文件恢复 BQ 签名数组（跳过重建）
     pub fn set_bq_signatures(&mut self, sigs: Vec<BqSignature>) {
         self.bq_signatures = sigs;
@@ -404,9 +502,11 @@ impl<T: VectorType> MemTable<T> {
             return Err(TriviumError::NodeNotFound(id));
         }
 
-        // 1. 向量层：通过 VecPool 逻辑删除（置零）
-        if let Some(&idx) = self.ids_to_indices.get(&id) {
+        // 1. 向量层：通过 VecPool 逻辑删除（置零），并回收物理卡槽
+        if let Some(idx) = self.ids_to_indices.remove(&id) {
             self.vec_pool.zero_out(idx);
+            self.indices_to_ids[idx] = 0; // 盖上墓碑标识，防止后续被误认
+            self.free_slots.push(idx);    // 抛入环保回收池，供下一个 insert 使用！
         }
 
         // 2. 元数据层
@@ -414,17 +514,25 @@ impl<T: VectorType> MemTable<T> {
 
         // 3. 图谱层：删除出边 + 清理其他节点指向该节点的入边
         if let Some(outgoing_edges) = self.edges.remove(&id) {
-            // 清理这些出边目标节点的入度计数
+            // 清理这些出边目标节点的入度计数与反向哈希网记录
             for edge in outgoing_edges {
-                if let Some(in_deg) = self.in_degrees.get_mut(&edge.target_id) {
+                let target = edge.target_id;
+                if let Some(in_deg) = self.in_degrees.get_mut(&target) {
                     *in_deg = in_deg.saturating_sub(1);
+                }
+                if let Some(incoming) = self.incoming_edges.get_mut(&target) {
+                    incoming.retain(|&src| src != id);
                 }
             }
         }
 
-        for edge_list in self.edges.values_mut() {
-            edge_list.retain(|e| e.target_id != id);
-            // 这里就不需要在外层大循环里再去减 self.in_degrees[&id] 了，直接在下面把这个 id 从 in_degrees 中移除即可
+        // 神级优化：利用反向哈希网，只遍历指向本节点的死循环入口，彻底消除 O(E) 雪崩扫表！
+        if let Some(incoming) = self.incoming_edges.remove(&id) {
+            for src_id in incoming {
+                if let Some(edge_list) = self.edges.get_mut(&src_id) {
+                    edge_list.retain(|e| e.target_id != id);
+                }
+            }
         }
         self.in_degrees.remove(&id);
 
@@ -443,6 +551,9 @@ impl<T: VectorType> MemTable<T> {
                 if let Some(in_deg) = self.in_degrees.get_mut(&dst) {
                     *in_deg = in_deg.saturating_sub(removed_count);
                 }
+                if let Some(incoming) = self.incoming_edges.get_mut(&dst) {
+                    incoming.retain(|&id| id != src);
+                }
             }
             Ok(())
         } else {
@@ -458,6 +569,10 @@ impl<T: VectorType> MemTable<T> {
     pub fn update_payload(&mut self, id: NodeId, payload: serde_json::Value) -> Result<()> {
         match self.payloads.get_mut(&id) {
             Some(existing) => {
+                let sig = calculate_json_signature(&payload);
+                if let Some(&idx) = self.ids_to_indices.get(&id) {
+                    self.fast_tags[idx] = sig;
+                }
                 *existing = payload;
                 Ok(())
             }

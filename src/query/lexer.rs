@@ -7,6 +7,7 @@ pub enum Token {
     Match,
     Where,
     Return,
+    Limit,
     And,
     Or,
 
@@ -229,6 +230,7 @@ impl Lexer {
                                 "MATCH" => Token::Match,
                                 "WHERE" => Token::Where,
                                 "RETURN" => Token::Return,
+                                "LIMIT" => Token::Limit,
                                 "AND" => Token::And,
                                 "OR" => Token::Or,
                                 "TRUE" => Token::BoolLit(true),

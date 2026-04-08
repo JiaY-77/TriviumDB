@@ -1,4 +1,4 @@
-# TriviumDB v0.4.91 索引性能与精度评测报告
+# TriviumDB v0.5.0 索引性能与精度评测报告
 
 > 测试环境：Windows 11 x86_64 / Rust 1.93.1 (release profile, LTO=true)  
 > 测试时间：2026-04-08  

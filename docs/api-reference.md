@@ -1,6 +1,6 @@
 # TriviumDB API 完整参考
 
-> **版本**: v0.4.91  
+> **版本**: v0.5.0  
 > **语言**: Rust 核心 + Python 绑定 (PyO3) + Node.js 绑定 (napi-rs)  
 > **许可**: Apache-2.0
 
@@ -405,10 +405,13 @@ let results = db.search_advanced(&query_vec, &config)?;
 | `enable_dpp` | `bool` | `false` | 启用 DPP 多样性采样 |
 | `dpp_quality_weight` | `f32` | `1.0` | DPP 质量权重幂次 |
 | `enable_text_hybrid_search`| `bool`| `false`| 是否开启 BM25/AC 双路混合搜索 |
+| `text_boost` | `f32` | `1.5` | 文本混合查询分数提权倍率 |
+| `enable_bq_coarse_search` | `bool` | `false`| 是否开启 BQ 第一阶段二进制指纹粗筛 |
+| `bq_candidate_ratio` | `f32` | `0.05`| BQ 粗排后候选集占总数据量的比例 |
 | `hybrid_alpha` | `f32` | `0.7` | 混合检索中向量权重 (0~1)，(1-alpha) 为稀疏文本权重 |
 | `custom_query_text` | `str`| `None` | (可选) 手动传入用于文本匹配的原始文本 |
 
-> 💡 所有参数均内置安全钳位：`teleport_alpha` 被约束在 [0, 1]，`fista_lambda` 在 [1e-5, 100]，`dpp_quality_weight` 在 [0, 10]。传入越界值不会崩溃，而是被静默钳平。
+> 💡 所有参数均内置安全钳位：`teleport_alpha` 被约束在 [0, 1]，`fista_lambda` 在 [1e-5, 100]，`dpp_quality_weight` 在 [0, 10]，`bq_candidate_ratio` 在 [0.001, 1.0]。传入越界值不会崩溃，而是被静默钳平。
 
 > 💡 当 `enable_advanced_pipeline = false` 时，`search_advanced` 的行为与 `search` 完全一致。
 
@@ -656,7 +659,7 @@ let ids = db.all_node_ids();     // Vec<NodeId>
 
 ### BQ 自动索引说明
 
-TriviumDB v0.4.91 起采用**全自动双引擎向量索引路由**，不再提供手动 `rebuild_index()` 接口：
+TriviumDB v0.5.0 起采用**全自动双引擎向量索引路由**，不再提供手动 `rebuild_index()` 接口：
 
 | 条件 | 检索引擎 | 召回行为 |
 |------|----------|----------|
@@ -765,7 +768,8 @@ let ids = tx.commit()?;
 | `id` | `id` | `u64` | 全局唯一节点 ID |
 | `vector` | `vector` | `list[float]` / `Vec<T>` | 节点的特征向量 |
 | `payload` | `payload` | `dict` / `serde_json::Value` | JSON 元数据 |
-| `num_edges` | `edges.len()` | `int` / `usize` | 出边数量 |
+| `edges` | `edges` | `list[Edge]` / `Vec<Edge>` | 详细出边列表（包含 target_id, label, weight） |
+| `num_edges` | `edges.len()` | `int` / `usize` | 快速获取出边数量 |
 
 ### SearchHit
 

@@ -60,6 +60,7 @@ pub mod nodejs {
         pub enable_text_hybrid_search: Option<bool>,
         pub text_boost: Option<f64>,
         pub bq_candidate_ratio: Option<f64>,
+        pub enable_bq_coarse_search: Option<bool>,
         pub custom_query_text: Option<String>,
     }
 
@@ -547,6 +548,7 @@ pub mod nodejs {
                 enable_text_hybrid_search: None,
                 text_boost: None,
                 bq_candidate_ratio: None,
+                enable_bq_coarse_search: None,
             });
 
             let core_config = crate::database::SearchConfig {
@@ -564,6 +566,7 @@ pub mod nodejs {
                 enable_text_hybrid_search: cfg.enable_text_hybrid_search.unwrap_or(false),
                 text_boost: cfg.text_boost.unwrap_or(1.5) as f32,
                 bq_candidate_ratio: cfg.bq_candidate_ratio.unwrap_or(0.05) as f32,
+                enable_bq_coarse_search: cfg.enable_bq_coarse_search.unwrap_or(false),
                 ..Default::default()
             };
 
@@ -808,10 +811,10 @@ pub mod nodejs {
             Ok(())
         }
 
-        /// 启动后台自动压缩（每 interval_secs 秒落盘一次）
+        /// 启动后台自动压缩（每 interval_secs 秒落盘一次，默认 2 小时=7200秒）
         #[napi]
         pub fn enable_auto_compaction(&mut self, interval_secs: Option<u32>) {
-            let secs = interval_secs.unwrap_or(30) as u64;
+            let secs = interval_secs.unwrap_or(7200) as u64;
             dispatch!(self, mut db => db.enable_auto_compaction(std::time::Duration::from_secs(secs)));
         }
 

@@ -509,7 +509,8 @@ pub mod python {
             text_boost=1.5,
             bq_candidate_ratio=0.05,
             custom_query_text=None,
-            payload_filter=None
+            payload_filter=None,
+            enable_bq_coarse_search=false
         ))]
         fn search_advanced(
             &self,
@@ -531,6 +532,7 @@ pub mod python {
             bq_candidate_ratio: f32,
             custom_query_text: Option<String>,
             payload_filter: Option<&Bound<'_, PyDict>>,
+            enable_bq_coarse_search: bool,
         ) -> PyResult<Vec<PySearchHit>> {
             // 解析 payload_filter（类 MongoDB 语法的 dict -> Rust Filter）
             let rust_filter = match payload_filter {
@@ -553,6 +555,7 @@ pub mod python {
                 enable_text_hybrid_search,
                 text_boost,
                 bq_candidate_ratio,
+                enable_bq_coarse_search,
                 payload_filter: rust_filter,
                 ..Default::default()
             };
@@ -717,7 +720,7 @@ pub mod python {
         }
 
         fn build_text_index(&mut self) {
-            dispatch!(self, mut db => db.build_text_index());
+            let _ = dispatch!(self, mut db => db.build_text_index());
         }
 
         fn get(&self, py: Python<'_>, id: u64) -> PyResult<Option<PyNodeView>> {
@@ -839,7 +842,7 @@ pub mod python {
             }
         }
 
-        #[pyo3(signature = (interval_secs=30))]
+        #[pyo3(signature = (interval_secs=7200))]
         fn enable_auto_compaction(&mut self, interval_secs: u64) {
             dispatch!(self, mut db => db.enable_auto_compaction(std::time::Duration::from_secs(interval_secs)));
         }
@@ -1141,6 +1144,11 @@ pub mod python {
                             id: n.id,
                             vector: n.vector.into_pyobject(py).unwrap().into_any().unbind(),
                             payload: json_to_pyobject(py, &n.payload),
+                            edges: n.edges.iter().map(|e| PyEdge {
+                                target_id: e.target_id,
+                                label: e.label.clone(),
+                                weight: e.weight,
+                            }).collect(),
                             num_edges: n.edges.len(),
                         });
                     }
@@ -1152,6 +1160,11 @@ pub mod python {
                             id: n.id,
                             vector: f32_vec.into_pyobject(py).unwrap().into_any().unbind(),
                             payload: json_to_pyobject(py, &n.payload),
+                            edges: n.edges.iter().map(|e| PyEdge {
+                                target_id: e.target_id,
+                                label: e.label.clone(),
+                                weight: e.weight,
+                            }).collect(),
                             num_edges: n.edges.len(),
                         });
                     }
@@ -1162,6 +1175,11 @@ pub mod python {
                             id: n.id,
                             vector: n.vector.into_pyobject(py).unwrap().into_any().unbind(),
                             payload: json_to_pyobject(py, &n.payload),
+                            edges: n.edges.iter().map(|e| PyEdge {
+                                target_id: e.target_id,
+                                label: e.label.clone(),
+                                weight: e.weight,
+                            }).collect(),
                             num_edges: n.edges.len(),
                         });
                     }

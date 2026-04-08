@@ -99,6 +99,33 @@ impl Filter {
         }
     }
 
+    /// 提取出本查询必然要求的特征哈希位掩码（布隆过滤掩码）
+    /// 用于在查询图谱全量数组时，实现超音速 O(N) 一级降维打击
+    pub fn extract_must_have_mask(&self) -> u64 {
+        match self {
+            Filter::Eq(key, val) => {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                use std::hash::{Hash, Hasher};
+                // Consistent with how fast_tags hashes values
+                let val_str = match val {
+                    Value::String(s) => s.clone(),
+                    v => v.to_string(),
+                };
+                format!("{}:{}", key, val_str).hash(&mut hasher);
+                1u64 << (hasher.finish() % 64)
+            }
+            Filter::And(filters) => {
+                let mut mask = 0u64;
+                for f in filters {
+                    mask |= f.extract_must_have_mask();
+                }
+                mask
+            }
+            // 对于 Or, In, Gt 等操作，我们无法提取单根必达掩码，安全退化为0（即退化到原版全扫描）
+            _ => 0
+        }
+    }
+
     // ════════ Builder 便捷方法 ════════
 
     pub fn eq(key: impl Into<String>, val: Value) -> Self {

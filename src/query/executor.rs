@@ -10,98 +10,154 @@ use super::ast::*;
 use crate::VectorType;
 use crate::node::Node;
 use crate::storage::memtable::MemTable;
+use crate::error::TriviumError;
 use std::collections::HashMap;
 
 /// 单条查询结果：变量名 → 节点快照
 pub type QueryResult<T> = Vec<HashMap<String, Node<T>>>;
 
 /// 执行一个已解析的 Query，返回匹配到的所有变量绑定
-pub fn execute<T: VectorType>(query: &Query, memtable: &MemTable<T>) -> QueryResult<T> {
+pub fn execute<T: VectorType>(query: &Query, memtable: &MemTable<T>) -> Result<QueryResult<T>, TriviumError> {
     let pattern = &query.pattern;
+
+    // AST 参数环境闭包化映射 (Solution 3: 消除 HashMap 的深层高频开辟)
+    let mut var_map: HashMap<String, usize> = HashMap::new();
+    let mut assign_var = |v: &str| {
+        let next_idx = var_map.len();
+        *var_map.entry(v.to_string()).or_insert(next_idx)
+    };
+
+    for pat in &pattern.nodes {
+        if let Some(var) = &pat.var {
+            assign_var(var);
+        }
+    }
+    for var in &query.return_vars {
+        assign_var(var);
+    }
 
     // 步骤 1：确定起始候选节点 IDs
     let first_node_pat = &pattern.nodes[0];
     let start_candidates_ids = find_candidates_ids(first_node_pat, memtable);
 
-    // 步骤 2：从起点出发，逐层匹配 edge → node → edge → node ...
-    // 🚀 OOM 防御：我们只在中间计算层存储 NodeId，绝对不克隆包含 Vector 和 Payload 的巨型 Node 结构！
-    let mut bindings_set: Vec<HashMap<String, u64>> = Vec::new();
+    // 步骤 2：从起点出发，采用 DFS（深度优先管道流）逐层匹配 (Solution 1)
+    let mut results = Vec::new();
+    let mut budget: usize = 0;
+    
+    // 熔断配额: 一次查询允许最多漫游评估的连接数上限 (Solution 2)
+    let max_budget = 100_000; 
+    let row_limit = query.limit.unwrap_or(5_000); // 如果没有 LIMIT，给一个宽容的 5000 默认值
 
     for start_id in start_candidates_ids {
-        let mut binding = HashMap::new();
-        if let Some(var) = &first_node_pat.var {
-            binding.insert(var.clone(), start_id);
+        let mut env = vec![None; var_map.len()];
+        let continue_search = dfs(
+            memtable,
+            pattern,
+            query.where_clause.as_ref(),
+            &query.return_vars,
+            &var_map,
+            0,
+            &mut env,
+            start_id,
+            &mut results,
+            &mut budget,
+            max_budget,
+            row_limit
+        )?;
+        if !continue_search {
+            break;
         }
-        bindings_set.push(binding);
     }
 
-    // 逐层扩展
-    for i in 0..pattern.edges.len() {
-        let edge_pat = &pattern.edges[i];
-        let next_node_pat = &pattern.nodes[i + 1];
-        let mut next_bindings = Vec::with_capacity(bindings_set.len());
+    Ok(results)
+}
 
-        for binding in &bindings_set {
-            // 找到当前层最后一个有名字的节点
-            let current_node_pat = &pattern.nodes[i];
-            let current_id = if let Some(var) = &current_node_pat.var {
-                match binding.get(var) {
-                    Some(&id) => id,
-                    None => continue,
-                }
-            } else {
-                continue;
-            };
+fn dfs<T: VectorType>(
+    memtable: &MemTable<T>,
+    pattern: &Pattern,
+    where_clause: Option<&Condition>,
+    return_vars: &[String],
+    var_map: &HashMap<String, usize>,
+    layer_idx: usize,
+    env: &mut Vec<Option<u64>>,
+    current_node: u64,
+    results: &mut QueryResult<T>,
+    budget: &mut usize,
+    max_budget: usize,
+    row_limit: usize
+) -> Result<bool, TriviumError> {
+    *budget += 1;
+    if *budget > max_budget {
+        return Err(TriviumError::Generic(format!("Query exceeded execution budget of {} steps. Failsafe triggered to prevent memory explosion.", max_budget)));
+    }
 
-            // 沿边扩展
-            if let Some(edges) = memtable.get_edges(current_id) {
-                for edge in edges {
-                    // 边标签过滤
-                    if let Some(ref label) = edge_pat.label
-                        && &edge.label != label {
-                            continue;
+    let node_pat = &pattern.nodes[layer_idx];
+    
+    // 节点内联属性拦截
+    if !matches_node_props_by_id(current_node, node_pat, memtable) {
+        return Ok(true);
+    }
+
+    // 环境入栈
+    let old_val = if let Some(var) = &node_pat.var {
+        let idx = var_map[var];
+        let old = env[idx];
+        env[idx] = Some(current_node);
+        Some((idx, old))
+    } else {
+        None
+    };
+
+    if layer_idx == pattern.edges.len() {
+        // 路径收敛，走入 WHERE 后处理 (Solution 1: 流水线及早筛选)
+        let mut passed = true;
+        if let Some(cond) = where_clause {
+            passed = eval_condition_by_env(cond, env, var_map, memtable);
+        }
+        
+        if passed {
+            let mut row = HashMap::new();
+            for ret_var in return_vars {
+                if let Some(&idx) = var_map.get(ret_var) {
+                    if let Some(id) = env[idx] {
+                        if let Some(node) = build_node(id, memtable) {
+                            row.insert(ret_var.clone(), node);
                         }
-
-                    let target_id = edge.target_id;
-
-                    // 节点属性内联过滤
-                    if !matches_node_props_by_id(target_id, next_node_pat, memtable) {
+                    }
+                }
+            }
+            results.push(row);
+            if results.len() >= row_limit {
+                // 如果满足极限行数，通知所有上层 DFS 停止扩展
+                if let Some((idx, old)) = old_val { env[idx] = old; }
+                return Ok(false); 
+            }
+        }
+    } else {
+        // DFS 递归展层
+        let edge_pat = &pattern.edges[layer_idx];
+        if let Some(edges) = memtable.get_edges(current_node) {
+            for edge in edges {
+                if let Some(ref label) = edge_pat.label {
+                    if &edge.label != label {
                         continue;
                     }
-
-                    // 仅克隆 HashMap<String, u64>
-                    let mut new_binding = binding.clone();
-                    if let Some(var) = &next_node_pat.var {
-                        new_binding.insert(var.clone(), target_id);
-                    }
-                    next_bindings.push(new_binding);
+                }
+                let continue_search = dfs(memtable, pattern, where_clause, return_vars, var_map, layer_idx + 1, env, edge.target_id, results, budget, max_budget, row_limit)?;
+                if !continue_search {
+                    if let Some((idx, old)) = old_val { env[idx] = old; }
+                    return Ok(false);
                 }
             }
         }
-
-        bindings_set = next_bindings;
     }
 
-    // 步骤 3：应用 WHERE 过滤
-    if let Some(ref condition) = query.where_clause {
-        bindings_set.retain(|binding| eval_condition_by_id(condition, binding, memtable));
+    // 环境回溯出栈
+    if let Some((idx, old)) = old_val {
+        env[idx] = old;
     }
 
-    // 步骤 4：仅保留 RETURN 中请求的变量，并在此时才进行最终节点的装载（Lazy Evaluation）
-    let return_vars = &query.return_vars;
-    bindings_set
-        .into_iter()
-        .map(|binding| {
-            let mut filtered: HashMap<String, Node<T>> = HashMap::new();
-            for var in return_vars {
-                if let Some(&id) = binding.get(var)
-                    && let Some(node) = build_node(id, memtable) {
-                        filtered.insert(var.clone(), node);
-                    }
-            }
-            filtered
-        })
-        .collect()
+    Ok(true)
 }
 
 fn find_candidates_ids<T: VectorType>(node_pat: &NodePattern, memtable: &MemTable<T>) -> Vec<u64> {
@@ -180,10 +236,13 @@ fn matches_node_props_by_id<T: VectorType>(id: u64, pat: &NodePattern, memtable:
 fn build_node<T: VectorType>(id: u64, memtable: &MemTable<T>) -> Option<Node<T>> {
     let vector = memtable.get_vector(id)?;
     let payload = memtable.get_payload(id)?;
+    
+    // 恢复真实边长克隆。即使边极其巨大，引擎也不应自行篡改/截断节点的真实表达。
     let edges = memtable
         .get_edges(id)
         .map(|e| e.to_vec())
         .unwrap_or_default();
+        
     Some(Node {
         id,
         vector: vector.to_vec(),
@@ -202,35 +261,34 @@ fn lit_matches_json(lit: &LitValue, json: &serde_json::Value) -> bool {
     }
 }
 
-/// 评估 WHERE 条件（运行时动态抓取 ID 绑定的属性）
-fn eval_condition_by_id<T: VectorType>(cond: &Condition, binding: &HashMap<String, u64>, memtable: &MemTable<T>) -> bool {
+/// 评估 WHERE 条件（运行时动态抓取 ID 绑定的属性，扁平环境版本）
+fn eval_condition_by_env<T: VectorType>(cond: &Condition, env: &[Option<u64>], var_map: &HashMap<String, usize>, memtable: &MemTable<T>) -> bool {
     match cond {
         Condition::Compare { left, op, right } => {
-            let lval = eval_expr_by_id(left, binding, memtable);
-            let rval = eval_expr_by_id(right, binding, memtable);
+            let lval = eval_expr_by_env(left, env, var_map, memtable);
+            let rval = eval_expr_by_env(right, env, var_map, memtable);
             compare_values(&lval, op, &rval)
         }
-        Condition::And(a, b) => eval_condition_by_id(a, binding, memtable) && eval_condition_by_id(b, binding, memtable),
-        Condition::Or(a, b) => eval_condition_by_id(a, binding, memtable) || eval_condition_by_id(b, binding, memtable),
+        Condition::And(a, b) => eval_condition_by_env(a, env, var_map, memtable) && eval_condition_by_env(b, env, var_map, memtable),
+        Condition::Or(a, b) => eval_condition_by_env(a, env, var_map, memtable) || eval_condition_by_env(b, env, var_map, memtable),
     }
 }
 
-/// 评估表达式 → 运行时值
-fn eval_expr_by_id<T: VectorType>(expr: &Expr, binding: &HashMap<String, u64>, memtable: &MemTable<T>) -> RuntimeValue {
+/// 评估表达式 → 运行时值 (扁平环境版本)
+fn eval_expr_by_env<T: VectorType>(expr: &Expr, env: &[Option<u64>], var_map: &HashMap<String, usize>, memtable: &MemTable<T>) -> RuntimeValue {
     match expr {
         Expr::Property { var, field } => {
-            if let Some(&id) = binding.get(var) {
-                if field == "id" {
-                    return RuntimeValue::Int(id as i64);
+            if let Some(&idx) = var_map.get(var) {
+                if let Some(id) = env[idx] {
+                    if field == "id" {
+                        return RuntimeValue::Int(id as i64);
+                    }
+                    if let Some(payload) = memtable.get_payload(id) {
+                        return json_to_runtime(&payload[field]);
+                    }
                 }
-                if let Some(payload) = memtable.get_payload(id) {
-                    json_to_runtime(&payload[field])
-                } else {
-                    RuntimeValue::Null
-                }
-            } else {
-                RuntimeValue::Null
             }
+            RuntimeValue::Null
         }
         Expr::Literal(lit) => lit_to_runtime(lit),
     }

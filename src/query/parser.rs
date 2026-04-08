@@ -16,11 +16,12 @@ use super::lexer::Token;
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    depth: usize,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self { tokens, pos: 0, depth: 0 }
     }
 
     fn peek(&self) -> &Token {
@@ -60,10 +61,22 @@ impl Parser {
         self.expect(&Token::Return)?;
         let return_vars = self.parse_return_list()?;
 
+        // LIMIT (可选)
+        let limit = if self.peek() == &Token::Limit {
+            self.advance(); // consume LIMIT
+            match self.advance() {
+                Token::IntLit(n) if n >= 0 => Some(n as usize),
+                other => return Err(format!("Expected positive integer after LIMIT, got {:?}", other)),
+            }
+        } else {
+            None
+        };
+
         Ok(Query {
             pattern,
             where_clause,
             return_vars,
+            limit,
         })
     }
 
@@ -158,6 +171,18 @@ impl Parser {
 
     /// 条件表达式：a.x == 1 AND b.y > 2 OR ...
     fn parse_condition(&mut self) -> Result<Condition, String> {
+        self.depth += 1;
+        if self.depth > 128 {
+            self.depth -= 1;
+            return Err("Parser recursion depth limit exceeded (max 128). Query is too complex or malformed.".to_string());
+        }
+        
+        let result = self._parse_condition_internal();
+        self.depth -= 1;
+        result
+    }
+
+    fn _parse_condition_internal(&mut self) -> Result<Condition, String> {
         let mut left = self.parse_comparison()?;
 
         loop {
