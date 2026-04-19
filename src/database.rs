@@ -435,6 +435,67 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         Ok(())
     }
 
+    // ════════ 社区聚类 ════════
+
+    /// 基于内存图谱进行 Leiden/Louvain 近似快速聚类
+    ///
+    /// **无锁设计**: 先 snapshot 邻接表并释放 Mutex，再在锁外做纯数学计算。
+    /// 聚类期间数据库仍可正常读写。
+    ///
+    /// 参数:
+    /// - `min_community_size`: 最小社区大小 (默认 3)
+    /// - `max_iterations`: 最大迭代轮次 (默认 15)
+    /// - `with_centroids`: 是否计算质心向量 (默认 true)
+    pub fn leiden_cluster(
+        &self,
+        min_community_size: usize,
+        max_iterations: Option<usize>,
+        with_centroids: Option<bool>,
+    ) -> Result<crate::graph::leiden::LeidenResult> {
+        let config = crate::graph::leiden::LeidenConfig {
+            min_community_size,
+            max_iterations: max_iterations.unwrap_or(15),
+            compute_centroids: with_centroids.unwrap_or(true),
+        };
+
+        // ── Step 1: 快照邻接表 (短暂持锁) ──
+        let (snapshot, dim) = {
+            let mt = lock_or_recover(&self.memtable);
+            let node_ids = mt.all_node_ids();
+            let mut edges = std::collections::HashMap::new();
+            for &id in &node_ids {
+                if let Some(e) = mt.get_edges(id) {
+                    edges.insert(id, e.iter().map(|edge| (edge.target_id, edge.weight)).collect());
+                }
+            }
+            (
+                crate::graph::leiden::AdjacencySnapshot { edges, node_ids },
+                mt.dim(),
+            )
+        }; // ← Mutex 在此释放
+
+        // ── Step 2: 纯计算聚类 (无锁) ──
+        let mut result = crate::graph::leiden::run_leiden(&snapshot, &config);
+
+        // ── Step 3: 可选质心计算 (短暂持锁获取向量) ──
+        if config.compute_centroids && !result.node_to_cluster.is_empty() {
+            let vectors = {
+                let mt = lock_or_recover(&self.memtable);
+                let mut vecs = std::collections::HashMap::new();
+                for &node_id in result.node_to_cluster.keys() {
+                    if let Some(v) = mt.get_vector(node_id) {
+                        vecs.insert(node_id, v.iter().map(|x| x.to_f32()).collect::<Vec<f32>>());
+                    }
+                }
+                vecs
+            }; // ← Mutex 在此释放
+            crate::graph::leiden::compute_centroids(&mut result, &vectors, dim);
+        }
+
+        Ok(result)
+    }
+
+
     // ════════ 读操作 ════════
 
     pub fn index_keyword(&mut self, id: NodeId, keyword: &str) -> Result<()> {

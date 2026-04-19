@@ -82,6 +82,28 @@ pub mod nodejs {
         pub num_edges: u32,
     }
 
+    /// Leiden 聚类结果结构
+    #[napi(object)]
+    pub struct JsClusterResult {
+        /// 平铺数组: [nodeId1, clusterId1, nodeId2, clusterId2, ...]
+        pub node_to_cluster: Vec<f64>,
+        /// 平铺数组: [clusterId1, "label1", ...]
+        pub cluster_labels: Vec<String>,
+        /// 平铺首尾连接数组: [clusterId1, vector[0]...vector[dim], clusterId2, ...]
+        pub centroids: Vec<f64>,
+    }
+
+    /// Leiden 聚类配置 (全部可选)
+    #[napi(object)]
+    pub struct JsLeidenConfig {
+        /// 最小社区大小 (节点数 < 此值的碎片簇被丢弃, 默认 3)
+        pub min_community_size: Option<u32>,
+        /// 最大迭代轮次 (默认 15)
+        pub max_iterations: Option<u32>,
+        /// 是否计算质心 (默认 true)
+        pub with_centroids: Option<bool>,
+    }
+
     // ════════ 辅助：JSON Value → Filter ════════
 
     fn json_to_filter(val: &serde_json::Value) -> napi::Result<Filter> {
@@ -479,6 +501,65 @@ pub mod nodejs {
                 .into_iter()
                 .map(|id| id as f64)
                 .collect()
+        }
+
+        // ── 社区聚类 ──
+
+        /// 基于物理记忆图谱进行 Leiden 社区发现
+        ///
+        /// **无锁设计**: 短暂持锁快照邻接表后立即释放，聚类在锁外计算。
+        /// 调用期间数据库仍可正常读写。
+        #[napi]
+        pub fn leiden_cluster(&self, config: Option<JsLeidenConfig>) -> napi::Result<JsClusterResult> {
+            let cfg = config.unwrap_or(JsLeidenConfig {
+                min_community_size: None,
+                max_iterations: None,
+                with_centroids: None,
+            });
+            let min_c = cfg.min_community_size.unwrap_or(3) as usize;
+            let max_iter = cfg.max_iterations.map(|v| v as usize);
+            let with_cent = cfg.with_centroids;
+
+            let result = dispatch!(self, db => db.leiden_cluster(min_c, max_iter, with_cent))
+                .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+
+            // 排序确保确定性输出
+            let mut sorted_nodes: Vec<_> = result.node_to_cluster.into_iter().collect();
+            sorted_nodes.sort_by_key(|&(id, _)| id);
+
+            let mut node_to_cluster = Vec::with_capacity(sorted_nodes.len() * 2);
+            for (n, c) in sorted_nodes {
+                node_to_cluster.push(n as f64);
+                node_to_cluster.push(c as f64);
+            }
+
+            // 簇标签: 排序后输出
+            let mut sorted_sizes: Vec<_> = result.cluster_sizes.iter().collect();
+            sorted_sizes.sort_by_key(|(c, _)| *c);
+
+            let mut cluster_labels = Vec::with_capacity(sorted_sizes.len() * 2);
+            for (c, size) in &sorted_sizes {
+                cluster_labels.push(c.to_string());
+                cluster_labels.push(format!("Cluster {} ({})", c, size));
+            }
+
+            // 质心: 排序后平铺
+            let mut sorted_centroids: Vec<_> = result.centroids.into_iter().collect();
+            sorted_centroids.sort_by_key(|(c, _)| *c);
+
+            let mut centroids = Vec::new();
+            for (c, v) in sorted_centroids {
+                centroids.push(c as f64);
+                for val in v {
+                    centroids.push(val as f64);
+                }
+            }
+
+            Ok(JsClusterResult {
+                node_to_cluster,
+                cluster_labels,
+                centroids,
+            })
         }
 
         // ── 向量检索 ──

@@ -99,6 +99,24 @@ export interface JsSearchConfig {
   customQueryText?: string;
 }
 
+export interface JsClusterResult {
+  /** 节点到簇的扁平映射 [nodeId1, clusterId1, nodeId2, clusterId2...] */
+  nodeToCluster: number[];
+  /** 簇及其标签的扁平映射 [clusterId(string), label, ...] */
+  clusterLabels: string[];
+  /** 各簇的质心 [clusterId1, v0, v1, ..., clusterId2, ...] */
+  centroids: number[];
+}
+
+export interface JsLeidenConfig {
+  /** 最小社区大小 (节点数 < 此值的碎片簇被丢弃, 默认 3) */
+  minCommunitySize?: number;
+  /** 最大迭代轮次 (默认 15) */
+  maxIterations?: number;
+  /** 是否计算质心 (默认 true) */
+  withCentroids?: boolean;
+}
+
 // ==========================================
 // 核心类定义
 // ==========================================
@@ -178,6 +196,15 @@ export class TriviumDB {
    * @param id 要删除的节点 ID
    */
   delete(id: number): void;
+
+  // ── 社区聚类 ──
+
+  /**
+   * 基于内存图谱进行 Leiden 社区发现
+   *
+   * **无锁设计**: 短暂持锁快照邻接表后立即释放，聚类在锁外计算。
+   */
+  leidenCluster(config?: JsLeidenConfig): JsClusterResult;
 
   // ── 图谱操作 ──
 
