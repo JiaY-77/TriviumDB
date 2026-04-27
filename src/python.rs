@@ -83,6 +83,35 @@ pub mod python {
         pub row: PyObject,
     }
 
+    /// Hook 管线执行上下文（包含各阶段计时统计和自定义数据）
+    #[pyclass(name = "HookContext")]
+    pub struct PyHookContext {
+        /// 各管线阶段的耗时统计（阶段名 → 耗时微秒数）
+        #[pyo3(get)]
+        pub timings: PyObject,
+        /// Hook 注入的自定义数据
+        #[pyo3(get)]
+        pub custom_data: PyObject,
+        /// 管线是否被 Hook 提前终止
+        #[pyo3(get)]
+        pub aborted: bool,
+    }
+
+    #[pymethods]
+    impl PyHookContext {
+        fn __repr__(&self, py: Python<'_>) -> String {
+            format!(
+                "HookContext(aborted={}, timings={:?})",
+                self.aborted,
+                self.timings
+                    .bind(py)
+                    .repr()
+                    .map(|r| r.to_string())
+                    .unwrap_or_default()
+            )
+        }
+    }
+
     #[pymethods]
     impl PyQueryRow {
         fn __repr__(&self, py: Python<'_>) -> String {
@@ -361,6 +390,110 @@ pub mod python {
             let sm = parse_sync_mode(mode)?;
             dispatch!(self, mut db => db.set_sync_mode(sm));
             Ok(())
+        }
+
+        // ════════ Hook 管理 ════════
+
+        /// 加载 C/C++ 动态库作为检索管线 Hook
+        ///
+        /// 动态库需要导出以下 C ABI 符号（均为可选）：
+        /// - `trivium_recall`: 自定义召回
+        /// - `trivium_rerank`: 自定义重排序
+        ///
+        /// 示例：
+        /// ```python
+        /// db.load_ffi_hook("./libmy_plugin.so")
+        /// results = db.search(query_vec)  # 自动经过 C++ Hook
+        /// ```
+        fn load_ffi_hook(&mut self, lib_path: &str) -> PyResult<()> {
+            let ffi_hook = crate::hook::FfiHook::load(lib_path).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "加载 FFI Hook 失败: {}", e
+                ))
+            })?;
+            dispatch!(self, mut db => db.set_hook(ffi_hook));
+            Ok(())
+        }
+
+        /// 清除当前已注册的 Hook，恢复为默认的零开销 NoopHook
+        fn clear_hook(&mut self) {
+            dispatch!(self, mut db => db.clear_hook());
+        }
+
+        /// 带 Hook 上下文的检索：返回 (hits, context)
+        ///
+        /// 除了返回检索结果外，同时返回 HookContext 对象，
+        /// 其中包含管线各阶段的计时统计和 Hook 注入的自定义数据。
+        ///
+        /// 示例：
+        /// ```python
+        /// hits, ctx = db.search_with_context(query_vec, top_k=10)
+        /// print(ctx.timings)   # {'hook_pre_search': 0.1, 'graph_expand': 2.3, ...}
+        /// print(ctx.custom_data)  # Hook 注入的自定义数据
+        /// ```
+        #[pyo3(signature = (query_vector, top_k=5, expand_depth=2, min_score=0.1, payload_filter=None))]
+        fn search_with_context(
+            &self,
+            py: Python<'_>,
+            query_vector: Bound<'_, PyAny>,
+            top_k: usize,
+            expand_depth: usize,
+            min_score: f32,
+            payload_filter: Option<&Bound<'_, PyDict>>,
+        ) -> PyResult<(Vec<PySearchHit>, PyHookContext)> {
+            let rust_filter = match payload_filter {
+                Some(dict) => Some(dict_to_filter(py, dict)?),
+                None => None,
+            };
+            let config = crate::database::SearchConfig {
+                top_k,
+                expand_depth,
+                min_score,
+                payload_filter: rust_filter,
+                ..Default::default()
+            };
+
+            let (results, hook_ctx) = match &self.inner {
+                DbBackend::F32(db) => {
+                    let vec: Vec<f32> = query_vector.extract()?;
+                    db.search_hybrid_with_context(None, Some(&vec), &config)
+                }
+                DbBackend::F16(db) => {
+                    let vec: Vec<f32> = query_vector.extract()?;
+                    let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
+                    db.search_hybrid_with_context(None, Some(&vec16), &config)
+                }
+                DbBackend::U64(db) => {
+                    let vec: Vec<u64> = query_vector.extract()?;
+                    db.search_hybrid_with_context(None, Some(&vec), &config)
+                }
+            }
+            .map_err(|e: crate::error::TriviumError| {
+                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+            })?;
+
+            // 转换搜索结果
+            let hits: Vec<PySearchHit> = results
+                .into_iter()
+                .map(|h| PySearchHit {
+                    id: h.id,
+                    score: h.score,
+                    payload: json_to_pyobject(py, &h.payload),
+                })
+                .collect();
+
+            // 转换 HookContext → PyHookContext
+            let timings_dict = PyDict::new(py);
+            for (stage, dur) in &hook_ctx.stage_timings {
+                let _ = timings_dict.set_item(stage, dur.as_secs_f64() * 1000.0); // 转为毫秒
+            }
+            let ctx = PyHookContext {
+                timings: timings_dict.into_any().unbind(),
+                custom_data: json_to_pyobject(py, &hook_ctx.custom_data),
+                aborted: hook_ctx.abort,
+            };
+
+            Ok((hits, ctx))
         }
 
         fn insert(
@@ -1205,6 +1338,7 @@ pub mod python {
         m.add_class::<PySearchHit>()?;
         m.add_class::<PyNodeView>()?;
         m.add_class::<PyQueryRow>()?;
+        m.add_class::<PyHookContext>()?;
         m.add_function(wrap_pyfunction!(init_logger, m)?)?;
         Ok(())
     }

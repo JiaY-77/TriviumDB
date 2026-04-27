@@ -1,0 +1,32 @@
+[package]
+name = "triviumdb-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.triviumdb]
+path = ".."
+
+# WAL 二进制流解析模糊测试
+[[bin]]
+name = "fuzz_wal_parse"
+path = "fuzz_targets/fuzz_wal_parse.rs"
+doc = false
+
+# Cypher 查询语法解析模糊测试
+[[bin]]
+name = "fuzz_query_parse"
+path = "fuzz_targets/fuzz_query_parse.rs"
+doc = false
+
+# JSON Filter 解析模糊测试
+[[bin]]
+name = "fuzz_filter_parse"
+path = "fuzz_targets/fuzz_filter_parse.rs"
+doc = false

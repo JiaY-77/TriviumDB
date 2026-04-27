@@ -1,6 +1,6 @@
 # TriviumDB API 完整参考
 
-> **版本**: v0.5.0  
+> **版本**: v0.5.2  
 > **语言**: Rust 核心 + Python 绑定 (PyO3) + Node.js 绑定 (napi-rs)  
 > **许可**: Apache-2.0
 
@@ -12,6 +12,7 @@
 - [节点 CRUD](#节点-crud)
 - [图谱操作](#图谱操作)
 - [向量检索](#向量检索)
+- [🔌 Hook 扩展系统](#hook-扩展系统)
 - [元数据过滤](#元数据过滤)
 - [Cypher 图谱查询](#cypher-图谱查询)
 - [持久化与压缩](#持久化与压缩)
@@ -417,6 +418,176 @@ let results = db.search_advanced(&query_vec, &config)?;
 
 ---
 
+## 🔌 Hook 扩展系统
+
+TriviumDB v0.5.1 新增的检索管线 Hook 系统，允许开发者在 6 个关键阶段注入自定义逻辑，高度自定义检索管线。
+
+### 管线 Hook 点整体架构
+
+```text
+  查询输入
+      │
+  🔌 #1 on_pre_search        — 查询预处理（改写向量 / 修改配置 / 提前终止）
+      │
+  🔌 #2 on_custom_recall     — 自定义召回（可替代内置召回）
+      │
+  ┌── 内置召回管线 ──┐
+  │  L1 文本稀疏召回  │
+  │  L2 向量稠密召回  │
+  │  L3 布隆预过滤    │
+  └──────────────────┘
+      │
+  🔌 #3 on_post_recall       — 召回后处理（业务过滤 / 分数调权）
+      │
+  🔌 #4 on_pre_graph_expand  — 图扩散前拦截
+      │
+  ┌── 图谱扩散 ──────┐
+  │  L6 PPR 扩散      │
+  │  L7 不应期/抑制    │
+  └──────────────────┘
+      │
+  🔌 #5 on_rerank            — 自定义重排序
+      │
+  🔌 #6 on_post_search       — 最终后处理
+      │
+  返回结果
+```
+
+### load_ffi_hook — 加载 C/C++ 动态库插件
+
+加载一个导出了 C ABI 符号的动态库（`.so` / `.dll` / `.dylib`）作为检索管线 Hook。动态库中的所有符号均为可选，未找到的符号将自动被无操作替代。
+
+**Python：**
+```python
+db.load_ffi_hook("./libmy_plugin.so")
+results = db.search(query_vec)  # 自动经过 C++ Hook
+```
+
+**Node.js：**
+```javascript
+db.loadFfiHook('./libmy_plugin.so')
+const results = db.search(queryVec)  // 自动经过 C++ Hook
+```
+
+**Rust：**
+```rust
+use triviumdb::hook::FfiHook;
+
+let ffi_hook = FfiHook::load("./libmy_plugin.so")?;
+db.set_hook(ffi_hook);
+```
+
+### clear_hook — 清除已注册 Hook
+
+清除当前的 Hook，恢复为默认的零开销 `NoopHook`。
+
+**Python：**
+```python
+db.clear_hook()
+```
+
+**Node.js：**
+```javascript
+db.clearHook()
+```
+
+**Rust：**
+```rust
+db.clear_hook();
+```
+
+### search_with_context — 带管线上下文的检索
+
+与 `search` 相同的检索能力，但额外返回 `HookContext` 对象，包含管线各阶段的计时统计和 Hook 注入的自定义数据。
+
+**Python：**
+```python
+hits, ctx = db.search_with_context(
+    query_vector=[0.10, -0.48, 0.80, ...],
+    top_k=10,
+    expand_depth=2,
+    min_score=0.1,
+)
+
+print(ctx.timings)
+# {'hook_pre_search': 0.012, 'hook_custom_recall': 0.001, 'graph_expand': 2.34, ...}
+
+print(ctx.custom_data)   # Hook 注入的自定义数据
+print(ctx.aborted)       # 管线是否被 Hook 提前终止
+```
+
+**Node.js：**
+```javascript
+const { hits, context } = db.searchWithContext(queryVec, {
+    topK: 10,
+    expandDepth: 2,
+    minScore: 0.1,
+})
+
+console.log(context.timings)     // { hook_pre_search: 0.012, graph_expand: 2.34, ... }
+console.log(context.customData)  // Hook 注入的自定义数据
+console.log(context.aborted)     // 管线是否被提前终止
+```
+
+**Rust：**
+```rust
+use triviumdb::database::SearchConfig;
+
+let config = SearchConfig {
+    top_k: 10,
+    expand_depth: 2,
+    ..Default::default()
+};
+let (results, ctx) = db.search_hybrid_with_context(None, Some(&query_vec), &config)?;
+
+for (stage, dur) in &ctx.stage_timings {
+    println!("{}: {:.2}ms", stage, dur.as_secs_f64() * 1000.0);
+}
+```
+
+### Rust 原生 Hook Trait
+
+在 Rust 中，开发者可以直接实现 `SearchHook` trait 来创建自定义 Hook：
+
+```rust
+use triviumdb::hook::{SearchHook, HookContext};
+use triviumdb::database::SearchConfig;
+use triviumdb::node::SearchHit;
+
+struct MyHook;
+
+impl SearchHook for MyHook {
+    fn on_pre_search(
+        &self,
+        query_vector: &mut Vec<f32>,
+        config: &mut SearchConfig,
+        ctx: &mut HookContext,
+    ) {
+        // 修改查询向量、调整配置等
+        ctx.custom_data = serde_json::json!({"user_id": "u_12345"});
+    }
+
+    fn on_rerank(
+        &self,
+        results: &mut Vec<SearchHit>,
+        _ctx: &mut HookContext,
+    ) -> Option<Vec<SearchHit>> {
+        // 自定义重排序逻辑
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        None // 返回 None 表示使用原地修改，返回 Some 替换结果
+    }
+}
+
+// 注册 Hook
+db.set_hook(MyHook);
+```
+
+> 💡 **零开销设计**：未注册 Hook 时，默认的 `NoopHook` 的所有方法均为空实现，编译器会将它们完全内联消除，对无 Hook 的普通检索完全零开销。
+
+> ⚠️ **FFI 插件安全提示**：`FfiHook` 加载的动态库将在进程内执行任意代码，请确保动态库来源可信。
+
+---
+
 ## 元数据过滤
 
 ### filter_where — 高级条件过滤
@@ -798,3 +969,13 @@ Cypher 查询结果行，通过 `query()` 返回。
 | `target_id` | `NodeId (u64)` | 目标节点 ID |
 | `label` | `String` | 关系类型标签 |
 | `weight` | `f32` | 权重（支持负值） |
+
+### HookContext
+
+Hook 管线执行上下文，通过 `search_with_context()` 返回。
+
+| 属性 (Python) | 属性 (Node.js) | 属性 (Rust) | 类型 | 说明 |
+|---------------|----------------|-------------|------|------|
+| `timings` | `timings` | `stage_timings` | `dict` / `Object` / `Vec<(String, Duration)>` | 各管线阶段的耗时（Python/JS 单位毫秒） |
+| `custom_data` | `customData` | `custom_data` | `dict` / `Object` / `serde_json::Value` | Hook 注入的自定义数据 |
+| `aborted` | `aborted` | `abort` | `bool` | 管线是否被 Hook 提前终止 |

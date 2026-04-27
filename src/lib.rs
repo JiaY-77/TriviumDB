@@ -2,6 +2,7 @@ pub mod database;
 pub mod error;
 pub mod filter;
 pub mod graph;
+pub mod hook;
 pub mod index;
 pub mod node;
 #[cfg(feature = "nodejs")]
@@ -16,6 +17,7 @@ pub mod cognitive;
 pub use database::Database;
 pub use error::{Result, TriviumError};
 pub use filter::Filter;
+pub use hook::{CompositeHook, FfiHook, HookContext, NoopHook, SearchHook};
 pub use node::{Edge, NodeId, NodeView, SearchHit};
 pub mod vector;
 pub use vector::VectorType;

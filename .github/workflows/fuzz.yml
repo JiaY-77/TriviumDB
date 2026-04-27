@@ -1,0 +1,72 @@
+# TriviumDB 模糊测试管线 (LibFuzzer)
+#
+# 针对安全敏感的解析模块进行持续 fuzzing：
+#   - WAL 二进制流解析（bincode + CRC32 校验）
+#   - Cypher 查询语法解析（词法分析 + 递归下降）
+#   - JSON Filter 解析
+#
+# 触发方式：
+#   - 每周日凌晨 UTC 3:00 自动运行（长时间深度 fuzz）
+#   - 手动触发（快速冒烟 fuzz）
+
+name: Fuzz
+
+on:
+  schedule:
+    # 每周日 UTC 03:00（北京时间 11:00）
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Fuzz 持续时间（秒）'
+        required: false
+        default: '300'
+
+jobs:
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_wal_parse
+          - fuzz_query_parse
+          - fuzz_filter_parse
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: 安装 cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fuzz-${{ matrix.target }}
+
+      - name: 运行模糊测试 (${{ matrix.target }})
+        run: |
+          DURATION="${{ github.event.inputs.duration || '600' }}"
+          echo "🔍 Fuzzing ${{ matrix.target }} for ${DURATION}s..."
+          cargo +nightly fuzz run ${{ matrix.target }} \
+            -- \
+            -max_total_time=${DURATION} \
+            -max_len=65536 \
+            -timeout=10 \
+            -rss_limit_mb=2048
+
+      - name: 上传崩溃用例
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+
+      - name: 上传语料库
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: corpus-${{ matrix.target }}
+          path: fuzz/corpus/${{ matrix.target }}/

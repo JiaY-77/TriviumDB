@@ -17,6 +17,7 @@
 - [避坑指南](#避坑指南)
 - [模型升级与维度迁移](#模型升级与维度迁移)
 - [BQ 索引策略与调优](#bq-索引策略与调优)
+- [Hook 扩展系统最佳实践](#hook-扩展系统最佳实践)
 - [架构边界认知与规避策略](#架构边界认知与规避策略)
 
 ---
@@ -631,6 +632,176 @@ let db = Database::<f32>::open_with_config("data.tdb", Config {
 |-----------------------|-------------------|-----------|------|----------|
 | **0.05（5%）** | 10,000 | **99.50%** | 69.8 | **精准 RAG / AI 记忆（默认推荐）** |
 | 0.01（1%） | 2,000 | 89.32% | 174.6 | 游戏 NPC 联想 / 模糊推荐 |
+
+---
+
+## Hook 扩展系统最佳实践
+
+TriviumDB v0.5.1 引入的 Hook 系统让开发者在构建 RAG 系统时拥有了对检索管线的深度定制能力。以下是高效使用 Hook 的实战指南。
+
+### 场景一：管线性能诊断
+
+最基础也是最常用的 Hook 场景——使用 `search_with_context()` 获取管线各阶段的执行耗时。
+
+```python
+# 不需要编写任何 Hook 代码，直接使用 search_with_context
+hits, ctx = db.search_with_context(
+    query_vector=query_vec,
+    top_k=10,
+    expand_depth=2,
+)
+
+# 打印管线各阶段耗时
+print("=== 管线性能报告 ===")
+for stage, ms in ctx.timings.items():
+    bar = "█" * int(ms)  # 简单柱状图
+    print(f"  {stage:25s} {ms:7.2f}ms {bar}")
+
+# 典型输出：
+#   hook_pre_search              0.01ms █
+#   hook_custom_recall           0.00ms
+#   graph_expand                 2.34ms ██
+#   hook_rerank                  0.00ms
+#   hook_post_search             0.00ms
+```
+
+> 💡 即使没有注册任何 Hook，`search_with_context` 也会返回内置管线阶段的计时。它是零开销的性能可观测性工具。
+
+### 场景二：加载 C/C++ FFI 高性能插件
+
+当内置召回或重排序无法满足性能需求时，用 C/C++ 编写高性能计算模块。
+
+**C++ 插件编写模板**：
+
+```cpp
+// my_plugin.cpp
+#include <cstdint>
+
+// 导出符号：自定义重排序（按业务逻辑调整分数）
+extern "C" void trivium_rerank(
+    uint64_t* ids,      // 节点 ID 数组
+    float* scores,      // 对应分数数组
+    uint32_t count      // 结果数量
+) {
+    for (uint32_t i = 0; i < count; ++i) {
+        // 示例：对特定 ID 范围的节点进行加权
+        if (ids[i] >= 1000 && ids[i] <= 2000) {
+            scores[i] *= 1.5f;  // VIP 节点提权
+        }
+    }
+}
+```
+
+**编译与加载**：
+
+```bash
+# Linux
+g++ -shared -fPIC -O2 -o libmy_plugin.so my_plugin.cpp
+
+# macOS
+clang++ -shared -fPIC -O2 -o libmy_plugin.dylib my_plugin.cpp
+
+# Windows (MSVC)
+cl /LD /O2 my_plugin.cpp /Fe:my_plugin.dll
+```
+
+```python
+# Python 侧加载
+db.load_ffi_hook("./libmy_plugin.so")
+results = db.search(query_vec, top_k=10)  # 自动经过 C++ 重排序
+
+# 不再需要时及时清除
+db.clear_hook()
+```
+
+```javascript
+// Node.js 侧加载
+db.loadFfiHook('./libmy_plugin.so')
+const results = db.search(queryVec)  // 自动经过 C++ 重排序
+
+// 清除 Hook
+db.clearHook()
+```
+
+### 场景三：Rust 自定义 Hook（高级）
+
+在 Rust 项目中直接实现 `SearchHook` trait，获得完全的类型安全和编译器优化。
+
+```rust
+use triviumdb::hook::{SearchHook, HookContext};
+use triviumdb::database::SearchConfig;
+use triviumdb::node::SearchHit;
+
+/// 用户权限拦截 Hook：在查询前检查权限
+struct AuthHook {
+    allowed_user_ids: Vec<String>,
+}
+
+impl SearchHook for AuthHook {
+    fn on_pre_search(
+        &self,
+        _query_vector: &mut Vec<f32>,
+        _config: &mut SearchConfig,
+        ctx: &mut HookContext,
+    ) {
+        // 从 custom_data 中读取用户身份
+        let user_id = ctx.custom_data.get("user_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if !self.allowed_user_ids.contains(&user_id.to_string()) {
+            // 权限不足，终止管线
+            ctx.abort = true;
+            ctx.custom_data = serde_json::json!({
+                "error": "permission_denied",
+                "user_id": user_id,
+            });
+        }
+    }
+
+    fn on_post_search(
+        &self,
+        results: &mut Vec<SearchHit>,
+        ctx: &mut HookContext,
+    ) {
+        // 在结果中注入审计日志
+        ctx.custom_data["result_count"] = serde_json::json!(results.len());
+    }
+}
+
+// 注册 Hook
+db.set_hook(AuthHook {
+    allowed_user_ids: vec!["admin".into(), "agent_001".into()],
+});
+
+// 使用带上下文的检索
+let mut hook_ctx = HookContext::new();
+hook_ctx.custom_data = serde_json::json!({"user_id": "agent_001"});
+
+let (results, ctx) = db.search_hybrid_with_context(
+    None, Some(&query_vec), &config
+)?;
+```
+
+### Hook 使用策略一览
+
+| 场景 | 推荐方案 | 复杂度 |
+|------|----------|--------|
+| 管线性能诊断 | `search_with_context()` 直接使用 | ⭐ |
+| 业务分数调权 | Rust `SearchHook` trait | ⭐⭐ |
+| 对接外部 FAISS/ScaNN | C++ FFI 插件 (`on_custom_recall`) | ⭐⭐⭐ |
+| Cross-Encoder 重排序 | C++ FFI 或 Rust Hook (`on_rerank`) | ⭐⭐⭐ |
+| 用户权限拦截 | Rust Hook (`on_pre_search` + `ctx.abort`) | ⭐⭐ |
+| 统计埋点 / A/B 测试 | Rust Hook (`on_post_search` + `ctx.custom_data`) | ⭐⭐ |
+
+### Hook 避坑指南
+
+| 陷阱 | 说明 | 解决方法 |
+|------|------|----------|
+| FFI 回调中 panic | C++ 异常穿越 FFI 边界导致 UB | 在 C++ 侧 try-catch 所有异常 |
+| Hook 回调中阻塞 I/O | 管线持有 MemTable 锁期间阻塞 | Hook 回调中避免网络请求/磁盘 I/O |
+| 修改了查询向量维度 | `on_pre_search` 中改变 `query_vector` 长度 | 只修改分量值，不要改变长度 |
+| 遗忘清除 Hook | 测试用 Hook 残留导致性能下降 | 使用 `clear_hook()` 显式移除 |
 
 ---
 

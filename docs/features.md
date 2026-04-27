@@ -264,7 +264,7 @@ TriviumDB 自研的 **Binary Quantization 三阶段火箭**近似索引：
 
 ## 图谱扩散检索
 
-TriviumDB 的核心创新——**Spreading Activation（扩散激活）**：
+TriviumDB 的核心创新——**Spreading Activation（扩散激活）**（受 Anderson, 1983, *The Architecture of Cognition* 中认知心理学扩散激活理论启发）：
 
 ### 工作流程
 
@@ -297,11 +297,11 @@ results = db.search(
 # 结果：["昨天去了星巴克(0.92)", "小红(0.71)", "三里屯(0.65)"]
 ```
 
-### 边特异性强化（Link Specificity Penalty）
+### 边特异性强化（Link Specificity Penalty，本项目自研）
 
 传统入度惩罚使用 `1 / (1 + log10(in_degree))`，对于入度破千的「黑洞节点」衰减过于缓慢，无法有效阻断能量聚集。
 
-TriviumDB 改用**幂函数非线性衰减**：
+TriviumDB 自研的替代方案——**幂函数非线性衰减**：
 
 ```
 inhibition_factor = 1.0 / in_degree^0.55
@@ -316,9 +316,9 @@ inhibition_factor = 1.0 / in_degree^0.55
 
 这使得「重要但不泛滥」的中层枢纽节点依然能从周围吸收合理的能量，但「全局热点」黑洞被大幅削弱，从而**迫使扩散能量向更丰富的亚支路蔓延**。
 
-### 不应期（Refractory Period，疲劳机制）
+### 不应期（Refractory Period，疲劳机制，本项目自研）
 
-这是解决「记忆僵化」和「能量坍缩」的核心机制。灵感来源于生物神经元在高频放电后进入不应期、暂时无法再次触发的电生理现象。
+这是缓解「重复召回」问题的核心机制。**命名灵感来源于**生物神经元在高频放电后进入不应期、暂时无法再次触发的电生理现象（注：此处为类比性借用，并非精确复现生物神经元行为）。
 
 **工作流程：**
 
@@ -346,7 +346,11 @@ inhibition_factor = 1.0 / in_degree^0.55
 
 ## 认知检索管线
 
-TriviumDB 内置了一套九层认知检索管线。所有数学算子均为纯 Rust 手写，零依赖外部矩阵库。
+TriviumDB 内置了一套多层认知检索管线（本项目自研的功能性分层设计，而非业界标准分层模型）。所有数学算子均为纯 Rust 手写，零依赖外部矩阵库。其中借鉴的学术算法包括：
+
+- **FISTA**: Beck & Teboulle, 2009, *"A Fast Iterative Shrinkage-Thresholding Algorithm for Linear Inverse Problems"*
+- **DPP**: Kulesza & Taskar, 2012, *"Determinantal Point Processes for Machine Learning"*
+- **NMF**: Lee & Seung, 1999, *"Learning the Parts of Objects by Non-negative Matrix Factorization"*
 
 ### 设计哲学
 
@@ -354,7 +358,7 @@ TriviumDB 内置了一套九层认知检索管线。所有数学算子均为纯 
 - **可关（Runtime Toggleable）**：每条查询独立决定启用哪些层，不是编译期宏
 - **零侵入（Zero-Impact）**：原有22 `search()` API 绝对不受影响，认知功能全部收束在 `search_advanced()` 入口
 
-### 九层管线架构
+### 管线架构（功能性分层）
 
 | 层级 | 功能 | 实现位置 |
 |:---|:---|:---|
@@ -397,13 +401,13 @@ pub enum Filter {
 
 ### 执行原理 (v0.5 并行特征布隆拦截器)
 
-区别于传统的昂贵 JSON 反序列化全表扫描，TriviumDB 引入了极速的 **行级布隆掩码（Row-level Hash Signature Array）** O(1) 前置拦截技术：
+区别于传统的 JSON 反序列化全表扫描，TriviumDB 引入了自研的 **行级布隆特征阵列（本项目称 Parallel Bit-Tag Array，基于布隆过滤器思想）** O(1) 前置拦截技术：
 
 1. **自动归纳**：在节点插入时，引擎会自动展平 JSON 所有层级的末端键值对（Key-Value），计算出极其轻量的哈希碎片，并合成一串内部的 64 位特征标签 `fast_tags`。此过程零代码侵入，无需预先定义 Schema。
 2. **掩码刺探**：无论何种查询拓扑，引擎会在搜索前根据 `$eq`、`$and` 等确定性条件，自动编译出一张 64 位的绝对必需遮罩（Must-have Mask）。
 3. **光速拦截**：依托于底层密集的一维数组检索，TriviumDB 仅通过最快的 CPU 硬件整数位运算 `(fast_tags[i] & mask) == mask` 即可瞬间斩下 99% 根本不可能匹配的节点（即 True Negative 瞬间退场）。只有通过位筛选的极少数漏网之鱼，才会被拉起交由真实的 JSON 动态解析去严格验明正身。
 
-配合 **Reverse Edge Hash Net（反向删除雪崩网）** 与 **FreeList O(1) 回收队列**，该体系共同构筑了 v0.5 版本企业级稳定不爆雷的工业底座。
+配合 **双向哈希边表（本项目称 Reverse Hash Net）** 与 **FreeList O(1) 回收队列**，该体系共同构筑了 v0.5 版本的高性能过滤底座。
 
 ---
 
@@ -475,9 +479,9 @@ TriviumDB 的数据安全建立在 WAL + 原子写入的双重保障上：
 
 ## 并发安全与零开销事务
 
-TriviumDB 提供由四层“物理级+逻辑级复活甲”交叉织造的安全底座：
+TriviumDB 通过四层机制保障并发安全与数据完整性：
 
-### 1. 物理防损防护：
+### 1. 进程级互斥锁：
 - 进程级互斥死锁防穿透（通过 `fs2` 的独占文件锁避免多进程读写腐化）
 - 内存级 `Arc<Mutex>` 锁中毒恢复机制（一旦其中一个线程发生 panic，守护封装会自动剥离毒素确保后续恢复）。
 
@@ -532,3 +536,104 @@ Python 侧的 `dict` 与 Rust 侧的 `serde_json::Value` 通过 `pyobject_to_jso
 ### Node.js 绑定架构
 
 Node.js 侧通过 `napi-rs` 提供原生扩展，自带完整的 TypeScript 类型定义。同样通过 `DbBackend` 枚举 + `dispatch!` 宏模式实现多类型动态分发。通过 `JsSearchConfig` 结构体暂露完整的认知管线配置。
+
+### Hook 管理接口 (v0.5.1 新增)
+
+Python 和 Node.js 绑定均新增了以下 Hook 管理接口：
+
+| Python 方法 | Node.js 方法 | 说明 |
+|------------|-------------|------|
+| `db.load_ffi_hook(path)` | `db.loadFfiHook(path)` | 加载 C/C++ 动态库插件 |
+| `db.clear_hook()` | `db.clearHook()` | 清除 Hook，恢复 NoopHook |
+| `db.search_with_context(vec, ...)` | `db.searchWithContext(vec, config?)` | 带管线上下文的检索 |
+
+返回的 `HookContext` / `JsHookContext` 对象包含：
+- **timings**：各管线阶段耗时（毫秒）
+- **custom_data**：Hook 注入的自定义数据
+- **aborted**：管线是否被 Hook 提前终止
+
+---
+
+## 🔌 Hook 扩展系统架构 (v0.5.1)
+
+TriviumDB 的 Hook 系统允许开发者在构建 RAG 系统时，通过 6 个管线关键阶段的注入点来自定义字段、回传数据、内联/外置高性能计算模块。
+
+### 设计原则
+
+1. **零开销可选**：默认 `NoopHook` 的所有方法为空实现，编译器内联消除全部调用开销
+2. **按需覆写**：所有方法都有默认空实现，开发者只需覆写感兴趣的阶段
+3. **FFI 友好**：`FfiHook` 支持 `extern "C"` 函数签名的 C/C++ 动态库加载
+
+### Hook 类型体系
+
+```
+SearchHook (trait)
+├── NoopHook        — 零开销默认实现（编译器内联消除）
+├── CompositeHook   — 多 Hook 组合（按注册顺序链式调用）
+└── FfiHook         — C/C++ 动态库加载（libloading）
+```
+
+### 6 个管线注入点详解
+
+| Hook 点 | 阶段 | 可修改的数据 | 典型用途 |
+|---------|------|------------|---------|
+| `on_pre_search` | 查询预处理 | 查询向量、SearchConfig、HookContext | 查询改写、用户上下文注入、条件拦截 |
+| `on_custom_recall` | 自定义召回 | 返回 `Option<Vec<SearchHit>>` | 对接外部 FAISS/ScaNN 索引替代内置召回 |
+| `on_post_recall` | 召回后处理 | `&mut Vec<SearchHit>` | 业务过滤、分数调权、去重 |
+| `on_pre_graph_expand` | 图扩散前 | `&mut Vec<SearchHit>` | 种子集过滤/增强/截断 |
+| `on_rerank` | 重排序 | `&mut Vec<SearchHit>` / 替换 | 外置 Cross-Encoder、ONNX 推理重排 |
+| `on_post_search` | 最终后处理 | `&mut Vec<SearchHit>` | 统计埋点、结果增强、回传自定义数据 |
+
+### HookContext 共享上下文
+
+`HookContext` 在管线各阶段之间传递共享状态：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `custom_data` | `serde_json::Value` | 开发者自定义附加数据（任意 JSON） |
+| `stage_timings` | `Vec<(String, Duration)>` | 管线阶段计时统计（自动填充） |
+| `abort` | `bool` | 设为 true 则跳过后续所有阶段 |
+
+### 典型使用场景
+
+```python
+# 场景 1：加载 C++ 高性能召回插件
+db.load_ffi_hook("./libfaiss_hook.so")
+
+# 场景 2：管线性能诊断
+hits, ctx = db.search_with_context(query_vec, top_k=10)
+for stage, ms in ctx.timings.items():
+    print(f"  {stage}: {ms:.2f}ms")
+
+# 场景 3：业务条件拦截（Rust 侧实现 Hook）
+# 在 on_pre_search 中检查用户权限，设置 ctx.abort = true 拒绝查询
+```
+
+---
+
+## 模块化架构 (v0.5.1 重构)
+
+原 1815 行的 `database.rs` 已按职责拆分为 4 个独立模块，提高可维护性和可测试性：
+
+| 模块 | 行数 | 职责 |
+|------|------|------|
+| `database/mod.rs` | ~560 | Database 结构体、CRUD 操作、生命周期管理 |
+| `database/config.rs` | ~110 | StorageMode、Config、SearchConfig 配置类型 |
+| `database/pipeline.rs` | ~620 | 检索管线 L0-L9 + 6 个 Hook 注入点（拆为 8 个独立子函数） |
+| `database/transaction.rs` | ~460 | 事务系统（TxOp、Transaction）+ WAL 崩溃恢复 |
+
+### pipeline.rs 内部子函数
+
+| 函数 | 职责 |
+|------|------|
+| `execute_pipeline()` | 管线总控 + 6 个 Hook 调用入口 |
+| `recall_text()` | L1: AC 自动机 + BM25 文本召回 |
+| `recall_vector()` | L2+L3: 向量稠密召回 + 自适应引擎路由 |
+| `bq_pipeline()` | BQ 三级火箭（1-bit → Int8 → f32） |
+| `brute_force_pipeline()` | 暴力全扫管线 |
+| `recall_residual()` | L4+L5: FISTA 残差 + 影子查询 |
+| `aggregate_seeds()` | seed_map 聚合 + 排序 |
+| `apply_dpp()` | L9: DPP 多样性采样 |
+
+> 所有公开 API 签名完全不变，通过 `pub use` 重导出保证向后兼容。
+

@@ -195,7 +195,18 @@ impl Wal {
         }
 
         let file = File::open(&wal_path)?;
-        let mut reader = BufReader::new(file);
+        let reader = BufReader::new(file);
+        Self::read_entries_from_reader(reader)
+    }
+
+    /// 从任意 `Read` 源解析 WAL 条目流
+    ///
+    /// 此方法是 `read_entries` 的核心实现，独立出来便于：
+    /// - 模糊测试（fuzzing）：传入 `Cursor<&[u8]>` 测试畸形数据
+    /// - 单元测试：无需真实文件即可验证解析逻辑
+    pub fn read_entries_from_reader<T: serde::de::DeserializeOwned>(
+        mut reader: impl Read,
+    ) -> Result<(Vec<WalEntry<T>>, u64)> {
         let mut entries_with_offset = Vec::new();
         let mut physical_offset: u64 = 0;
 

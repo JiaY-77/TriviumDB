@@ -1,74 +1,147 @@
+# TriviumDB CI/CD 管线
+#
+# 包含：
+#   1. 编译检查（stable）
+#   2. 全量测试（跨平台 stable）
+#   3. AddressSanitizer 内存安全检测（nightly, Linux）
+#   4. 代码格式检查 & Clippy 静态分析
+#   5. 基准测试（手动触发）
+
 name: CI
 
 on:
   push:
-    branches:
-      - main
+    branches: [main, dev]
   pull_request:
-    branches:
-      - main
+    branches: [main]
+  workflow_dispatch:  # 支持手动触发（用于 benchmark）
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
+  # ═══════════════════════════════════════════
+  #  Job 1: 编译检查（快速门禁）
+  # ═══════════════════════════════════════════
   check:
     name: Compile Check
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Compile check (default features)
-        run: cargo check
+      - name: 编译检查 (默认特性)
+        run: cargo check --all-targets
 
+  # ═══════════════════════════════════════════
+  #  Job 2: 全量测试（跨平台）
+  # ═══════════════════════════════════════════
   test:
-    name: Run Tests
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 运行全量测试
+        run: cargo test --lib --tests -- --test-threads=1
+
+      - name: 运行文档测试
+        run: cargo test --doc
+
+  # ═══════════════════════════════════════════
+  #  Job 3: AddressSanitizer 内存安全检测
+  #
+  #  使用 nightly + -Z sanitizer=address 检测：
+  #  - 堆缓冲区溢出 (heap-buffer-overflow)
+  #  - 释放后使用 (use-after-free)
+  #  - 栈缓冲区溢出 (stack-buffer-overflow)
+  #  - 内存泄漏 (memory leak)
+  #
+  #  主要覆盖 TriviumDB 中的 unsafe 区域：
+  #  mmap 零拷贝、SIMD 指令、bytemuck 转换
+  # ═══════════════════════════════════════════
+  asan:
+    name: AddressSanitizer
     runs-on: ubuntu-latest
     needs: check
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: stable
+          components: rust-src  # ASan 需要从源码编译 std
 
-      - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: asan
 
-      - name: Run unit tests
-        run: cargo test
+      - name: 运行测试 (ASan 模式)
+        env:
+          RUSTFLAGS: "-Z sanitizer=address"
+          # ASan 运行时选项：检测泄漏 + 首次错误即停止
+          ASAN_OPTIONS: "detect_leaks=1:halt_on_error=1"
+        run: |
+          cargo +nightly test --lib --tests \
+            -Z build-std \
+            --target x86_64-unknown-linux-gnu \
+            -- --test-threads=1
 
+  # ═══════════════════════════════════════════
+  #  Job 4: 代码质量检查
+  # ═══════════════════════════════════════════
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 格式检查 (rustfmt)
+        run: cargo fmt --all -- --check
+
+      - name: 静态分析 (Clippy)
+        run: cargo clippy --all-targets -- -D warnings
+
+  # ═══════════════════════════════════════════
+  #  Job 5: 基准测试（仅手动触发）
+  # ═══════════════════════════════════════════
   bench:
     name: Benchmark (Manual)
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch'
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Run benchmarks
+      - name: 运行基准测试
         run: cargo bench --workspace
 
-      - name: Upload Benchmark Results
+      - name: 上传基准测试结果
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results

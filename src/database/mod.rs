@@ -1,0 +1,764 @@
+//! 数据库核心模块
+//!
+//! 重构后按职责拆分为 4 个子文件：
+//! - `config.rs`: 配置类型（StorageMode, Config, SearchConfig）
+//! - `pipeline.rs`: 混合检索管线（L0-L9 + 6 个 Hook 调用点）
+//! - `transaction.rs`: 轻量级事务（Dry-Run + WAL-first 语义）+ WAL 回放
+//! - `mod.rs`（本文件）: Database 结构体 + CRUD + 生命周期管理
+
+pub mod config;
+pub(crate) mod pipeline;
+pub mod transaction;
+
+// 从子模块重导出公开类型，保持对外 API 不变
+pub use config::{Config, SearchConfig, StorageMode};
+pub use transaction::Transaction;
+
+use crate::VectorType;
+use crate::error::{Result, TriviumError};
+use crate::hook::{HookContext, NoopHook, SearchHook};
+
+use crate::node::{NodeId, SearchHit};
+use crate::storage::compaction::CompactionThread;
+use crate::storage::file_format;
+use crate::storage::memtable::MemTable;
+use crate::storage::wal::{SyncMode, Wal, WalEntry};
+use fs2::FileExt;
+
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
+
+/// 安全获取 Mutex 锁：如果锁中毒（某个线程 panic 持有锁），
+/// 则恢复内部数据继续运行，而不是 panic 整个进程。
+pub(crate) fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!("Mutex was poisoned, recovering...");
+        poisoned.into_inner()
+    })
+}
+
+/// 数据库核心入口实例
+pub struct Database<T: VectorType> {
+    pub(crate) db_path: String,
+    pub(crate) memtable: Arc<Mutex<MemTable<T>>>,
+    pub(crate) wal: Arc<Mutex<Wal>>,
+    pub(crate) compaction: Option<CompactionThread>,
+    /// 文件锁：防止多进程同时打开同一个数据库
+    _lock_file: std::fs::File,
+    /// 内存上限（字节），0 = 无限制
+    memory_limit: usize,
+    /// 存储模式
+    pub(crate) storage_mode: StorageMode,
+    /// 检索管线 Hook（默认 NoopHook，零开销）
+    hook: Arc<dyn SearchHook>,
+}
+
+impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T> {
+
+    // ════════════════════════════════════════════════════════
+    //  打开 / 创建
+    // ════════════════════════════════════════════════════════
+
+    /// 打开或创建数据库（默认：Mmap 模式，SyncMode::Normal）
+    pub fn open(path: &str, dim: usize) -> Result<Self> {
+        let config = Config {
+            dim,
+            ..Default::default()
+        };
+        Self::open_with_config(path, config)
+    }
+
+    /// 打开或创建数据库，指定 WAL 同步模式 (向后兼容)
+    pub fn open_with_sync(path: &str, dim: usize, sync_mode: SyncMode) -> Result<Self> {
+        let config = Config {
+            dim,
+            sync_mode,
+            ..Default::default()
+        };
+        Self::open_with_config(path, config)
+    }
+
+    /// 打开或创建数据库（高级配置入口）
+    pub fn open_with_config(path: &str, config: Config) -> Result<Self> {
+        let dim = config.dim;
+        // ═══ 自动递归创建上层目录 ═══
+        if let Some(parent_dir) = std::path::Path::new(path).parent()
+            && !parent_dir.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent_dir)?;
+            }
+
+        // ═══ 文件锁：防止多进程并发写同一个数据库 ═══
+        let lock_path = format!("{}.lock", path);
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&lock_path)?;
+        lock_file.try_lock_exclusive().map_err(|_| {
+            TriviumError::Generic(format!(
+                "Database '{}' is already opened by another process. \
+                 If this is unexpected, delete '{}'",
+                path, lock_path
+            ))
+        })?;
+
+        let mut memtable = if std::path::Path::new(path).exists() {
+            file_format::load(path, config.storage_mode)?
+        } else {
+            MemTable::new(dim)
+        };
+
+        if Wal::needs_recovery(path) {
+            let (entries, valid_offset) = Wal::read_entries::<T>(path)?;
+
+            // 执行极其关键的物理防串局截断（Truncation）！
+            let wal_path = format!("{}.wal", path);
+            let wal_file = std::fs::OpenOptions::new().write(true).open(&wal_path)?;
+            wal_file.set_len(valid_offset)?;
+            wal_file.sync_all()?;
+
+            if !entries.is_empty() {
+                tracing::info!("Recovering {} entries from WAL, safely truncated at offset {}...", entries.len(), valid_offset);
+                for entry in entries {
+                    transaction::replay_entry(&mut memtable, entry);
+                }
+            } else {
+                tracing::info!("Cleared purely corrupt/uncommitted WAL data, truncated back to {}.", valid_offset);
+            }
+        }
+
+        // 从已有 payload 自动重建 TextIndex
+        memtable.rebuild_text_index_from_payloads();
+
+        let wal = Wal::open_with_sync(path, config.sync_mode)?;
+        Ok(Self {
+            db_path: path.to_string(),
+            memtable: Arc::new(Mutex::new(memtable)),
+            wal: Arc::new(Mutex::new(wal)),
+            compaction: None,
+            _lock_file: lock_file,
+            memory_limit: 0,
+            storage_mode: config.storage_mode,
+            hook: Arc::new(NoopHook),
+        })
+    }
+
+    // ════════════════════════════════════════════════════════
+    //  配置管理
+    // ════════════════════════════════════════════════════════
+
+    /// 运行时切换 WAL 同步模式
+    pub fn set_sync_mode(&mut self, mode: SyncMode) {
+        let mut w = lock_or_recover(&self.wal);
+        w.set_sync_mode(mode);
+    }
+
+    // ════════════════════════════════════════════════════════
+    //  Hook 管理
+    // ════════════════════════════════════════════════════════
+
+    /// 注册自定义检索管线 Hook
+    ///
+    /// Hook 允许开发者在检索管线的 6 个关键阶段插入自定义逻辑：
+    /// 1. `on_pre_search` — 查询预处理
+    /// 2. `on_custom_recall` — 自定义召回（可替代内置）
+    /// 3. `on_post_recall` — 召回后处理
+    /// 4. `on_pre_graph_expand` — 图扩散前拦截
+    /// 5. `on_rerank` — 自定义重排序
+    /// 6. `on_post_search` — 最终后处理
+    ///
+    /// # 示例
+    /// ```rust,ignore
+    /// struct MyHook;
+    /// impl SearchHook for MyHook {
+    ///     fn on_post_recall(&self, hits: &mut Vec<SearchHit>, _ctx: &mut HookContext) {
+    ///         hits.retain(|h| h.score > 0.5);
+    ///     }
+    /// }
+    /// db.set_hook(MyHook);
+    /// ```
+    pub fn set_hook(&mut self, hook: impl SearchHook + 'static) {
+        self.hook = Arc::new(hook);
+    }
+
+    /// 移除当前 Hook，恢复为默认的 NoopHook
+    pub fn clear_hook(&mut self) {
+        self.hook = Arc::new(NoopHook);
+    }
+
+    /// 获取当前 Hook 的引用（主要用于测试和调试）
+    pub fn hook(&self) -> &dyn SearchHook {
+        self.hook.as_ref()
+    }
+
+    // ════════════════════════════════════════════════════════
+    //  内存管理
+    // ════════════════════════════════════════════════════════
+
+    /// 设置内存上限（字节）
+    ///
+    /// 当 MemTable 估算内存超过此值时，写操作后会自动触发 flush 落盘。
+    /// 设为 0 表示无限制（默认）。
+    pub fn set_memory_limit(&mut self, bytes: usize) {
+        self.memory_limit = bytes;
+    }
+
+    /// 查询当前 MemTable 估算内存占用（字节）
+    pub fn estimated_memory(&self) -> usize {
+        lock_or_recover(&self.memtable).estimated_memory_bytes()
+    }
+
+    /// 内部方法：检查内存压力，超出上限时自动 flush
+    fn check_memory_pressure(&mut self) {
+        if self.memory_limit > 0 {
+            let usage = lock_or_recover(&self.memtable).estimated_memory_bytes();
+            if usage > self.memory_limit {
+                tracing::info!(
+                    "Memory pressure: {}MB > limit {}MB. Auto-flushing...",
+                    usage / (1024 * 1024),
+                    self.memory_limit / (1024 * 1024)
+                );
+                if let Err(e) = self.flush() {
+                    tracing::error!("Auto-flush failed: {}", e);
+                }
+            }
+        }
+    }
+
+    // ════════════════════════════════════════════════════════
+    //  Compaction 管理
+    // ════════════════════════════════════════════════════════
+
+    /// 启动后台自动 Compaction 线程
+    pub fn enable_auto_compaction(&mut self, interval: Duration) {
+        self.compaction.take();
+        let ct = CompactionThread::spawn(
+            interval,
+            Arc::clone(&self.memtable),
+            Arc::clone(&self.wal),
+            self.db_path.clone(),
+            self.storage_mode,
+        );
+        self.compaction = Some(ct);
+    }
+
+    pub fn disable_auto_compaction(&mut self) {
+        self.compaction.take();
+    }
+
+    /// 主动触发全量重写与压实（Manual Compaction）
+    pub fn compact(&mut self) -> Result<()> {
+        {
+            let mut mt = lock_or_recover(&self.memtable);
+            tracing::info!("Manual compaction started for {}", self.db_path);
+            mt.ensure_vectors_cache();
+        }
+
+        {
+            let mut mt = lock_or_recover(&self.memtable);
+            file_format::save(&mut mt, &self.db_path, self.storage_mode)?;
+            let mut w = lock_or_recover(&self.wal);
+            w.clear()?;
+        }
+
+        tracing::info!("Manual compaction completed for {}", self.db_path);
+        Ok(())
+    }
+
+    // ════════════════════════════════════════════════════════
+    //  写操作
+    // ════════════════════════════════════════════════════════
+
+    pub fn insert(&mut self, vector: &[T], payload: serde_json::Value) -> Result<NodeId> {
+        let payload_str = payload.to_string();
+        if payload_str.len() > 8 * 1024 * 1024 {
+            return Err(crate::error::TriviumError::Generic("Payload size exceeds maximum allowed limit (8MB)".into()));
+        }
+
+        let id = {
+            let mut mt = lock_or_recover(&self.memtable);
+            mt.insert(vector, payload.clone())?
+        };
+        {
+            let mut w = lock_or_recover(&self.wal);
+            w.append(&WalEntry::Insert {
+                id,
+                vector: vector.to_vec(),
+                payload: payload_str,
+            })?;
+        }
+        self.check_memory_pressure();
+        Ok(id)
+    }
+
+    pub fn insert_with_id(
+        &mut self,
+        id: NodeId,
+        vector: &[T],
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        let payload_str = payload.to_string();
+        if payload_str.len() > 8 * 1024 * 1024 {
+            return Err(crate::error::TriviumError::Generic("Payload size exceeds maximum allowed limit (8MB)".into()));
+        }
+
+        {
+            let mut mt = lock_or_recover(&self.memtable);
+            mt.insert_with_id(id, vector, payload.clone())?;
+        }
+        {
+            let mut w = lock_or_recover(&self.wal);
+            w.append(&WalEntry::Insert {
+                id,
+                vector: vector.to_vec(),
+                payload: payload_str,
+            })?;
+        }
+        self.check_memory_pressure();
+        Ok(())
+    }
+
+    pub fn link(&mut self, src: NodeId, dst: NodeId, label: &str, weight: f32) -> Result<()> {
+        {
+            let mut mt = lock_or_recover(&self.memtable);
+            mt.link(src, dst, label.to_string(), weight)?;
+        }
+        {
+            let mut w = lock_or_recover(&self.wal);
+            w.append(&WalEntry::Link::<T> {
+                src,
+                dst,
+                label: label.to_string(),
+                weight,
+            })?;
+        }
+        Ok(())
+    }
+
+    pub fn delete(&mut self, id: NodeId) -> Result<()> {
+        {
+            let mut mt = lock_or_recover(&self.memtable);
+            mt.delete(id)?;
+        }
+        {
+            let mut w = lock_or_recover(&self.wal);
+            w.append(&WalEntry::Delete::<T> { id })?;
+        }
+
+        Ok(())
+    }
+
+    pub fn unlink(&mut self, src: NodeId, dst: NodeId) -> Result<()> {
+        {
+            let mut mt = lock_or_recover(&self.memtable);
+            mt.unlink(src, dst)?;
+        }
+        {
+            let mut w = lock_or_recover(&self.wal);
+            w.append(&WalEntry::Unlink::<T> { src, dst })?;
+        }
+        Ok(())
+    }
+
+    pub fn update_payload(&mut self, id: NodeId, payload: serde_json::Value) -> Result<()> {
+        let payload_str = payload.to_string();
+        if payload_str.len() > 8 * 1024 * 1024 {
+            return Err(crate::error::TriviumError::Generic("Payload size exceeds maximum allowed limit (8MB)".into()));
+        }
+
+        {
+            let mut mt = lock_or_recover(&self.memtable);
+            mt.update_payload(id, payload.clone())?;
+        }
+        {
+            let mut w = lock_or_recover(&self.wal);
+            w.append(&WalEntry::UpdatePayload::<T> {
+                id,
+                payload: payload_str,
+            })?;
+        }
+        Ok(())
+    }
+
+    pub fn update_vector(&mut self, id: NodeId, vector: &[T]) -> Result<()> {
+        {
+            let mut mt = lock_or_recover(&self.memtable);
+            mt.update_vector(id, vector)?;
+        }
+        {
+            let mut w = lock_or_recover(&self.wal);
+            w.append(&WalEntry::UpdateVector::<T> {
+                id,
+                vector: vector.to_vec(),
+            })?;
+        }
+        Ok(())
+    }
+
+    // ════════════════════════════════════════════════════════
+    //  社区聚类
+    // ════════════════════════════════════════════════════════
+
+    /// 基于内存图谱进行 Leiden/Louvain 近似快速聚类（无锁设计）
+    pub fn leiden_cluster(
+        &self,
+        min_community_size: usize,
+        max_iterations: Option<usize>,
+        with_centroids: Option<bool>,
+    ) -> Result<crate::graph::leiden::LeidenResult> {
+        let config = crate::graph::leiden::LeidenConfig {
+            min_community_size,
+            max_iterations: max_iterations.unwrap_or(15),
+            compute_centroids: with_centroids.unwrap_or(true),
+        };
+
+        // Step 1: 快照邻接表 (短暂持锁)
+        let (snapshot, dim) = {
+            let mt = lock_or_recover(&self.memtable);
+            let node_ids = mt.all_node_ids();
+            let mut edges = std::collections::HashMap::new();
+            for &id in &node_ids {
+                if let Some(e) = mt.get_edges(id) {
+                    edges.insert(id, e.iter().map(|edge| (edge.target_id, edge.weight)).collect());
+                }
+            }
+            (
+                crate::graph::leiden::AdjacencySnapshot { edges, node_ids },
+                mt.dim(),
+            )
+        };
+
+        // Step 2: 纯计算聚类 (无锁)
+        let mut result = crate::graph::leiden::run_leiden(&snapshot, &config);
+
+        // Step 3: 可选质心计算
+        if config.compute_centroids && !result.node_to_cluster.is_empty() {
+            let vectors = {
+                let mt = lock_or_recover(&self.memtable);
+                let mut vecs = std::collections::HashMap::new();
+                for &node_id in result.node_to_cluster.keys() {
+                    if let Some(v) = mt.get_vector(node_id) {
+                        vecs.insert(node_id, v.iter().map(|x| x.to_f32()).collect::<Vec<f32>>());
+                    }
+                }
+                vecs
+            };
+            crate::graph::leiden::compute_centroids(&mut result, &vectors, dim);
+        }
+
+        Ok(result)
+    }
+
+    // ════════════════════════════════════════════════════════
+    //  读操作 / 文本索引
+    // ════════════════════════════════════════════════════════
+
+    pub fn index_keyword(&mut self, id: NodeId, keyword: &str) -> Result<()> {
+        let mut mt = lock_or_recover(&self.memtable);
+        mt.index_keyword(id, keyword);
+        Ok(())
+    }
+
+    pub fn index_text(&mut self, id: NodeId, text: &str) -> Result<()> {
+        let mut mt = lock_or_recover(&self.memtable);
+        mt.index_text(id, text);
+        Ok(())
+    }
+
+    pub fn build_text_index(&mut self) -> Result<()> {
+        let mut mt = lock_or_recover(&self.memtable);
+        mt.build_text_index();
+        Ok(())
+    }
+
+    pub fn get_payload(&self, id: NodeId) -> Option<serde_json::Value> {
+        let mt = lock_or_recover(&self.memtable);
+        mt.get_payload(id).cloned()
+    }
+
+    pub fn get_edges(&self, id: NodeId) -> Vec<crate::node::Edge> {
+        let mt = lock_or_recover(&self.memtable);
+        mt.get_edges(id).map(|e| e.to_vec()).unwrap_or_default()
+    }
+
+    pub fn get_all_ids(&self) -> Vec<NodeId> {
+        let mt = lock_or_recover(&self.memtable);
+        mt.get_all_ids()
+    }
+
+    // ════════════════════════════════════════════════════════
+    //  检索（委托给 pipeline 子模块）
+    // ════════════════════════════════════════════════════════
+
+    pub fn search(
+        &self,
+        query_vector: &[T],
+        top_k: usize,
+        expand_depth: usize,
+        min_score: f32,
+    ) -> Result<Vec<SearchHit>> {
+        let config = SearchConfig {
+            top_k,
+            expand_depth,
+            min_score,
+            enable_advanced_pipeline: false,
+            ..Default::default()
+        };
+        self.search_hybrid(None, Some(query_vector), &config)
+    }
+
+    pub fn search_advanced(
+        &self,
+        query_vector: &[T],
+        config: &SearchConfig,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_hybrid(None, Some(query_vector), config)
+    }
+
+    /// 带 Hook 上下文的混合检索（完整版）
+    ///
+    /// 与 `search_hybrid` 相同，但额外返回 `HookContext`，
+    /// 开发者可以从中读取 Hook 各阶段注入的自定义数据和计时统计。
+    pub fn search_hybrid_with_context(
+        &self,
+        query_text: Option<&str>,
+        query_vector: Option<&[T]>,
+        config: &SearchConfig,
+    ) -> Result<(Vec<SearchHit>, HookContext)> {
+        let mut ctx = HookContext::new();
+        let results = pipeline::execute_pipeline(
+            &self.memtable,
+            &self.hook,
+            query_text,
+            query_vector,
+            config,
+            &mut ctx,
+        )?;
+        Ok((results, ctx))
+    }
+
+    /// 全能混合检索核心引擎 (Hybrid Advanced Pipeline)
+    ///
+    /// 包含文本稀疏索引 + 稠密连续向量空间 + 图谱数学约束的真正完全体检索引擎。
+    /// 具体实现委托给 `pipeline::execute_pipeline`。
+    pub fn search_hybrid(
+        &self,
+        query_text: Option<&str>,
+        query_vector: Option<&[T]>,
+        config: &SearchConfig,
+    ) -> Result<Vec<SearchHit>> {
+        let mut ctx = HookContext::new();
+        pipeline::execute_pipeline(
+            &self.memtable,
+            &self.hook,
+            query_text,
+            query_vector,
+            config,
+            &mut ctx,
+        )
+    }
+
+    // ════════════════════════════════════════════════════════
+    //  节点查询
+    // ════════════════════════════════════════════════════════
+
+    pub fn get(&self, id: NodeId) -> Option<crate::node::NodeView<T>> {
+        let mt = lock_or_recover(&self.memtable);
+        let payload = mt.get_payload(id)?.clone();
+        let vector = mt.get_vector(id)?.to_vec();
+        let edges = mt.get_edges(id).unwrap_or(&[]).to_vec();
+        Some(crate::node::NodeView {
+            id,
+            vector,
+            payload,
+            edges,
+        })
+    }
+
+    pub fn neighbors(&self, id: NodeId, depth: usize) -> Vec<NodeId> {
+        use std::collections::{HashSet, VecDeque};
+        let mt = lock_or_recover(&self.memtable);
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        visited.insert(id);
+        queue.push_back((id, 0usize));
+        while let Some((curr, d)) = queue.pop_front() {
+            if d >= depth {
+                continue;
+            }
+            if let Some(edges) = mt.get_edges(curr) {
+                for edge in edges {
+                    if visited.insert(edge.target_id) {
+                        queue.push_back((edge.target_id, d + 1));
+                    }
+                }
+            }
+        }
+        visited.remove(&id);
+        visited.into_iter().collect()
+    }
+
+    pub fn filter(&self, key: &str, value: &serde_json::Value) -> Vec<crate::node::NodeView<T>> {
+        let mt = lock_or_recover(&self.memtable);
+        let mut results = Vec::new();
+        for nid in mt.all_node_ids() {
+            if let Some(payload) = mt.get_payload(nid)
+                && payload.get(key) == Some(value) {
+                    let vector = mt.get_vector(nid).unwrap_or(&[]).to_vec();
+                    let edges = mt.get_edges(nid).unwrap_or(&[]).to_vec();
+                    results.push(crate::node::NodeView {
+                        id: nid,
+                        vector,
+                        payload: payload.clone(),
+                        edges,
+                    });
+                }
+        }
+        results
+    }
+
+    pub fn filter_where(&self, condition: &crate::filter::Filter) -> Vec<crate::node::NodeView<T>> {
+        let mt = lock_or_recover(&self.memtable);
+        let mut results = Vec::new();
+        for nid in mt.all_node_ids() {
+            if let Some(payload) = mt.get_payload(nid)
+                && condition.matches(payload) {
+                    let vector = mt.get_vector(nid).unwrap_or(&[]).to_vec();
+                    let edges = mt.get_edges(nid).unwrap_or(&[]).to_vec();
+                    results.push(crate::node::NodeView {
+                        id: nid,
+                        vector,
+                        payload: payload.clone(),
+                        edges,
+                    });
+                }
+        }
+        results
+    }
+
+    // ════════════════════════════════════════════════════════
+    //  持久化 / 关闭
+    // ════════════════════════════════════════════════════════
+
+    /// 将内存数据持久化到磁盘
+    ///
+    /// 安全顺序（防止崩溃丢数据）：
+    ///   1. 原子写入 .tdb（写 .tmp → fsync → rename）
+    ///   2. 确认 .tdb 写入成功后，才清除 WAL
+    pub fn flush(&mut self) -> Result<()> {
+        {
+            let mut mt = lock_or_recover(&self.memtable);
+            file_format::save(&mut mt, &self.db_path, self.storage_mode)?;
+        }
+        {
+            let mut w = lock_or_recover(&self.wal);
+            w.clear()?;
+        }
+        Ok(())
+    }
+
+    pub fn close(mut self) -> Result<()> {
+        self.disable_auto_compaction();
+        self.flush()
+    }
+
+    pub fn node_count(&self) -> usize {
+        lock_or_recover(&self.memtable).node_count()
+    }
+    pub fn contains(&self, id: NodeId) -> bool {
+        lock_or_recover(&self.memtable).contains(id)
+    }
+    pub fn dim(&self) -> usize {
+        lock_or_recover(&self.memtable).dim()
+    }
+
+    /// 获取所有活跃节点的 ID 列表
+    pub fn all_node_ids(&self) -> Vec<NodeId> {
+        lock_or_recover(&self.memtable).all_node_ids()
+    }
+
+    // ════════════════════════════════════════════════════════
+    //  维度迁移
+    // ════════════════════════════════════════════════════════
+
+    /// 维度迁移：从当前数据库导出所有节点和边到一个新维度的数据库。
+    pub fn migrate_to(&self, new_path: &str, new_dim: usize) -> Result<(Database<T>, Vec<NodeId>)>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let mt = lock_or_recover(&self.memtable);
+        let mut node_ids = mt.all_node_ids();
+        node_ids.sort();
+
+        let mut new_db = Database::<T>::open(new_path, new_dim)?;
+
+        let zero_vec = vec![T::zero(); new_dim];
+        for &nid in &node_ids {
+            if let Some(payload) = mt.get_payload(nid) {
+                new_db.insert_with_id(nid, &zero_vec, payload.clone())?;
+            }
+        }
+
+        for &nid in &node_ids {
+            if let Some(edges) = mt.get_edges(nid) {
+                for edge in edges {
+                    if mt.get_payload(edge.target_id).is_some() {
+                        new_db.link(nid, edge.target_id, &edge.label, edge.weight)?;
+                    }
+                }
+            }
+        }
+
+        new_db.flush()?;
+        tracing::info!(
+            "维度迁移完成: {} → {}，共迁移 {} 个节点",
+            mt.dim(),
+            new_dim,
+            node_ids.len()
+        );
+
+        Ok((new_db, node_ids))
+    }
+
+    // ════════════════════════════════════════════════════════
+    //  事务
+    // ════════════════════════════════════════════════════════
+
+    /// 开启一个轻量级事务
+    ///
+    /// 事务期间所有写操作仅缓冲在内存中，调用 commit() 后原子性写入。
+    pub fn begin_tx(&mut self) -> Transaction<'_, T> {
+        Transaction {
+            db: self,
+            ops: Vec::new(),
+            committed: false,
+        }
+    }
+
+    // ════════════════════════════════════════════════════════
+    //  图谱查询
+    // ════════════════════════════════════════════════════════
+
+    /// 执行类 Cypher 图谱查询语句，返回匹配到的变量绑定集合。
+    pub fn query(
+        &self,
+        cypher: &str,
+    ) -> Result<Vec<std::collections::HashMap<String, crate::node::NodeView<T>>>> {
+        let ast = crate::query::parser::parse(cypher)
+            .map_err(|e| crate::error::TriviumError::Generic(format!("查询语句解析失败: {}", e)))?;
+        let mt = lock_or_recover(&self.memtable);
+        Ok(crate::query::executor::execute(&ast, &mt)?)
+    }
+}
+
+/// 安全析构：确保 WAL BufWriter 的缓冲数据在 Database 被 drop 时显式落盘。
+impl<T: VectorType> Drop for Database<T> {
+    fn drop(&mut self) {
+        // 1. 停止自动压缩线程
+        self.compaction.take();
+
+        // 2. 显式 flush WAL BufWriter 到磁盘
+        if let Ok(mut w) = self.wal.lock() {
+            w.flush_writer();
+        }
+    }
+}

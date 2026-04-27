@@ -104,6 +104,26 @@ pub mod nodejs {
         pub with_centroids: Option<bool>,
     }
 
+    /// Hook 管线执行上下文（包含各阶段计时统计和自定义数据）
+    #[napi(object)]
+    pub struct JsHookContext {
+        /// 各管线阶段的耗时统计（JSON 对象, 单位: 毫秒）
+        pub timings: serde_json::Value,
+        /// Hook 注入的自定义数据
+        pub custom_data: serde_json::Value,
+        /// 管线是否被 Hook 提前终止
+        pub aborted: bool,
+    }
+
+    /// 带上下文的检索结果
+    #[napi(object)]
+    pub struct JsSearchWithContextResult {
+        /// 检索结果列表
+        pub hits: Vec<JsSearchHit>,
+        /// Hook 管线上下文
+        pub context: JsHookContext,
+    }
+
     // ════════ 辅助：JSON Value → Filter ════════
 
     fn json_to_filter(val: &serde_json::Value) -> napi::Result<Filter> {
@@ -276,6 +296,135 @@ pub mod nodejs {
                 inner,
                 dtype: dtype_str.to_string(),
             })
+        }
+
+        // ── Hook 管理 ──
+
+        /// 加载 C/C++ 动态库作为检索管线 Hook
+        ///
+        /// 动态库需导出 C ABI 符号（均可选）：
+        /// - `trivium_recall`: 自定义召回
+        /// - `trivium_rerank`: 自定义重排序
+        ///
+        /// ```js
+        /// db.loadFfiHook('./libmy_plugin.so')
+        /// const results = db.search(queryVec)  // 自动经过 C++ Hook
+        /// ```
+        #[napi]
+        pub fn load_ffi_hook(&mut self, lib_path: String) -> napi::Result<()> {
+            let ffi_hook = crate::hook::FfiHook::load(&lib_path).map_err(|e| {
+                napi::Error::from_reason(format!("加载 FFI Hook 失败: {}", e))
+            })?;
+            dispatch!(self, mut db => db.set_hook(ffi_hook));
+            Ok(())
+        }
+
+        /// 清除当前已注册的 Hook，恢复为默认的零开销 NoopHook
+        #[napi]
+        pub fn clear_hook(&mut self) {
+            dispatch!(self, mut db => db.clear_hook());
+        }
+
+        /// 带 Hook 上下文的检索：返回 { hits, context }
+        ///
+        /// 除了检索结果外，同时返回管线各阶段的计时统计和 Hook 注入的自定义数据。
+        ///
+        /// ```js
+        /// const { hits, context } = db.searchWithContext(queryVec, { topK: 10 })
+        /// console.log(context.timings)     // { hook_pre_search: 0.1, graph_expand: 2.3 }
+        /// console.log(context.customData)  // Hook 注入的自定义数据
+        /// ```
+        #[napi]
+        pub fn search_with_context(
+            &self,
+            query_vector: Vec<f64>,
+            config: Option<JsSearchConfig>,
+        ) -> napi::Result<JsSearchWithContextResult> {
+            let cfg = config.unwrap_or(JsSearchConfig {
+                top_k: None,
+                expand_depth: None,
+                min_score: None,
+                teleport_alpha: None,
+                enable_advanced_pipeline: None,
+                enable_sparse_residual: None,
+                fista_lambda: None,
+                fista_threshold: None,
+                enable_dpp: None,
+                dpp_quality_weight: None,
+                enable_refractory_fatigue: None,
+                custom_query_text: None,
+                enable_text_hybrid_search: None,
+                text_boost: None,
+                bq_candidate_ratio: None,
+                enable_bq_coarse_search: None,
+            });
+
+            let core_config = crate::database::SearchConfig {
+                top_k: cfg.top_k.unwrap_or(5) as usize,
+                expand_depth: cfg.expand_depth.unwrap_or(2) as usize,
+                min_score: cfg.min_score.unwrap_or(0.1) as f32,
+                teleport_alpha: cfg.teleport_alpha.unwrap_or(0.0) as f32,
+                enable_advanced_pipeline: cfg.enable_advanced_pipeline.unwrap_or(false),
+                enable_sparse_residual: cfg.enable_sparse_residual.unwrap_or(false),
+                fista_lambda: cfg.fista_lambda.unwrap_or(0.1) as f32,
+                fista_threshold: cfg.fista_threshold.unwrap_or(0.3) as f32,
+                enable_dpp: cfg.enable_dpp.unwrap_or(false),
+                dpp_quality_weight: cfg.dpp_quality_weight.unwrap_or(1.0) as f32,
+                enable_refractory_fatigue: cfg.enable_refractory_fatigue.unwrap_or(false),
+                enable_text_hybrid_search: cfg.enable_text_hybrid_search.unwrap_or(false),
+                text_boost: cfg.text_boost.unwrap_or(1.5) as f32,
+                bq_candidate_ratio: cfg.bq_candidate_ratio.unwrap_or(0.05) as f32,
+                enable_bq_coarse_search: cfg.enable_bq_coarse_search.unwrap_or(false),
+                ..Default::default()
+            };
+
+            let q_text = cfg.custom_query_text.as_deref();
+
+            let (results, hook_ctx) = match &self.inner {
+                DbBackend::F32(db) => {
+                    let v: Vec<f32> = query_vector.iter().map(|&x| x as f32).collect();
+                    db.search_hybrid_with_context(q_text, Some(&v), &core_config)
+                }
+                DbBackend::F16(db) => {
+                    let v: Vec<half::f16> = query_vector
+                        .iter()
+                        .map(|&x| half::f16::from_f64(x))
+                        .collect();
+                    db.search_hybrid_with_context(q_text, Some(&v), &core_config)
+                }
+                DbBackend::U64(db) => {
+                    let v: Vec<u64> = query_vector.iter().map(|&x| x as u64).collect();
+                    db.search_hybrid_with_context(q_text, Some(&v), &core_config)
+                }
+            }
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+
+            // 转换 hits
+            let hits: Vec<JsSearchHit> = results
+                .into_iter()
+                .map(|h| JsSearchHit {
+                    id: h.id as f64,
+                    score: h.score as f64,
+                    payload: h.payload,
+                })
+                .collect();
+
+            // 转换 HookContext → JsHookContext
+            let mut timings_map = serde_json::Map::new();
+            for (stage, dur) in &hook_ctx.stage_timings {
+                timings_map.insert(
+                    stage.clone(),
+                    serde_json::json!(dur.as_secs_f64() * 1000.0), // 转为毫秒
+                );
+            }
+
+            let context = JsHookContext {
+                timings: serde_json::Value::Object(timings_map),
+                custom_data: hook_ctx.custom_data,
+                aborted: hook_ctx.abort,
+            };
+
+            Ok(JsSearchWithContextResult { hits, context })
         }
 
         // ── CRUD ──

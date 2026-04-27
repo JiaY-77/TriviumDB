@@ -436,7 +436,7 @@ if next_tier.is_empty() { break; } // 能量衰竭，提前终止
 
 ## 跨平台 I/O 加固（Windows 兼容性）
 
-### 24. mmap 释放先于 rename（P0 修复）
+### 26. mmap 释放先于 rename（P0 修复）
 
 **实现位置**：`storage/vec_pool.rs:flush_rewrite()` 和 `flush_append()`
 
@@ -449,7 +449,7 @@ Windows 强制锁定语义：映射存活时 rename 目标文件必定 `ERROR_AC
 
 ---
 
-### 25. 杀毒软件瞬态锁定重试（robust_rename）
+### 27. 杀毒软件瞬态锁定重试（robust_rename）
 
 **实现位置**：`storage/file_format.rs` 和 `storage/vec_pool.rs`
 
@@ -457,7 +457,7 @@ Windows 杀毒软件在文件关闭瞬间抢占扫描，通常几毫秒后自动
 
 ---
 
-### 29. WAL 清空使用 truncate 而非 remove+create
+### 28. WAL 清空使用 truncate 而非 remove+create
 
 **实现位置**：`storage/wal.rs:307-330`
 
@@ -465,7 +465,7 @@ Windows 杀毒软件在文件关闭瞬间抢占扫描，通常几毫秒后自动
 
 ---
 
-### 30. OS 页面缓存的安全收回 `madvise`
+### 29. OS 页面缓存的安全收回 `madvise`
 
 **实现位置**：`storage/vec_pool.rs:advise_dontneed()`
 
@@ -475,6 +475,76 @@ Windows 杀毒软件在文件关闭瞬间抢占扫描，通常几毫秒后自动
 libc::madvise(ptr, len, libc::MADV_DONTNEED);
 ```
 对于数十 GB 的向量基库，单纯依靠 OS 自我调节 LRU 会引发主机端周期性严重卡顿（Threshing）。引擎使用安全封装的非阻塞 FFI 建议系统，配合 Windows 的 `VirtualUnlock` 提供安全回收，以极低的成本维持了 60 帧 0 卡顿的主机交互体验。
+
+---
+
+## FFI Hook 插件安全 (v0.5.1)
+
+### 30. FfiHook 动态库加载的安全边界
+
+**实现位置**：`hook.rs:FfiHook::load()`
+
+`FfiHook` 允许在运行时加载 C/C++ 动态库（`.so` / `.dll` / `.dylib`）作为检索管线的自定义扩展。这是一个**有意设计的安全边界开放点**，需要用户明确理解其风险。
+
+**威胁模型**：
+
+| 风险 | 等级 | 说明 |
+|------|------|------|
+| 任意代码执行 | 🔴 高 | 动态库内的代码在进程内执行，拥有与宿主进程完全相同的权限 |
+| 堆破坏 / 段错误 | 🔴 高 | C/C++ 插件的内存错误可导致宿主进程崩溃 |
+| 数据窃取 | 🟡 中 | 插件可读取进程内存中的任何数据（向量、payload 等） |
+| 死锁 | 🟡 中 | 插件在 Hook 回调中不当使用锁可能导致死锁 |
+
+**缓解措施**：
+
+1. **符号可选加载**：`FfiHook` 使用 `libloading::Library::get()` 按名称查找符号。未找到的符号静默降级为 NoopHook，**不会因缺少符号而崩溃**。
+
+2. **调用隔离**：所有 FFI 回调在 Rust 侧包装，返回值经过有效性检查后才被消费。C 侧返回的 `null` 指针会被安全处理。
+
+3. **库生命周期**：`FfiHook` 持有 `libloading::Library` 的所有权，`clear_hook()` 或 `Database::drop()` 时自动卸载动态库。不会出现悬垂函数指针。
+
+**使用建议**：
+
+```python
+# ⚠️ 仅加载来源可信的动态库
+db.load_ffi_hook("./libmy_verified_plugin.so")
+
+# ✅ 不需要时及时清除
+db.clear_hook()
+```
+
+> ⚠️ **安全警告**：`load_ffi_hook()` 加载的动态库将在进程内执行**任意原生代码**。请确保：
+> 1. 动态库来自可信来源或经过安全审计
+> 2. 在生产环境中不要加载用户提交的未经验证的动态库
+> 3. 建议在沙箱/容器环境中隔离使用 FFI Hook
+
+---
+
+### 31. Hook 回调的线程安全约束
+
+**实现位置**：`hook.rs:trait SearchHook: Send + Sync`
+
+`SearchHook` trait 要求实现 `Send + Sync`，这是编译器层面的强制约束。任何自定义 Hook 实现如果包含非线程安全的内部状态，编译器将直接拒绝编译。
+
+**保证**：
+- `NoopHook`：零状态，天然线程安全
+- `CompositeHook`：通过 `Vec<Arc<dyn SearchHook>>` 持有子 Hook，Arc 自动保证线程安全
+- `FfiHook`：`libloading::Library` 是 `Send + Sync` 的，函数指针无状态
+
+> 💡 如果你的 Rust 自定义 Hook 需要内部可变状态，请使用 `Mutex<T>` 或 `RwLock<T>` 包装。
+
+---
+
+### 32. HookContext 的数据隔离
+
+**实现位置**：`hook.rs:HookContext`
+
+每次 `search_hybrid_with_context()` 调用创建一个独立的 `HookContext` 实例，不在多次查询之间共享。Hook 注入的 `custom_data` 和计时统计在查询结束后随 `HookContext` 一并返回给调用方，**不残留在引擎内部状态中**。
+
+**保证**：
+- 不同查询之间的 Hook 状态完全隔离
+- Hook 无法通过 `HookContext` 修改引擎的持久化状态
+- `abort` 标志仅影响当前查询的管线执行，不影响后续查询
 
 ---
 

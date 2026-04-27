@@ -36,7 +36,7 @@ TriviumDB 是一个用纯 Rust 编写的**嵌入式单文件数据库引擎**，
 - 🗃️ **Rom/Mmap 双引擎切换** —— 既支持单文件 `*.tdb` 复制走人，也支持分离 `.vec` 向量文件按需 mmap 零拷贝加载
 - 🔗 **节点即一切** —— 每个节点天然同时拥有限定长度的稠密向量、稀疏文本倒排词频、元数据和图关系，ID 全局唯一，绝不错位
 - 🧠 **为 AI 而生** —— 可选启用“AC自动机+BM25稀疏文本”与“Dense Vector稠密向量”的**多路召回**来触发图谱扩散检索，并内置多层认知管线（FISTA / DPP / PPR）
-- 🛡️ **四层物理防弹衣** —— 原子替换 + WAL日志 + 事务干跑验证（Dry-Run）+ Mmap COW 隔离，断电断存不毁库
+- 🛡️ **四层数据安全保障** —— 原子替换 + WAL日志 + 事务干跑验证（Dry-Run）+ Mmap COW 隔离，断电断存不毁库
 - 🐍 **Python / Node.js 原生** —— `pip install` 或 `npm install` 后直接使用，类 MongoDB 查询语法
 - ⚡ **高性能检索** —— rayon 并行暴力搜索（小规模 100% 精确）+ BQ 三阶段火箭自适应索引（2 万节点以上自动加速），无需手动配置
 - 💾 **SSD 友好** —— Append-Only WAL + 后台 Compaction 线程（同时自动重建 BQ 索引），杜绝随机写入磨损
@@ -186,19 +186,20 @@ with triviumdb.TriviumDB("memory.tdb", dim=3) as db:
 
 ## 核心特性
 
-| 特性                  | 说明                                                                                                           |
-| --------------------- | -------------------------------------------------------------------------------------------------------------- |
-| 🔍 **混合检索**       | 向量锚定 → Top-K → 图谱扩散（Spreading Activation）→ 最终排序                                                  |
-| 🧠 **认知管线**       | 内置九层认知管线：FISTA 残差寻隐 / PPR 图扩散 / DPP 多样性采样 / 疲劳不应期，运行时可自适应开关                |
-| 📦 **三位一体 O(1)**  | 自动增量 O(1) **FreeList 墓碑空洞复用**；删节点 O(1) **Reverse Hash Net 反向边网**，彻底杜绝盘面膨胀与图谱雪崩 |
-| ⚡ **自适应并行索引** | **Parallel Bit-Tag Array (隐式特征布隆阵列)** 打爆 JSON 拦截开销；外加 BQ / BruteForce 自适应向量路由无缝切换  |
-| 💾 **双模式存储**     | Mmap（大模型极速分体冷启动） / Rom（传统 SQLite 级单文件打包携带），无缝热切换                                 |
-| 🛡️ **四层灾备防御**   | 预写日志(WAL) + 写入原子替换 + 事务预检干跑(Dry-Run) + OS 内存写时复制隔离                                     |
-| 🔄 **零开销事务**     | `begin_tx()` 验证前置架构，中途报错绝不污染内存，实现真正的零代价原子回滚                                      |
-| 🔎 **高级过滤**       | 类 MongoDB 语法：`$eq/$ne/$gt/$lt/$in/$and/$or`                                                                |
-| 📝 **图谱查询**       | 内置类 Cypher 查询引擎：`MATCH (a)-[:knows]->(b) WHERE b.age > 18 RETURN b`                                    |
-| 🐍 **Python 原生**    | PyO3 绑定，`pip install` 后直接 `import triviumdb`                                                             |
-| 🌐 **Node.js 原生**   | napi-rs 绑定，`npm install` 后直接 `require('triviumdb')`                                                      |
+| 特性                  | 说明                                                                                                                             |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| 🔍 **混合检索**       | 向量锚定 → Top-K → 图谱扩散（Spreading Activation）→ 最终排序                                                                    |
+| 🧠 **认知管线**       | 内置多层认知检索管线（本项目自研分层设计）：FISTA 残差寻隐 / PPR 图扩散 / DPP 多样性采样 / 疲劳不应期，运行时可自适应开关        |
+| 🔌 **Hook 扩展系统**  | 6 个管线关键阶段的自定义注入点：查询预处理 / 自定义召回 / 召回后处理 / 图扩散前 / 重排序 / 最终后处理，支持 C/C++ FFI 动态库插件 |
+| 📦 **三位一体 O(1)**  | 自动增量 O(1) FreeList 墓碑空洞复用；删节点 O(1) 反向边哈希表（本项目称 Reverse Hash Net），彻底杜绝盘面膨胀与图谱雪崩           |
+| ⚡ **自适应并行索引** | 行级布隆特征阵列（本项目称 Parallel Bit-Tag Array）加速 JSON 过滤拦截；外加 BQ / BruteForce 自适应向量路由无缝切换               |
+| 💾 **双模式存储**     | Mmap（大模型极速分体冷启动） / Rom（传统 SQLite 级单文件打包携带），无缝热切换                                                   |
+| 🛡️ **四层灾备防御**   | 预写日志(WAL) + 写入原子替换 + 事务预检干跑(Dry-Run) + OS 内存写时复制隔离                                                       |
+| 🔄 **零开销事务**     | `begin_tx()` 验证前置架构，中途报错绝不污染内存，实现真正的零代价原子回滚                                                        |
+| 🔎 **高级过滤**       | 类 MongoDB 语法：`$eq/$ne/$gt/$lt/$in/$and/$or`                                                                                  |
+| 📝 **图谱查询**       | 内置类 Cypher 查询引擎：`MATCH (a)-[:knows]->(b) WHERE b.age > 18 RETURN b`                                                      |
+| 🐍 **Python 原生**    | PyO3 绑定，`pip install` 后直接 `import triviumdb`                                                                               |
+| 🌐 **Node.js 原生**   | napi-rs 绑定，`npm install` 后直接 `require('triviumdb')`                                                                        |
 
 > 📖 深入了解架构设计和技术细节请查看 **[支持特性详解](docs/features.md)**。
 
@@ -208,12 +209,12 @@ with triviumdb.TriviumDB("memory.tdb", dim=3) as db:
 
 TriviumDB 采用**智能自适应双引擎**向量索引，全程自动路由，无需手动配置：
 
-| 阶段           | 引擎                      | 激活条件                            | 特点                                                               |
-| -------------- | ------------------------- | ----------------------------------- | ------------------------------------------------------------------ |
-| **小规模热区** | BruteForce                | < 2 万节点（或 BQ 未就绪）          | 100% 精确召回，rayon 多核，延迟极低                                |
-| **大规模冷区** | **BQ 三阶段火箭**（自研） | ≥ 2 万节点，Mmap 模式，后台自动构建 | 三阶段加速管线：二进制指纹粗排 → Hamming 筛选 → f32 精排，无需重建 |
+| 阶段           | 引擎              | 激活条件                            | 特点                                                               |
+| -------------- | ----------------- | ----------------------------------- | ------------------------------------------------------------------ |
+| **小规模热区** | BruteForce        | < 2 万节点（或 BQ 未就绪）          | 100% 精确召回，rayon 多核，延迟极低                                |
+| **大规模冷区** | **BQ 三阶段火箭** | ≥ 2 万节点，Mmap 模式，后台自动构建 | 三阶段加速管线：二进制指纹粗排 → Hamming 筛选 → f32 精排，无需重建 |
 
-**BQ（Binary Quantization）** 是 TriviumDB 的自研向量索引引擎，与 HNSW 等图结构索引相比：
+**BQ（Binary Quantization，二进制量化）** 是 TriviumDB 的向量索引引擎。Binary Quantization 是一种通用的向量压缩思路（将浮点向量按符号位压缩为二进制指纹），TriviumDB 在此基础上设计了三阶段搜索管线（粗排→筛选→精排）。与 HNSW 等图结构索引相比：
 
 - ✅ **零图维护开销**：删除/更新节点不破坏索引，没有 Ghost Node 陷阱
 - ✅ **SSD 友好**：索引元数据落入 `.tdb` 头部，重启零开销恢复（bytemuck 零拷贝）
@@ -233,7 +234,12 @@ maturin develop --features python
 TriviumDB/
 ├── src/
 │   ├── lib.rs              # 库入口 + 公开 API
-│   ├── database.rs         # Database 核心（SearchConfig + search_advanced）
+│   ├── database/           # 数据库核心模块（v0.5.1 模块化重构）
+│   │   ├── mod.rs          # Database 结构体、CRUD、生命周期管理
+│   │   ├── config.rs       # StorageMode / Config / SearchConfig 配置
+│   │   ├── pipeline.rs     # 混合检索管线（L0-L9 + 6 个 Hook 注入点）
+│   │   └── transaction.rs  # 事务系统（TxOp / Transaction / WAL 回放）
+│   ├── hook.rs             # 🔌 Hook 扩展系统（SearchHook trait + FFI 动态库加载）
 │   ├── cognitive.rs        # 认知算子（FISTA / DPP / NMF）
 │   ├── node.rs             # Node / Edge / SearchHit 数据结构
 │   ├── vector.rs           # VectorType Trait（f32 / f16 / u64）
@@ -249,15 +255,22 @@ TriviumDB/
 │   │   ├── brute_force.rs  # rayon 并行暴力精确搜索
 │   │   └── bq.rs           # BQ 二进制量化索引（三阶段搜索管线）
 │   ├── graph/
-│   │   └── traversal.rs    # PPR 图扩散 (Spreading Activation)
-│   ├── python.rs           # PyO3 绑定（完整 Pythonic API）
-│   └── nodejs.rs           # napi-rs 绑定（完整 TypeScript API）
+│   │   ├── traversal.rs    # PPR 图扩散 (Spreading Activation)
+│   │   └── leiden.rs       # Leiden 社区发现算法
+│   ├── python.rs           # PyO3 绑定（含 Hook 管理接口）
+│   └── nodejs.rs           # napi-rs 绑定（含 Hook 管理接口）
 ├── benches/
 │   └── benchmark.rs        # Criterion 性能基准测试套件
 ├── tests/
 │   ├── workflow.rs         # 业务全链路集成测试
 │   ├── search.rs           # 向量检索正确性测试
 │   └── ...                 # 其他集成测试
+├── docs/
+│   ├── api-reference.md    # 完整 API 参考文档
+│   ├── features.md         # 支持特性详解
+│   ├── best-practices.md   # 最佳实践指南
+│   ├── hook-guide.md       # 🔌 Hook 开发指南（C++ FFI / Rust Hook）
+│   └── security.md         # 安全设计说明
 ├── Cargo.toml
 ├── pyproject.toml          # Maturin 构建配置
 └── README.md
@@ -291,20 +304,20 @@ TriviumDB/
 - [x] AVX2 + FMA SIMD 加速余弦相似度（运行时自动检测，标量回退）
 - [x] 性能基准测试套件 (Criterion benchmark)
 
-### v0.4 — 百万级架构 + 认知管线 + ERPC 索引 ✅
+### v0.4 — 百万级架构 + 认知管线 + BQ 索引 ✅
 
 - [x] Mmap / Rom 双引擎热切换
 - [x] 验证前置事务架构 (Dry-Run 原子回滚)
 - [x] Tombstone 占位对齐序列化
-- [x] 认知检索管线内置（FISTA 残差搜索 / PPR 图扩散 / DPP 多样性采样）
+- [x] 认知检索管线内置（FISTA 残差搜索¹ / PPR 图扩散² / DPP 多样性采样³）
 - [x] 运行时可开关 `SearchConfig`，逐查询粒度动态控制管线各层
 - [x] 向量 / 配置 NaN / Inf / 维度容错拦截
-- [x] **BQ 自研向量索引**：Binary Quantization 三阶段火箭搜索管线
+- [x] **BQ 向量索引**：Binary Quantization 三阶段火箭搜索管线
 - [x] **HNSW 完全移除**：零依赖，架构大幅精简，无图索引维护负担
 - [x] **BQ 自动化**：Compaction 守护线程自动重建，2 万节点自动激活，前台透明
 - [x] **BQ 元数据持久化**：bytemuck 零拷贝落入 .tdb header，重启极速恢复
-- [x] **边特异性强化**：入度惩罚从 `log10` 改为 `powf(0.55)` 非线性衰减，显著压制高入度「黑洞节点」对扩散能量的虹吸效应
-- [x] **不应期（疲劳）机制**：Top-15 热点节点在本轮扩散后进入不应期，下轮传导能量削减 85%，一次性消耗后自动恢复，有效解决长期使用中的「记忆僵化」与「能量坍缩」问题
+- [x] **边特异性强化**（本项目自研）：入度惩罚从 `log10` 改为 `powf(0.55)` 非线性衰减，显著压制高入度节点对扩散能量的集中效应
+- [x] **不应期（疲劳）机制**（灵感来源于生物神经元不应期概念）：Top-15 热点节点在本轮扩散后进入不应期，下轮传导能量削减 85%，一次性消耗后自动恢复，缓解长期使用中的重复召回问题
 
 ### v0.5 — 千万级性能 (已实装)
 
@@ -314,6 +327,31 @@ TriviumDB/
 - [x] **逃离零拷贝重构地狱**：**完美规避**了 `FlatBuffers` 零拷贝化开发灾难！由于布隆特征层做到了不反序列化直接将垃圾数据截死在起跑线上，我们在继续保留极度自由宽松的 `serde_json` 开发体验不变的前提下，获得了极速反序列化的高空跳跃伞性能。
 - [x] **FreeList 墓碑复用技术 (Zero-Ghost Node)**：不再将 `ids_to_indices` 做成复杂的磁盘树，而是通过 O(1) 空洞回收链表，真正解决了图数据库删节点带来的关联废边和死指针降速噩梦。
 - [x] **O(1) Reverse Hash Net (反向图谱引擎)**：不再全量遍历边表，通过双向 HashMap 网使得删除和无向寻找的复杂度降低了几个数量级。
+
+### v0.5.1 — 🔌 Hook 扩展系统 + 模块化重构 ✅ (NEW)
+
+- [x] **检索管线 Hook 系统**：在 L0-L9 管线的 6 个关键阶段注入自定义逻辑
+  - `on_pre_search` — 查询预处理（改写向量 / 修改配置 / 提前终止）
+  - `on_custom_recall` — 替代内置召回（对接外部 FAISS / ScaNN 等高性能模块）
+  - `on_post_recall` — 召回后处理（业务过滤 / 分数调权）
+  - `on_pre_graph_expand` — 图扩散前拦截（种子集过滤/增强）
+  - `on_rerank` — 自定义重排序（外置 Cross-Encoder / ONNX 推理）
+  - `on_post_search` — 最终后处理（统计埋点 / 回传自定义数据）
+- [x] **FFI 动态库插件加载**：`FfiHook` 支持运行时加载 C/C++ `.so/.dll` 插件
+- [x] **零开销默认 Hook**：未注册 Hook 时 `NoopHook` 编译器内联消除全部开销
+- [x] **Python / Node.js Hook 绑定**：`load_ffi_hook()` / `clear_hook()` / `search_with_context()` 已暴露至上层语言
+- [x] **管线计时统计**：`HookContext` 自动记录各阶段耗时
+- [x] **Database 模块化重构**：原 1815 行 `database.rs` 拆分为 `mod.rs` / `config.rs` / `pipeline.rs` / `transaction.rs`
+
+### v0.5.2 — 🔒 工程质量强化 + 绑定完善 ✅ (NEW)
+
+- [x] **Python / Node.js Hook 绑定**：`load_ffi_hook()` / `clear_hook()` / `search_with_context()` 全面暴露至上层语言
+- [x] **GitHub Actions CI/CD 管线**：跨平台测试（Linux/Windows/macOS） + ASan 内存安全检测 + Clippy/rustfmt 代码质量门禁
+- [x] **AddressSanitizer 集成**：nightly + `-Z sanitizer=address` 检测 unsafe 区域的堆溢出、UAF、内存泄漏
+- [x] **LibFuzzer 模糊测试**：针对 WAL 解析、Cypher 查询解析、JSON Filter 解析三大模块的持续 fuzzing
+- [x] **Filter::from_json()** 统一 JSON→Filter 解析入口，消除 Python/Node 绑定中的重复代码
+- [x] **WAL read_entries_from_reader()**：提取可测试的流式解析接口
+- [x] **文档全面更新**：新增 Hook 开发指南、安全文档补充 FFI 威胁模型、最佳实践补充 Hook 章节
 - [ ] 分布式分片存储 (待定极远期愿景)
 - [ ] 数据库可视化 UI 工具 (基于 Web 的监控视图开发中)
 - [ ] CLI 工具 (`triviumdb-cli`)
@@ -338,7 +376,7 @@ TriviumDB/
 
 1. **三合一原子性**：一个 `u64` ID 同时映射到向量、Payload、边表。插入原子、删除原子，永不出现 ID 不一致。
 2. **嵌入式优先**：没有 Server、没有端口、没有配置文件。`import triviumdb` 就是全部。
-3. **全自动性能路由**：数据量不足 2 万时走 100% 精确 BruteForce，超过后引擎后台自动构建 ERPC 索引并无缝切换，开发者无感知。
+3. **全自动性能路由**：数据量不足 2 万时走 100% 精确 BruteForce，超过后引擎后台自动构建 BQ 索引并无缝切换，开发者无感知。
 4. **可预测的性能**：顺序 I/O only（WAL 追加写 + Compaction 顺序重写），SSD 寿命安全。
 5. **索引即加速层**：BQ 是可丢弃的派生数据，重启后从 .tdb header 零拷贝恢复，不依赖也不污染 WAL 真相源。
 6. **Rust 安全边界**：所有公开 API 均为安全代码。内部仅存在少量经过严格审计的 `unsafe`（主要分布在 mmap 零拷贝与 SIMD 硬件加速），且附有明确的 SAFETY 安全契约注释。
@@ -349,9 +387,30 @@ TriviumDB/
 
 | 文档                                      | 说明                                             |
 | ----------------------------------------- | ------------------------------------------------ |
-| **[API 完整参考](docs/api-reference.md)** | 全部 Python / Rust API、参数说明、返回值类型     |
+| **[API 完整参考](docs/api-reference.md)** | 全部 Python / Node.js / Rust API、参数说明、返回值类型 |
 | **[支持特性详解](docs/features.md)**      | 架构设计、存储引擎、索引策略、崩溃恢复等技术细节 |
-| **[最佳实践](docs/best-practices.md)**    | 数据建模范式、性能调优、可靠性保障、避坑指南     |
+| **[最佳实践](docs/best-practices.md)**    | 数据建模范式、性能调优、Hook 使用指南、避坑指南   |
+| **[Hook 开发指南](docs/hook-guide.md)**   | C/C++ FFI 插件编写、Rust Hook 实现、管线诊断实战 |
+| **[安全设计说明](docs/security.md)**      | 并发安全、数据完整性、unsafe 审计、FFI 安全边界   |
+
+---
+
+## 学术引用说明
+
+TriviumDB 的认知检索管线借鉴并实现了以下学术成果（均为本项目基于原始论文的独立 Rust 实现，非调用第三方库）：
+
+1. **FISTA** (Fast Iterative Shrinkage-Thresholding Algorithm)：Beck & Teboulle, 2009, _"A Fast Iterative Shrinkage-Thresholding Algorithm for Linear Inverse Problems"_, SIAM J. Imaging Sciences
+2. **DPP** (Determinantal Point Process)：Kulesza & Taskar, 2012, _"Determinantal Point Processes for Machine Learning"_, Foundations and Trends in Machine Learning
+3. **PPR** (Personalized PageRank)：Haveliwala, 2002, _"Topic-Sensitive PageRank"_, WWW Conference
+4. **Spreading Activation**：灵感来源于 Anderson, 1983, _"The Architecture of Cognition"_ 中的扩散激活理论
+5. **BM25**：Robertson & Zaragoza, 2009, _"The Probabilistic Relevance Framework: BM25 and Beyond"_
+
+以下为本项目自研的数据结构与算法命名：
+
+- **Parallel Bit-Tag Array**（行级布隆特征阵列）：基于布隆过滤器思想的 JSON 快速过滤机制
+- **Reverse Hash Net**（双向哈希边表）：O(1) 反向边查找的哈希索引结构
+- **Zero-Ghost Node**：基于 FreeList 的墓碑复用策略，消除删除节点的幽灵引用
+- **边特异性强化 / 不应期机制**：自研的图扩散能量调控策略
 
 ---
 
