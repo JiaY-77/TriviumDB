@@ -50,6 +50,10 @@ pub enum TriviumError {
     #[error("WAL writer is closed, cannot perform write operations")]
     WalClosed,
 
+    /// 输入参数无效（维度越界、非法配置等）
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+
     #[error("Database error: {0}")]
     Generic(String),
 }

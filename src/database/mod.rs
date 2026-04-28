@@ -80,6 +80,25 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// 打开或创建数据库（高级配置入口）
     pub fn open_with_config(path: &str, config: Config) -> Result<Self> {
         let dim = config.dim;
+
+        // ═══ 维度安全校验 ═══
+        if dim == 0 {
+            return Err(TriviumError::InvalidInput(
+                "Vector dimension must be at least 1".into(),
+            ));
+        }
+        // 上限 65536：单向量 65536×f32 = 256KB，已远超实际使用范围。
+        // 超过此值会导致内存分配溢出或 32 位平台上的指针寻址越界。
+        const MAX_DIM: usize = 65536;
+        if dim > MAX_DIM {
+            return Err(TriviumError::InvalidInput(format!(
+                "Vector dimension {} exceeds maximum allowed {} (would require {}MB per vector pool page)",
+                dim,
+                MAX_DIM,
+                dim * 4 / 1024 / 1024
+            )));
+        }
+
         // ═══ 自动递归创建上层目录 ═══
         if let Some(parent_dir) = std::path::Path::new(path).parent()
             && !parent_dir.as_os_str().is_empty()

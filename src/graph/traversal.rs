@@ -124,6 +124,7 @@ pub fn expand_graph<T: crate::VectorType>(
     // === 不应期（疲劳）的更新与结算机制 ===
     if enable_refractory_fatigue {
         // 1. 消耗本轮真实触发削弱了的疲劳节点（解除标记）
+        //    这些节点已经在本轮受到了 85% 的能量衰减惩罚，不应期债务已偿还。
         if !active_fatigue.is_empty() {
             active_fatigue.sort_unstable();
             active_fatigue.dedup();
@@ -131,10 +132,18 @@ pub fn expand_graph<T: crate::VectorType>(
         }
 
         // 2. 将本次漫游排位最高的赢家节点（Top 15）打入物理疲劳冷却期
-        // 这将迫使下一轮近乎相同的查询能量不会再无限流入黑洞，进而孕育新的亚支路
+        //    但排除本轮刚消耗掉疲劳的节点——它们已经承受过一轮惩罚，
+        //    需要给予一轮"恢复窗口"，否则疲劳将变成永久性的。
         if !expanded_results.is_empty() {
-            let top_ids: Vec<NodeId> = expanded_results.iter().take(15).map(|h| h.id).collect();
-            db.mark_fatigued(&top_ids);
+            let top_ids: Vec<NodeId> = expanded_results
+                .iter()
+                .take(15)
+                .map(|h| h.id)
+                .filter(|id| !active_fatigue.contains(id))
+                .collect();
+            if !top_ids.is_empty() {
+                db.mark_fatigued(&top_ids);
+            }
         }
     }
 

@@ -57,19 +57,12 @@ fn 测试_人为端序颠倒污染_魔数与长度域应有效拦截不崩溃() 
         result.is_ok(),
         "引擎读取了端序颠倒的文件，触发了极危 Panic 崩溃！"
     );
-    let load_res = result.unwrap();
-    // 合法行为：
-    //   1. Err(Corrupted) → 拒绝加载 ✅
-    //   2. Ok(db) 且 node_count == 0 → 降级到空库新建 ✅
-    //   3. Ok(db) 且 node_count > 0 → WAL 灾备恢复了数据 ✅（只要没 Panic 就行）
-    // 唯一不合法的是 Panic / Segfault
-    match load_res {
-        Err(_e) => { /* 拒绝加载，完美防御 */ }
-        Ok(db) => {
-            // 即使加载成功也不应 panic
-            let _ = db.node_count();
-        }
-    }
+    // 文件头 magic 被篡改且无 WAL/flush_ok 灾备：引擎必须拒绝加载
+    assert!(
+        result.unwrap().is_err(),
+        "端序颠倒导致 magic 失效后，引擎应拒绝加载，而不是静默接受损坏文件"
+    );
+    eprintln!("  ✅ 端序颠倒: 引擎正确拒绝加载被篡改的文件");
 
     cleanup(&path);
 }
@@ -92,7 +85,23 @@ fn 测试_超大维数模拟拦截_防平台指针溢出() {
     });
 
     assert!(result.is_ok(), "加载非法超巨维度触发了 Panic 崩溃");
-    // 不可能返回成功（因为 10 亿维度一创建就要预留大量空间，可能会 Err 或者被安全拒绝）
+    // 引擎必须拒绝超巨维度
+    let open_result = result.unwrap();
+    match open_result {
+        Ok(_) => panic!(
+            "引擎接受了 {} 维的超巨向量维度！这将导致内存分配溢出或指针越界",
+            huge_dim
+        ),
+        Err(e) => {
+            let err_msg = e.to_string();
+            assert!(
+                err_msg.contains("exceeds maximum") || err_msg.contains("Invalid input"),
+                "错误信息应明确指出维度越界，实际: {}",
+                err_msg
+            );
+            eprintln!("  ✅ 超大维度: 引擎正确拒绝 {} 维向量: {}", huge_dim, err_msg);
+        }
+    }
 
     cleanup(&path);
 }

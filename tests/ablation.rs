@@ -118,6 +118,13 @@ fn test_fatigue_and_specificity_ablation() {
     println!("=== Round 3 (Fatigue Restored) ===");
     println!("Blackhole Score:  {}", bh_score3);
 
+    // 不应期被消费后，黑洞节点的能量应回升至高于疲劳抑制时的水平
+    assert!(
+        bh_score3 > bh_score2,
+        "不应期解除后黑洞得分应回升！Round2(疲劳抑制)={}, Round3(恢复)={}",
+        bh_score2, bh_score3
+    );
+
     // 清理
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

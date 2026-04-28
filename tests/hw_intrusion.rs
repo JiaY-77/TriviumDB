@@ -16,6 +16,7 @@
 //!  - NaN/Inf/Denorm : 通过 asm 向量寄存器直接注入 IEEE 754 特殊浮点值
 //!  - 字节级覆写     : 在序列化文件关键偏移处注入垃圾字节
 
+use memmap2::MmapOptions;
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 use triviumdb::Database;
@@ -50,11 +51,10 @@ fn seed_db(path: &str, count: usize) {
 //  内联汇编侵入原语
 // ════════════════════════════════════════════════════════════════
 
-/// 使用 `bts` (Bit Test and Set) 翻转内存中的指定比特位
-/// 模拟 cosmic ray 导致的单比特翻转 (Single Event Upset, SEU)
+/// 使用 `bts` (Bit Test and Set) 翻转内存中的指定比特位（保留供 INTRUDE_03/05/07 使用）
 #[cfg(target_arch = "x86_64")]
+#[allow(dead_code)]
 unsafe fn asm_bit_flip(ptr: *mut u8, bit_offset: u32) {
-    // bts dword ptr [ptr], bit_offset — 将指定位设为 1
     unsafe {
         std::arch::asm!(
             "bts dword ptr [{ptr}], {bit:e}",
@@ -76,6 +76,50 @@ unsafe fn asm_nontemporal_poison(ptr: *mut u8, poison: u64) {
             val = in(reg) poison,
         );
     }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  mmap 级侵入原语 — 直接操作文件支撑的映射页
+// ════════════════════════════════════════════════════════════════
+
+/// 在 mmap MAP_SHARED 映射页上执行 bts — 真正的物理页级比特翻转
+/// CPU TLB 命中的是文件支撑的物理页，OS 脏页回写将损坏固化到磁盘
+#[cfg(target_arch = "x86_64")]
+unsafe fn mmap_bit_flip(mmap: &mut memmap2::MmapMut, byte_offset: usize, bit: u32) {
+    unsafe {
+        let ptr = mmap.as_mut_ptr().add(byte_offset);
+        std::arch::asm!(
+            "bts dword ptr [{ptr}], {bit:e}",
+            ptr = in(reg) ptr,
+            bit = in(reg) bit,
+        );
+    }
+}
+
+/// 在 mmap MAP_SHARED 映射页上执行 movnti — 绕过 CPU 缓存直达内存控制器
+#[cfg(target_arch = "x86_64")]
+unsafe fn mmap_nontemporal_poison(mmap: &mut memmap2::MmapMut, offset: usize, val: u64) {
+    unsafe {
+        let ptr = mmap.as_mut_ptr().add(offset) as *mut u64;
+        std::arch::asm!(
+            "movnti qword ptr [{p}], {v}",
+            "sfence",
+            p = in(reg) ptr,
+            v = in(reg) val,
+        );
+    }
+}
+
+/// 非 x86 平台的 mmap 回退
+#[cfg(not(target_arch = "x86_64"))]
+unsafe fn mmap_bit_flip(mmap: &mut memmap2::MmapMut, byte_offset: usize, bit: u32) {
+    mmap[byte_offset] ^= 1 << bit;
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+unsafe fn mmap_nontemporal_poison(mmap: &mut memmap2::MmapMut, offset: usize, val: u64) {
+    let dst = &mut mmap[offset..offset + 8];
+    dst.copy_from_slice(&val.to_ne_bytes());
 }
 
 /// 在栈上构造一个包含 NaN 的 f32 向量（通过 asm 直接注入 IEEE 754 bit pattern）
@@ -139,54 +183,72 @@ fn INTRUDE_01_BTS单比特翻转_TDB文件多点侵入() {
     cleanup(&path);
     seed_db(&path, 20);
 
-    // 读取原始文件
-    let tdb_path = path.clone(); // TriviumDB 主文件即 path
-    let mut data = std::fs::read(&tdb_path).expect("读取 .tdb 文件失败");
-    let len = data.len();
-    assert!(len > 128, ".tdb 文件过小: {} bytes", len);
+    let tdb_path = path.clone();
 
-    // 使用 bts 在多个关键偏移处翻转比特
-    let flip_offsets: Vec<u32> = vec![
-        0,                    // 文件头第 0 字节
-        16 * 8 + 3,           // 头部区域的第 3 位
-        (len / 4) as u32 * 8, // 文件 1/4 处（可能是向量区域）
-        (len / 2) as u32 * 8, // 文件中部（可能是 payload 区域）
-        (len - 8) as u32 * 8, // 文件尾部
-    ];
+    // ═══ 真正的硬件级操作：用 MAP_SHARED 映射 .tdb 文件 ═══
+    // bts 直接操作文件支撑的虚拟页，OS 脏页回写将损坏固化到磁盘块设备
+    {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&tdb_path)
+            .expect("打开 .tdb 文件失败");
+        let len = file.metadata().unwrap().len() as usize;
+        assert!(len > 128, ".tdb 文件过小: {} bytes", len);
 
-    for &bit_off in &flip_offsets {
-        let byte_idx = (bit_off / 8) as usize;
-        if byte_idx < len {
-            unsafe {
-                asm_bit_flip(data.as_mut_ptr().add(byte_idx), bit_off % 8);
+        let mut mmap = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
+
+        // 在 mmap 映射页上直接执行 bts — 这是文件支撑页，不是堆内存
+        let flip_points = [
+            (0usize, 0u32),           // 文件头第 0 字节第 0 位
+            (16, 3),                  // 头部区域第 3 位
+            (len / 4, 5),             // 文件 1/4 处
+            (len / 2, 2),             // 文件中部
+            (len.saturating_sub(8), 7), // 文件尾部
+        ];
+        for &(byte_off, bit) in &flip_points {
+            if byte_off < len {
+                unsafe { mmap_bit_flip(&mut mmap, byte_off, bit); }
             }
         }
-    }
 
-    // 回写被损坏的文件
-    std::fs::write(&tdb_path, &data).unwrap();
-    // 同时删除 flush_ok 标记（真实 bit-flip 不会保留完整性标记）
+        // mmap flush — 强制将脏页从页缓存回写到磁盘块设备
+        mmap.flush().unwrap();
+    } // drop mmap + file
+
+    // 删除完整性标记
     std::fs::remove_file(format!("{}.flush_ok", path)).ok();
 
     // 尝试加载：不允许 panic
     let result = std::panic::catch_unwind(|| Database::<f32>::open(&path, DIM));
     assert!(
         result.is_ok(),
-        "bit-flip 后引擎不应 panic，应优雅拒绝或降级"
+        "mmap 活页 bit-flip 后引擎不应 panic，应优雅拒绝或降级"
     );
 
     match result.unwrap() {
         Ok(db) => {
-            // 加载成功（降级模式），验证不会返回垃圾数据导致后续 panic
-            let _ = db.node_count();
-            let _ = db.all_node_ids();
+            assert!(
+                db.node_count() <= 20,
+                "bit-flip 降级加载后节点数不应超过原始 20，实际 {}",
+                db.node_count()
+            );
+            for &id in &db.all_node_ids() {
+                if let Some(p) = db.get_payload(id) {
+                    assert!(
+                        p.get("idx").is_some(),
+                        "节点 {} 的 payload 应包含 idx 字段，实际内容: {}",
+                        id, p
+                    );
+                }
+            }
             eprintln!(
-                "  ✅ BTS bit-flip: 引擎降级加载，{} 个节点存活",
+                "  ✅ mmap BTS bit-flip: 引擎降级加载，{} 个节点存活（数据完整性已验证）",
                 db.node_count()
             );
         }
         Err(e) => {
-            eprintln!("  ✅ BTS bit-flip: 引擎正确拒绝加载损坏文件: {}", e);
+            eprintln!("  ✅ mmap BTS bit-flip: 引擎正确拒绝: {}", e);
         }
     }
 
@@ -207,33 +269,50 @@ fn INTRUDE_02_MOVNTI非时序毒写_DMA级侵入() {
     seed_db(&path, 15);
 
     let tdb_path = path.clone();
-    let mut data = std::fs::read(&tdb_path).unwrap();
-    let len = data.len();
 
-    // 在文件的 1/3 和 2/3 处各注入 8 字节毒数据
-    let offsets = [len / 3, len * 2 / 3];
-    for &off in &offsets {
-        if off + 8 <= len {
-            unsafe {
-                asm_nontemporal_poison(data.as_mut_ptr().add(off), 0xDEADBEEFCAFEBABEu64);
+    // ═══ 真正的硬件级操作：movnti 绕过 CPU 缓存直写 mmap 映射页 ═══
+    {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&tdb_path)
+            .unwrap();
+        let len = file.metadata().unwrap().len() as usize;
+        let mut mmap = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
+
+        // movnti 在文件映射页上绕过 L1/L2/L3 缓存直达内存控制器
+        let offsets = [len / 3, len * 2 / 3];
+        for &off in &offsets {
+            if off + 8 <= len {
+                unsafe { mmap_nontemporal_poison(&mut mmap, off, 0xDEADBEEFCAFEBABEu64); }
             }
         }
+
+        mmap.flush().unwrap();
     }
 
-    std::fs::write(&tdb_path, &data).unwrap();
     std::fs::remove_file(format!("{}.flush_ok", path)).ok();
 
     let result = std::panic::catch_unwind(|| Database::<f32>::open(&path, DIM));
-    assert!(result.is_ok(), "MOVNTI 毒写后引擎不应 panic");
+    assert!(result.is_ok(), "mmap MOVNTI 毒写后引擎不应 panic");
 
     match result.unwrap() {
         Ok(db) => {
             let count = db.node_count();
-            // 即使降级加载，基本操作也不能 panic
+            assert!(
+                count <= 15,
+                "MOVNTI 毒写降级加载后节点数不应超过原始 15，实际 {}",
+                count
+            );
             for &id in &db.all_node_ids() {
-                let _ = db.get(id);
+                let node = db.get(id);
+                assert!(
+                    node.is_some(),
+                    "all_node_ids 返回的 ID {} 应能通过 get() 获取",
+                    id
+                );
             }
-            eprintln!("  ✅ MOVNTI 毒写: 降级加载 {} 个节点，遍历无 panic", count);
+            eprintln!("  ✅ mmap MOVNTI 毒写: 降级加载 {} 个节点，数据完整性已验证", count);
         }
         Err(e) => {
             eprintln!("  ✅ MOVNTI 毒写: 引擎正确拒绝: {}", e);
@@ -314,22 +393,37 @@ fn INTRUDE_03_WAL尾部注入垃圾帧_回放容错() {
     let result = std::panic::catch_unwind(|| Database::<f32>::open(&path, DIM));
     assert!(result.is_ok(), "WAL 尾部注入后不应 panic");
 
-    match result.unwrap() {
-        Ok(db) => {
-            assert!(
-                db.node_count() >= 5,
-                "至少 5 个已 flush 的节点应存活，实际 {}",
-                db.node_count()
-            );
-            eprintln!(
-                "  ✅ WAL 注入容错: {} 个节点存活（垃圾尾部被正确丢弃）",
-                db.node_count()
-            );
-        }
-        Err(e) => {
-            eprintln!("  ⚠️ WAL 注入后加载失败（保守拒绝策略）: {}", e);
+    // WAL 尾部注入场景：5 个节点已 flush 到 .tdb 文件，必须能恢复
+    let db = result.unwrap().expect(
+        "WAL 尾部垃圾不应导致加载失败：5 个已 flush 的节点应通过 .tdb 文件恢复",
+    );
+    assert!(
+        db.node_count() >= 5,
+        "至少 5 个已 flush 的节点应存活，实际 {}",
+        db.node_count()
+    );
+    assert!(
+        db.node_count() <= 8,
+        "节点数不应超过原始写入的 8 个，实际 {}",
+        db.node_count()
+    );
+    // 验证已 flush 节点的 payload 语义完整性
+    let mut valid_count = 0;
+    for &id in &db.all_node_ids() {
+        if let Some(p) = db.get_payload(id)
+            && p.get("valid").and_then(|v| v.as_bool()) == Some(true)
+        {
+            valid_count += 1;
         }
     }
+    assert_eq!(
+        valid_count, 5,
+        "5 个已 flush 的 valid=true 节点 payload 应完好"
+    );
+    eprintln!(
+        "  ✅ WAL 注入容错: {} 个节点存活，payload 完整性已验证",
+        db.node_count()
+    );
 
     cleanup(&path);
 }
@@ -360,26 +454,20 @@ fn INTRUDE_04_ASM构造NaN查询向量_搜索输入验证() {
     assert!(poison_vec[0].is_nan(), "第 0 分量应为 NaN");
     assert!(poison_vec[1].is_infinite(), "第 1 分量应为 +Inf");
 
-    // 调用 search — 引擎应拒绝或返回空结果，不应 panic 或返回垃圾
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        db.search(&poison_vec, 5, 0, 0.0)
-    }));
-
-    match result {
-        Ok(Ok(hits)) => {
-            // 引擎接受了但应返回合理结果（可能全部 score=NaN 被过滤）
-            eprintln!(
-                "  ✅ NaN 向量查询: 引擎返回 {} 条结果（已降级处理）",
-                hits.len()
-            );
-        }
-        Ok(Err(e)) => {
-            eprintln!("  ✅ NaN 向量查询: 引擎正确拒绝: {}", e);
-        }
-        Err(_) => {
-            panic!("NaN 向量查询触发了 panic！引擎缺乏输入验证！");
-        }
-    }
+    // 调用 search — 引擎必须拒绝包含 NaN/Inf 的查询向量
+    let search_result = db.search(&poison_vec, 5, 0, 0.0);
+    assert!(
+        search_result.is_err(),
+        "包含 NaN/Inf 的查询向量必须被引擎拒绝，但 search() 返回了 Ok({} 条结果)",
+        search_result.as_ref().map(|h| h.len()).unwrap_or(0)
+    );
+    let err_msg = search_result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("NaN") || err_msg.contains("Inf") || err_msg.contains("invalid") || err_msg.contains("Invalid"),
+        "错误信息应明确指出 NaN/Inf 问题，实际: {}",
+        err_msg
+    );
+    eprintln!("  ✅ NaN 向量查询: 引擎正确拒绝: {}", err_msg);
 
     cleanup(&path);
 }
@@ -427,17 +515,12 @@ fn INTRUDE_05_文件头Magic全覆写_格式校验拦截() {
     let result = std::panic::catch_unwind(|| Database::<f32>::open(&path, DIM));
     assert!(result.is_ok(), "header 全覆写不应导致 panic");
 
-    match result.unwrap() {
-        Ok(db) => {
-            eprintln!(
-                "  ⚠️ 文件头覆写后竟然加载成功（{} 节点）—— 考虑增加 magic 校验",
-                db.node_count()
-            );
-        }
-        Err(e) => {
-            eprintln!("  ✅ 文件头覆写: 引擎正确拒绝: {}", e);
-        }
-    }
+    // 文件头 magic 被完全覆写：引擎必须拒绝加载，不能静默接受损坏文件
+    assert!(
+        result.unwrap().is_err(),
+        "文件头 magic 被全覆写后引擎仍加载成功！这是严重的安全漏洞：引擎缺乏文件格式校验"
+    );
+    eprintln!("  ✅ 文件头覆写: 引擎正确拒绝加载");
 
     cleanup(&path);
 }
@@ -453,28 +536,37 @@ fn INTRUDE_05_文件头Magic全覆写_格式校验拦截() {
 fn INTRUDE_06_渐进式比特衰减_NAND_Flash老化模拟() {
     let path = tmp_db("bitrot");
     cleanup(&path);
-    seed_db(&path, 50); // 多写一些以拉大文件
+    seed_db(&path, 50);
 
     let tdb_path = path.clone();
-    let mut data = std::fs::read(&tdb_path).unwrap();
-    let len = data.len();
-
-    // 每 512 字节翻转 1 位（约 0.02% 的比特损坏率）
     let mut flipped = 0usize;
-    let mut offset = 0usize;
-    while offset < len {
-        unsafe {
-            asm_bit_flip(data.as_mut_ptr().add(offset), (offset % 7) as u32);
+    let len;
+
+    // ═══ 真正的硬件级操作：在 mmap 映射页上逐扇区翻转比特 ═══
+    {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&tdb_path)
+            .unwrap();
+        len = file.metadata().unwrap().len() as usize;
+        let mut mmap = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
+
+        // 每 512 字节翻转 1 位 — bts 直接操作文件映射页
+        let mut offset = 0usize;
+        while offset < len {
+            unsafe { mmap_bit_flip(&mut mmap, offset, (offset % 7) as u32); }
+            flipped += 1;
+            offset += 512;
         }
-        flipped += 1;
-        offset += 512;
+
+        mmap.flush().unwrap();
     }
 
-    std::fs::write(&tdb_path, &data).unwrap();
     std::fs::remove_file(format!("{}.flush_ok", path)).ok();
 
     eprintln!(
-        "  📊 文件大小 {} bytes, 翻转了 {} 个比特 (密度: 1/512 bytes)",
+        "  📊 文件大小 {} bytes, 在 mmap 映射页上翻转了 {} 个比特 (密度: 1/512 bytes)",
         len, flipped
     );
 
@@ -484,12 +576,22 @@ fn INTRUDE_06_渐进式比特衰减_NAND_Flash老化模拟() {
     match result.unwrap() {
         Ok(db) => {
             let survived = db.node_count();
-            // 降级加载后基本 API 不能 panic
-            let _ = db.all_node_ids();
-            eprintln!("  ✅ NAND 老化模拟: 降级加载 {}/50 节点存活", survived);
+            assert!(
+                survived <= 50,
+                "bit-rot 降级加载后节点数不应超过原始 50，实际 {}",
+                survived
+            );
+            for &id in &db.all_node_ids() {
+                assert!(
+                    db.get(id).is_some(),
+                    "all_node_ids 返回的 ID {} 应能通过 get() 获取",
+                    id
+                );
+            }
+            eprintln!("  ✅ mmap NAND 老化: 降级加载 {}/50 节点存活（数据完整性已验证）", survived);
         }
         Err(e) => {
-            eprintln!("  ✅ NAND 老化模拟: 引擎拒绝加载: {}", e);
+            eprintln!("  ✅ mmap NAND 老化: 引擎拒绝加载: {}", e);
         }
     }
 
@@ -553,7 +655,24 @@ fn INTRUDE_07_TDB加WAL双文件同时侵入_灾难级容错() {
 
     match result.unwrap() {
         Ok(db) => {
-            eprintln!("  ⚠️ 双文件损坏后降级加载: {} 节点存活", db.node_count());
+            // 双通道损坏后如果还能加载，节点数不应超过原始写入数
+            assert!(
+                db.node_count() <= 15,
+                "双文件侵入降级加载后节点数不应超过原始 15，实际 {}",
+                db.node_count()
+            );
+            // 基本操作不能 panic
+            for &id in &db.all_node_ids() {
+                assert!(
+                    db.get(id).is_some(),
+                    "all_node_ids 返回的 ID {} 应能通过 get() 获取",
+                    id
+                );
+            }
+            eprintln!(
+                "  ⚠️ 双文件损坏后降级加载: {} 节点存活（数据完整性已验证）",
+                db.node_count()
+            );
         }
         Err(e) => {
             eprintln!("  ✅ 双文件损坏: 引擎正确拒绝: {}", e);
