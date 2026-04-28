@@ -112,7 +112,11 @@ jobs:
         run: cargo test --target aarch64-unknown-linux-gnu --lib --tests --no-run
 
       - name: 运行测试 (aarch64 via QEMU)
-        run: cargo test --target aarch64-unknown-linux-gnu --lib --tests -- --test-threads=1
+        run: |
+          cargo test --target aarch64-unknown-linux-gnu --lib --tests -- \
+            --test-threads=1 \
+            --skip HW \
+            --skip INTRUDE
 
   # ═══════════════════════════════════════════
   #  Job 3: AddressSanitizer 内存安全检测

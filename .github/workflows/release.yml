@@ -54,8 +54,9 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --features python -o dist ${{ matrix.sdist && '--sdist' || '' }}
           rust-toolchain: stable
-          # zig 交叉编译器：让 Linux x86 runner 可以编译 ARM64 目标
-          manylinux: auto
+          # Linux ARM64 使用 manylinux 2_28 + Zig 交叉编译，避免 Docker 镜像解压失败
+          manylinux: ${{ contains(matrix.target, 'aarch64') && '2_28' || 'auto' }}
+          docker-options: ${{ contains(matrix.target, 'aarch64-unknown-linux') && '-e JEMALLOC_SYS_WITH_LG_PAGE=16' || '' }}
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
