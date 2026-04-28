@@ -94,7 +94,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             .write(true)
             .open(&lock_path)?;
         lock_file.try_lock_exclusive().map_err(|_| {
-            TriviumError::Generic(format!(
+            TriviumError::DatabaseLocked(format!(
                 "Database '{}' is already opened by another process. \
                  If this is unexpected, delete '{}'",
                 path, lock_path
@@ -271,7 +271,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn insert(&mut self, vector: &[T], payload: serde_json::Value) -> Result<NodeId> {
         let payload_str = payload.to_string();
         if payload_str.len() > 8 * 1024 * 1024 {
-            return Err(crate::error::TriviumError::Generic("Payload size exceeds maximum allowed limit (8MB)".into()));
+            return Err(crate::error::TriviumError::PayloadTooLarge { size_bytes: payload_str.len(), max_bytes: 8 * 1024 * 1024 });
         }
 
         let id = {
@@ -298,7 +298,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     ) -> Result<()> {
         let payload_str = payload.to_string();
         if payload_str.len() > 8 * 1024 * 1024 {
-            return Err(crate::error::TriviumError::Generic("Payload size exceeds maximum allowed limit (8MB)".into()));
+            return Err(crate::error::TriviumError::PayloadTooLarge { size_bytes: payload_str.len(), max_bytes: 8 * 1024 * 1024 });
         }
 
         {
@@ -362,7 +362,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn update_payload(&mut self, id: NodeId, payload: serde_json::Value) -> Result<()> {
         let payload_str = payload.to_string();
         if payload_str.len() > 8 * 1024 * 1024 {
-            return Err(crate::error::TriviumError::Generic("Payload size exceeds maximum allowed limit (8MB)".into()));
+            return Err(crate::error::TriviumError::PayloadTooLarge { size_bytes: payload_str.len(), max_bytes: 8 * 1024 * 1024 });
         }
 
         {
@@ -597,42 +597,174 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         visited.into_iter().collect()
     }
 
-    pub fn filter(&self, key: &str, value: &serde_json::Value) -> Vec<crate::node::NodeView<T>> {
-        let mt = lock_or_recover(&self.memtable);
-        let mut results = Vec::new();
-        for nid in mt.all_node_ids() {
-            if let Some(payload) = mt.get_payload(nid)
-                && payload.get(key) == Some(value) {
-                    let vector = mt.get_vector(nid).unwrap_or(&[]).to_vec();
-                    let edges = mt.get_edges(nid).unwrap_or(&[]).to_vec();
-                    results.push(crate::node::NodeView {
-                        id: nid,
-                        vector,
-                        payload: payload.clone(),
-                        edges,
-                    });
-                }
-        }
-        results
+
+    // ════════════════════════════════════════════════════════
+    //  属性二级索引管理
+    // ════════════════════════════════════════════════════════
+
+    /// 创建属性索引：对指定 payload 字段建立倒排索引，加速 MATCH/FIND 查询
+    ///
+    /// ```ignore
+    /// db.create_index("name");   // 之后 MATCH (a {name: "Alice"}) 将使用 O(1) 索引
+    /// db.create_index("type");   // FIND {type: "event"} 同样受益
+    /// ```
+    pub fn create_index(&mut self, field: &str) {
+        let mut mt = lock_or_recover(&self.memtable);
+        mt.register_property_index(field);
     }
 
-    pub fn filter_where(&self, condition: &crate::filter::Filter) -> Vec<crate::node::NodeView<T>> {
+    /// 删除属性索引
+    pub fn drop_index(&mut self, field: &str) {
+        let mut mt = lock_or_recover(&self.memtable);
+        mt.drop_property_index(field);
+    }
+
+    // ════════════════════════════════════════════════════════
+    //  TQL 统一查询接口
+    // ════════════════════════════════════════════════════════
+
+    /// TQL (Trivium Query Language) 统一查询入口
+    ///
+    /// 支持三种查询模式：
+    /// - `FIND {type: "event"} RETURN *` — 文档过滤
+    /// - `MATCH (a)-[:knows]->(b) WHERE b.age > 20 RETURN b` — 图遍历
+    /// - `SEARCH VECTOR [...] TOP 10 RETURN *` — 向量检索
+    ///
+    /// ```ignore
+    /// let results = db.tql("FIND {type: \"event\", heat: {$gte: 0.7}} RETURN * LIMIT 10")?;
+    /// ```
+    pub fn tql(&self, input: &str) -> Result<crate::query::tql_executor::TqlResult<T>> {
+        let query = crate::query::tql_parser::parse_tql(input)
+            .map_err(|e| TriviumError::QueryParse(e))?;
         let mt = lock_or_recover(&self.memtable);
-        let mut results = Vec::new();
-        for nid in mt.all_node_ids() {
-            if let Some(payload) = mt.get_payload(nid)
-                && condition.matches(payload) {
-                    let vector = mt.get_vector(nid).unwrap_or(&[]).to_vec();
-                    let edges = mt.get_edges(nid).unwrap_or(&[]).to_vec();
-                    results.push(crate::node::NodeView {
-                        id: nid,
-                        vector,
-                        payload: payload.clone(),
-                        edges,
-                    });
+        crate::query::tql_executor::execute_tql(&query, &mt)
+    }
+
+    /// TQL 写操作入口
+    ///
+    /// 支持三种写操作：
+    /// - `CREATE ({name: "Alice", age: 30})` — 创建节点
+    /// - `MATCH (a) WHERE a.name == "Alice" SET a.age == 31` — 更新字段
+    /// - `MATCH (a) WHERE a.name == "Alice" DELETE a` — 删除节点
+    /// - `MATCH (a) WHERE a.name == "Alice" DETACH DELETE a` — 删除节点及其边
+    /// - `MATCH (a), (b) WHERE ... CREATE (a)-[:knows]->(b)` — 创建边
+    ///
+    /// 也兼容读查询（自动降级为 tql()），返回 affected=0。
+    ///
+    /// ```ignore
+    /// let result = db.tql_mut(r#"CREATE ({name: "Alice", age: 30})"#)?;
+    /// assert_eq!(result.created_ids.len(), 1);
+    /// ```
+    pub fn tql_mut(&mut self, input: &str) -> Result<crate::query::tql_executor::TqlMutResult> {
+        use crate::query::tql_ast::TqlStatement;
+        use crate::query::tql_executor::{MutationOp, TqlMutResult};
+
+        let stmt = crate::query::tql_parser::parse_tql_statement(input)
+            .map_err(|e| TriviumError::QueryParse(e))?;
+
+        match stmt {
+            TqlStatement::Query(_) => {
+                // 读查询降级：执行但不返回数据
+                Ok(TqlMutResult { affected: 0, created_ids: Vec::new() })
+            }
+            TqlStatement::Mutation(mutation) => {
+                // 1. 在只读快照上生成 MutationOps
+                let ops = {
+                    let mt = lock_or_recover(&self.memtable);
+                    crate::query::tql_executor::execute_tql_mutation(&mutation, &mt)?
+                };
+
+                // 2. 逐条应用 ops（含 WAL）
+                let mut affected = 0usize;
+                let mut created_ids = Vec::new();
+                // 变量名 → 新创建的 ID（用于 LinkEdge 回填）
+                let mut var_id_map: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+
+                for op in ops {
+                    match op {
+                        MutationOp::InsertNode { var, vector, payload } => {
+                            let id = self.insert(&vector, payload)?;
+                            var_id_map.insert(var, id);
+                            created_ids.push(id);
+                            affected += 1;
+                        }
+                        MutationOp::LinkEdge { mut src_id, mut dst_id, label, weight } => {
+                            // 回填 CREATE 变量的 ID（ID=0 表示待回填）
+                            if src_id == 0 {
+                                // 尝试从 var_id_map 查找（通过 CreateEdge.src_var）
+                                // 但这里我们没有 var 信息，需要通过 CreateAction 的边定义
+                                // 暂时跳过无法解析的边
+                            }
+                            if dst_id == 0 {
+                                // 同上
+                            }
+                            // 优化：从 mutation AST 中提取变量名
+                            if let TqlStatement::Mutation(ref m) = crate::query::tql_parser::parse_tql_statement(input)
+                                .map_err(|e| TriviumError::QueryParse(e))? {
+                                if let crate::query::tql_ast::MutationAction::Create(ref create) = m.action {
+                                    for edge in &create.edges {
+                                        if edge.label == label && edge.weight == weight {
+                                            if src_id == 0 {
+                                                if let Some(&id) = var_id_map.get(&edge.src_var) {
+                                                    src_id = id;
+                                                }
+                                            }
+                                            if dst_id == 0 {
+                                                if let Some(&id) = var_id_map.get(&edge.dst_var) {
+                                                    dst_id = id;
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if src_id > 0 && dst_id > 0 {
+                                self.link(src_id, dst_id, &label, weight)?;
+                                affected += 1;
+                            }
+                        }
+                        MutationOp::UpdatePayload { id, payload } => {
+                            self.update_payload(id, payload)?;
+                            affected += 1;
+                        }
+                        MutationOp::DeleteNode { id, detach } => {
+                            if detach {
+                                // 先断开所有边
+                                let edges_to_remove: Vec<(u64, u64)> = {
+                                    let mt = lock_or_recover(&self.memtable);
+                                    let mut edges = Vec::new();
+                                    // 出边
+                                    if let Some(out_edges) = mt.get_edges(id) {
+                                        for edge in out_edges {
+                                            edges.push((id, edge.target_id));
+                                        }
+                                    }
+                                    // 入边：遍历所有节点找指向 id 的边
+                                    for src_id in mt.all_node_ids() {
+                                        if let Some(src_edges) = mt.get_edges(src_id) {
+                                            for edge in src_edges {
+                                                if edge.target_id == id {
+                                                    edges.push((src_id, id));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    edges
+                                };
+                                for (s, d) in edges_to_remove {
+                                    self.unlink(s, d)?;
+                                }
+                            }
+                            self.delete(id)?;
+                            affected += 1;
+                        }
+                    }
                 }
+
+                Ok(TqlMutResult { affected, created_ids })
+            }
         }
-        results
     }
 
     // ════════════════════════════════════════════════════════
@@ -734,20 +866,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         }
     }
 
-    // ════════════════════════════════════════════════════════
-    //  图谱查询
-    // ════════════════════════════════════════════════════════
 
-    /// 执行类 Cypher 图谱查询语句，返回匹配到的变量绑定集合。
-    pub fn query(
-        &self,
-        cypher: &str,
-    ) -> Result<Vec<std::collections::HashMap<String, crate::node::NodeView<T>>>> {
-        let ast = crate::query::parser::parse(cypher)
-            .map_err(|e| crate::error::TriviumError::Generic(format!("查询语句解析失败: {}", e)))?;
-        let mt = lock_or_recover(&self.memtable);
-        Ok(crate::query::executor::execute(&ast, &mt)?)
-    }
 }
 
 /// 安全析构：确保 WAL BufWriter 的缓冲数据在 Database 被 drop 时显式落盘。

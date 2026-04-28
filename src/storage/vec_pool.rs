@@ -124,7 +124,7 @@ impl<T: VectorType> VecPool<T> {
             let expected_size = expected_count * dim * elem_size;
 
             if file_len < expected_size {
-                return Err(TriviumError::Generic(format!(
+                return Err(TriviumError::CorruptedFile(format!(
                     "向量文件大小不匹配: 文件 {} 字节, 预期最少 {} 字节",
                     file_len, expected_size
                 )));

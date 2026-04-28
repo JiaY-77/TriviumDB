@@ -1,6 +1,6 @@
 # TriviumDB API 完整参考
 
-> **版本**: v0.5.2  
+> **版本**: v0.6.0  
 > **语言**: Rust 核心 + Python 绑定 (PyO3) + Node.js 绑定 (napi-rs)  
 > **许可**: Apache-2.0
 
@@ -12,9 +12,10 @@
 - [节点 CRUD](#节点-crud)
 - [图谱操作](#图谱操作)
 - [向量检索](#向量检索)
-- [🔌 Hook 扩展系统](#hook-扩展系统)
+- [Hook 扩展系统](#hook-扩展系统)
 - [元数据过滤](#元数据过滤)
-- [Cypher 图谱查询](#cypher-图谱查询)
+- [TQL 统一查询](#tql-统一查询)
+- [属性二级索引](#属性二级索引)
 - [持久化与压缩](#持久化与压缩)
 - [内存管理](#内存管理)
 - [工具方法](#工具方法)
@@ -203,6 +204,53 @@ db.delete(42)?;
 ```
 
 > ⚠️ 删除操作不可逆。删除后，该节点的向量区间被逻辑置零，待 Compaction 时物理回收。
+
+### get_payload — 轻量级获取元数据
+
+只获取节点的 JSON Payload，不含向量，比 `get()` 更轻量。
+
+**Python：**
+```python
+payload = db.get_payload(42)
+if payload:
+    print(payload["name"])  # "Alice"
+```
+
+**Node.js：**
+```js
+const payload = db.getPayload(42)
+if (payload) console.log(payload.name)
+```
+
+### get_edges — 获取出边列表
+
+获取节点的所有出向边（不含向量和 Payload）。
+
+**Python：**
+```python
+edges = db.get_edges(42)
+for e in edges:
+    print(f"{e.target_id} ({e.label}, w={e.weight})")
+```
+
+**Node.js：**
+```js
+const edges = db.getEdges(42)
+edges.forEach(e => console.log(`${e.targetId} (${e.label})`))
+```
+
+### contains — 节点存在检查
+
+**Python：**
+```python
+if db.contains(42):     # 或用 42 in db
+    print("节点存在")
+```
+
+**Node.js：**
+```js
+if (db.contains(42)) console.log('节点存在')
+```
 
 ---
 
@@ -420,7 +468,7 @@ let results = db.search_advanced(&query_vec, &config)?;
 
 ## 🔌 Hook 扩展系统
 
-TriviumDB v0.5.1 新增的检索管线 Hook 系统，允许开发者在 6 个关键阶段注入自定义逻辑，高度自定义检索管线。
+TriviumDB v0.6.0 新增的检索管线 Hook 系统，允许开发者在 6 个关键阶段注入自定义逻辑，高度自定义检索管线。
 
 ### 管线 Hook 点整体架构
 
@@ -643,33 +691,36 @@ let results = db.filter_where(&filter);
 
 ---
 
-## Cypher 图谱查询
+## TQL 统一查询
 
-### query — 类 Cypher 语法查询
+### tql — 执行 TQL 只读查询
 
-使用类似 Neo4j Cypher 的语法，沿图谱路径模式进行匹配查询。
+支持三种入口：MATCH（图遍历）/ FIND（文档过滤）/ SEARCH（向量检索）。
 
 **Python：**
 ```python
-# 沿 knows 边查找
-rows = db.query("MATCH (a)-[:knows]->(b) RETURN b")
+# 图遍历
+rows = db.tql('MATCH (a)-[:knows]->(b) WHERE b.age > 18 RETURN b')
 for row in rows:
     node = row.row["b"]    # {"id": ..., "payload": {...}, "num_edges": ...}
     print(node["payload"])
 
-# 带内联属性过滤
-rows = db.query("MATCH (a {id: 1})-[]->(b) RETURN a, b")
+# 文档过滤
+rows = db.tql('FIND {type: "event", heat: {$gte: 0.7}} RETURN *')
 
-# 带 WHERE 条件
-rows = db.query('MATCH (a)-[:knows]->(b) WHERE b.age > 18 RETURN b')
+# 带内联属性 + WHERE
+rows = db.tql('MATCH (a {id: 1})-[]->(b) WHERE b.score >= 0.8 RETURN a, b')
+```
 
-# AND / OR 复合条件
-rows = db.query('MATCH (a)-[]->(b) WHERE b.age > 18 AND b.role == "admin" RETURN b')
+**Node.js：**
+```js
+const rows = db.tql('MATCH (a)-[:knows]->(b) WHERE b.age > 18 RETURN b')
+rows.forEach(row => console.log(row.b.payload))
 ```
 
 **Rust：**
 ```rust
-let rows = db.query("MATCH (a)-[:knows]->(b) WHERE b.age > 20 RETURN b")?;
+let rows = db.tql("MATCH (a)-[:knows]->(b) WHERE b.age > 20 RETURN b")?;
 for row in &rows {
     if let Some(node) = row.get("b") {
         println!("{}: {:?}", node.id, node.payload);
@@ -677,28 +728,98 @@ for row in &rows {
 }
 ```
 
+### tql_mut — 执行 TQL 写操作 (v0.6.0 新增)
+
+支持 CREATE / SET / DELETE / DETACH DELETE 语法，返回受影响行数和新创建的节点 ID。
+
+**Python：**
+```python
+# 创建节点
+result = db.tql_mut('CREATE (a {name: "Alice", age: 30})')
+print(result["affected"])      # 1
+print(result["created_ids"])   # [1]
+
+# 更新属性
+db.tql_mut('MATCH (a {name: "Alice"}) SET a.age == 31')
+
+# 删除节点
+db.tql_mut('MATCH (a {name: "Alice"}) DELETE a')
+
+# 删除节点及其所有关联边
+db.tql_mut('MATCH (a {type: "temp"}) DETACH DELETE a')
+```
+
+**Node.js：**
+```js
+const result = db.tqlMut('CREATE (a {name: "Alice", age: 30})')
+console.log(result.affected)     // 1
+console.log(result.createdIds)   // [1]
+```
+
+**返回值：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `affected` | `int` | 受影响的节点数 |
+| `created_ids` / `createdIds` | `list[int]` / `number[]` | CREATE 新建的节点 ID 列表 |
+
 **语法规范：**
 
 ```
-Query     := MATCH Pattern (WHERE Condition)? RETURN ReturnList
-Pattern   := NodePat (EdgePat NodePat)*
-NodePat   := '(' Ident? ('{' PropList '}')? ')'
-EdgePat   := '-[' (':' Ident)? ']->'
-Condition := CompareExpr ((AND | OR) CompareExpr)*
-ReturnList:= Ident (',' Ident)*
+Query      := MATCH Pattern (WHERE Condition)? RETURN ReturnList
+            | MATCH Pattern (WHERE Condition)? (SET SetExpr | DELETE Ident | DETACH DELETE Ident)
+            | CREATE NodePat
+            | FIND JsonFilter RETURN ReturnList
+Pattern    := NodePat (EdgePat NodePat)*
+NodePat    := '(' Ident? ('{' PropList '}')? ')'
+EdgePat    := '-[' (':' Ident)? ']->' 
+Condition  := CompareExpr ((AND | OR) CompareExpr)*
+ReturnList := Ident (',' Ident)* | '*'
 ```
 
-**返回值 `QueryRow`：**
-
-| 属性 | 类型 | 说明 |
-|------|------|------|
-| `row` | `dict[str, dict]` | 变量名 → `{"id": int, "payload": dict, "num_edges": int}` |
-
-> 💡 当起始节点已知 ID 时，强烈建议将 `id` 写入节点属性过滤器。远主键 `id` 走 **O(1) 哈希短路扫描**，而 `type` 等非主键字段会触发 O(N) 全表扫描。
+> 💡 当起始节点已知 ID 时，强烈建议将 `id` 写入节点属性过滤器。主键 `id` 走 **O(1) 哈希短路扫描**，而 `type` 等非主键字段会触发 O(N) 全表扫描（除非已建立属性索引）。
 
 > 💡 当前仅支持**有向**边模式 `-[]->` ，不支持无向匹配或反向匹配。
 
 ---
+
+## 属性二级索引
+
+### create_index — 创建属性索引 (v0.6.0 新增)
+
+对指定的 JSON Payload 字段建立 O(1) 倒排索引。创建时自动回填全表现有数据，后续 insert / update_payload / delete 自动维护索引一致性。
+
+**Python：**
+```python
+db.create_index("name")    # 之后 tql('FIND {name: "Alice"} RETURN *') 使用 O(1) 索引
+db.create_index("type")
+```
+
+**Node.js：**
+```js
+db.createIndex('name')
+db.createIndex('type')
+```
+
+**Rust：**
+```rust
+db.create_index("name");
+```
+
+### drop_index — 删除属性索引 (v0.6.0 新增)
+
+删除指定字段的索引。查询仍然可用，只是退化为 O(N) 全表扫描。
+
+**Python：**
+```python
+db.drop_index("name")
+```
+
+**Node.js：**
+```js
+db.dropIndex('name')
+```
+
 
 ## 持久化与压缩
 
@@ -830,7 +951,7 @@ let ids = db.all_node_ids();     // Vec<NodeId>
 
 ### BQ 自动索引说明
 
-TriviumDB v0.5.0 起采用**全自动双引擎向量索引路由**，不再提供手动 `rebuild_index()` 接口：
+TriviumDB v0.6.0 起采用**全自动双引擎向量索引路由**，不再提供手动 `rebuild_index()` 接口：
 
 | 条件 | 检索引擎 | 召回行为 |
 |------|----------|----------|

@@ -100,7 +100,7 @@ fn 测试_深层海量多重自连边_避免调用栈溢出() {
     let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
         // MATCH 并包含一个两跳的无限回旋镖
         for _ in 0..10 {
-            let _ = db.query("MATCH (a)-[]->(b)-[]->(c) RETURN c");
+            let _ = db.tql("MATCH (a)-[]->(b)-[]->(c) RETURN c");
         }
     }));
 

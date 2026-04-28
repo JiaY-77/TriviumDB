@@ -856,6 +856,43 @@ pub mod python {
             let _ = dispatch!(self, mut db => db.build_text_index());
         }
 
+        // ════════ 属性二级索引 ════════
+
+        /// 创建属性索引：对指定 payload 字段建立倒排索引，加速 MATCH/FIND 查询
+        ///
+        /// 示例：
+        /// ```python
+        /// db.create_index("name")    # 之后 tql('FIND {name: "Alice"} RETURN *') 使用 O(1) 索引
+        /// db.create_index("type")
+        /// ```
+        fn create_index(&mut self, field: &str) {
+            dispatch!(self, mut db => db.create_index(field));
+        }
+
+        /// 删除属性索引（查询仍可用，退化为全扫描）
+        fn drop_index(&mut self, field: &str) {
+            dispatch!(self, mut db => db.drop_index(field));
+        }
+
+        // ════════ 轻量级单字段查询 ════════
+
+        /// 获取节点的 payload（不含向量，比 get() 更轻量）
+        fn get_payload(&self, py: Python<'_>, id: u64) -> Option<PyObject> {
+            dispatch!(self, db => db.get_payload(id)).map(|p| json_to_pyobject(py, &p))
+        }
+
+        /// 获取节点的出边列表
+        fn get_edges(&self, id: u64) -> Vec<PyEdge> {
+            dispatch!(self, db => db.get_edges(id))
+                .into_iter()
+                .map(|e| PyEdge {
+                    target_id: e.target_id,
+                    label: e.label,
+                    weight: e.weight,
+                })
+                .collect()
+        }
+
         fn get(&self, py: Python<'_>, id: u64) -> PyResult<Option<PyNodeView>> {
             match &self.inner {
                 DbBackend::F32(db) => {
@@ -1155,28 +1192,27 @@ pub mod python {
             }
         }
 
-        /// 执行类 Cypher 图谱查询语句
+        /// 执行 TQL (Trivium Query Language) 统一查询
+        ///
+        /// 支持三种入口：MATCH (图遍历) / FIND (文档过滤) / SEARCH (向量检索)
         ///
         /// 示例：
         /// ```python
-        /// rows = db.query("MATCH (a)-[:knows]->(b) WHERE b.age > 18 RETURN b")
+        /// # 图遍历
+        /// rows = db.tql('MATCH (a)-[:knows]->(b) WHERE b.age > 18 RETURN b')
         /// for row in rows:
         ///     node = row.row["b"]   # {"id": ..., "payload": {...}}
-        ///     print(node)
+        ///
+        /// # 文档过滤
+        /// rows = db.tql('FIND {type: "event", heat: {$gte: 0.7}} RETURN *')
         /// ```
-        fn query(&self, py: Python<'_>, cypher: &str) -> PyResult<Vec<PyQueryRow>> {
-            // 将三种后端的查询结果都统一转成 Python 可消费的格式
-            #[allow(dead_code)]
+        fn tql(&self, py: Python<'_>, query: &str) -> PyResult<Vec<PyQueryRow>> {
             fn convert_rows<T: crate::VectorType>(
                 py: Python<'_>,
-                rows: Vec<std::collections::HashMap<String, crate::node::NodeView<T>>>,
-            ) -> PyResult<Vec<PyQueryRow>>
-            where
-                T: Into<f64> + Copy,
-            {
-                let mut result = Vec::with_capacity(rows.len());
+                rows: Vec<std::collections::HashMap<String, crate::node::Node<T>>>,
+            ) -> PyResult<Vec<PyQueryRow>> {
+                let mut out = Vec::with_capacity(rows.len());
                 for row in rows {
-                    // 每行结果转成 Python dict: {str: {"id": int, "payload": dict, "num_edges": int}}
                     let py_row = PyDict::new(py);
                     for (var_name, node) in &row {
                         let node_dict = PyDict::new(py);
@@ -1185,140 +1221,63 @@ pub mod python {
                         let _ = node_dict.set_item("num_edges", node.edges.len());
                         let _ = py_row.set_item(var_name, node_dict);
                     }
-                    result.push(PyQueryRow {
+                    out.push(PyQueryRow {
                         row: py_row.into_any().unbind(),
                     });
                 }
-                Ok(result)
+                Ok(out)
             }
 
             match &self.inner {
                 DbBackend::F32(db) => {
-                    let rows = db.query(cypher).map_err(|e: crate::error::TriviumError| {
+                    let rows = db.tql(query).map_err(|e: crate::error::TriviumError| {
                         pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
                     })?;
-                    // f32 直接转 f64 满足 Into<f64> bound
-                    let result = {
-                        let mut out = Vec::with_capacity(rows.len());
-                        for row in rows {
-                            let py_row = PyDict::new(py);
-                            for (var_name, node) in &row {
-                                let node_dict = PyDict::new(py);
-                                let _ = node_dict.set_item("id", node.id);
-                                let _ = node_dict
-                                    .set_item("payload", json_to_pyobject(py, &node.payload));
-                                let _ = node_dict.set_item("num_edges", node.edges.len());
-                                let _ = py_row.set_item(var_name, node_dict);
-                            }
-                            out.push(PyQueryRow {
-                                row: py_row.into_any().unbind(),
-                            });
-                        }
-                        out
-                    };
-                    Ok(result)
+                    convert_rows(py, rows)
                 }
                 DbBackend::F16(db) => {
-                    let rows = db.query(cypher).map_err(|e: crate::error::TriviumError| {
+                    let rows = db.tql(query).map_err(|e: crate::error::TriviumError| {
                         pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
                     })?;
-                    let mut out = Vec::with_capacity(rows.len());
-                    for row in rows {
-                        let py_row = PyDict::new(py);
-                        for (var_name, node) in &row {
-                            let node_dict = PyDict::new(py);
-                            let _ = node_dict.set_item("id", node.id);
-                            let _ =
-                                node_dict.set_item("payload", json_to_pyobject(py, &node.payload));
-                            let _ = node_dict.set_item("num_edges", node.edges.len());
-                            let _ = py_row.set_item(var_name, node_dict);
-                        }
-                        out.push(PyQueryRow {
-                            row: py_row.into_any().unbind(),
-                        });
-                    }
-                    Ok(out)
+                    convert_rows(py, rows)
                 }
                 DbBackend::U64(db) => {
-                    let rows = db.query(cypher).map_err(|e: crate::error::TriviumError| {
+                    let rows = db.tql(query).map_err(|e: crate::error::TriviumError| {
                         pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
                     })?;
-                    let mut out = Vec::with_capacity(rows.len());
-                    for row in rows {
-                        let py_row = PyDict::new(py);
-                        for (var_name, node) in &row {
-                            let node_dict = PyDict::new(py);
-                            let _ = node_dict.set_item("id", node.id);
-                            let _ =
-                                node_dict.set_item("payload", json_to_pyobject(py, &node.payload));
-                            let _ = node_dict.set_item("num_edges", node.edges.len());
-                            let _ = py_row.set_item(var_name, node_dict);
-                        }
-                        out.push(PyQueryRow {
-                            row: py_row.into_any().unbind(),
-                        });
-                    }
-                    Ok(out)
+                    convert_rows(py, rows)
                 }
             }
         }
 
-        fn filter_where(
-            &self,
-            py: Python<'_>,
-            condition: &Bound<'_, PyDict>,
-        ) -> PyResult<Vec<PyNodeView>> {
-            let filter = dict_to_filter(py, condition)?;
-            let mut result_list = Vec::new();
-            match &self.inner {
-                DbBackend::F32(db) => {
-                    for n in db.filter_where(&filter) {
-                        result_list.push(PyNodeView {
-                            id: n.id,
-                            vector: n.vector.into_pyobject(py).unwrap().into_any().unbind(),
-                            payload: json_to_pyobject(py, &n.payload),
-                            edges: n.edges.iter().map(|e| PyEdge {
-                                target_id: e.target_id,
-                                label: e.label.clone(),
-                                weight: e.weight,
-                            }).collect(),
-                            num_edges: n.edges.len(),
-                        });
-                    }
-                }
-                DbBackend::F16(db) => {
-                    for n in db.filter_where(&filter) {
-                        let f32_vec: Vec<f32> = n.vector.into_iter().map(|f| f.to_f32()).collect();
-                        result_list.push(PyNodeView {
-                            id: n.id,
-                            vector: f32_vec.into_pyobject(py).unwrap().into_any().unbind(),
-                            payload: json_to_pyobject(py, &n.payload),
-                            edges: n.edges.iter().map(|e| PyEdge {
-                                target_id: e.target_id,
-                                label: e.label.clone(),
-                                weight: e.weight,
-                            }).collect(),
-                            num_edges: n.edges.len(),
-                        });
-                    }
-                }
-                DbBackend::U64(db) => {
-                    for n in db.filter_where(&filter) {
-                        result_list.push(PyNodeView {
-                            id: n.id,
-                            vector: n.vector.into_pyobject(py).unwrap().into_any().unbind(),
-                            payload: json_to_pyobject(py, &n.payload),
-                            edges: n.edges.iter().map(|e| PyEdge {
-                                target_id: e.target_id,
-                                label: e.label.clone(),
-                                weight: e.weight,
-                            }).collect(),
-                            num_edges: n.edges.len(),
-                        });
-                    }
-                }
-            }
-            Ok(result_list)
+        /// 执行 TQL 写操作（CREATE / SET / DELETE / DETACH DELETE）
+        ///
+        /// 返回 dict: {"affected": int, "created_ids": list[int]}
+        ///
+        /// 示例：
+        /// ```python
+        /// result = db.tql_mut('CREATE (a {name: "Alice", age: 30})')
+        /// print(result["affected"])      # 1
+        /// print(result["created_ids"])   # [1]
+        ///
+        /// db.tql_mut('MATCH (a {name: "Alice"}) SET a.age == 31')
+        /// db.tql_mut('MATCH (a {name: "Alice"}) DELETE a')
+        /// ```
+        fn tql_mut(&mut self, py: Python<'_>, query: &str) -> PyResult<PyObject> {
+            let result = dispatch!(self, mut db => db.tql_mut(query))
+                .map_err(|e: crate::error::TriviumError| {
+                    pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                })?;
+            let dict = PyDict::new(py);
+            let _ = dict.set_item("affected", result.affected);
+            let created: Vec<u64> = result.created_ids;
+            let _ = dict.set_item("created_ids", created);
+            Ok(dict.into_any().unbind())
+        }
+
+        /// 显式关闭数据库（落盘后释放资源）
+        fn close(&mut self) -> PyResult<()> {
+            self.flush()
         }
     }
 

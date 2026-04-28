@@ -1,4 +1,4 @@
-pub mod ast;
-pub mod executor;
-pub mod lexer;
-pub mod parser;
+pub mod tql_ast;
+pub mod tql_lexer;
+pub mod tql_parser;
+pub mod tql_executor;

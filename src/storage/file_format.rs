@@ -275,12 +275,12 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
     let mmap = unsafe { Mmap::map(&file) }.map_err(TriviumError::Io)?;
 
     if mmap.len() < HEADER_SIZE as usize {
-        return Err(TriviumError::Generic("File too small for header".into()));
+        return Err(TriviumError::CorruptedFile("File too small for header".into()));
     }
 
     let bytes = &mmap[..];
     if &bytes[0..4] != MAGIC {
-        return Err(TriviumError::Generic(format!(
+        return Err(TriviumError::CorruptedFile(format!(
             "Invalid file magic: expected TVDB, got {:?}",
             &bytes[0..4]
         )));
@@ -425,7 +425,7 @@ fn load_v1_rom<T: VectorType>(
     let expected_vec_size = node_count * dim * vector_bytes_per_elem;
 
     if vector_offset + expected_vec_size > tdb_mmap.len() {
-        return Err(TriviumError::Generic(
+        return Err(TriviumError::CorruptedFile(
             "Vector block exceeds file size".into(),
         ));
     }
@@ -475,7 +475,7 @@ fn load_payloads<T: VectorType>(
     let mut cursor = offset;
     for _ in 0..node_count {
         if cursor + 12 > end_offset {
-            return Err(TriviumError::Generic("Payload block overflow".into()));
+            return Err(TriviumError::CorruptedFile("Payload block overflow".into()));
         }
         let nid = u64::from_le_bytes(bytes[cursor..cursor + 8].try_into().unwrap());
         cursor += 8;
@@ -488,10 +488,10 @@ fn load_payloads<T: VectorType>(
         }
 
         if cursor + json_len > end_offset {
-            return Err(TriviumError::Generic("JSON data overflow".into()));
+            return Err(TriviumError::CorruptedFile("JSON data overflow".into()));
         }
         let payload: serde_json::Value = serde_json::from_slice(&bytes[cursor..cursor + json_len])
-            .map_err(|e| TriviumError::Generic(format!("JSON parse error: {}", e)))?;
+            .map_err(|e| TriviumError::CorruptedFile(format!("JSON parse error: {}", e)))?;
         cursor += json_len;
 
         memtable.register_node(nid, payload)?;
@@ -517,7 +517,7 @@ fn load_edges<T: VectorType>(
             break;
         }
         let label = String::from_utf8(bytes[cursor..cursor + label_len].to_vec())
-            .map_err(|e| TriviumError::Generic(format!("Label decode error: {}", e)))?;
+            .map_err(|e| TriviumError::CorruptedFile(format!("Label decode error: {}", e)))?;
         cursor += label_len;
         let weight = f32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap());
         cursor += 4;

@@ -433,7 +433,7 @@ impl FfiHook {
     pub fn load(path: &str) -> crate::error::Result<Self> {
         unsafe {
             let lib = libloading::Library::new(path).map_err(|e| {
-                crate::error::TriviumError::Generic(format!(
+                crate::error::TriviumError::HookLoadError(format!(
                     "无法加载外置 Hook 动态库 '{}': {}",
                     path, e
                 ))

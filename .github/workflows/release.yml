@@ -1,4 +1,4 @@
-name: Publish to PyPI
+name: Publish to PyPI & NPM
 
 # 触发条件：当推送形如 vX.Y.Z 的 tag 时触发
 on:
@@ -7,42 +7,65 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+*'
 
 jobs:
-  # 第一阶段：编译各个平台的二进制 Wheels
+  # ═══════════════════════════════════════════════════════════
+  #  阶段 1: 编译 Python Wheels（含 ARM64）
+  # ═══════════════════════════════════════════════════════════
   build-wheels:
-    name: Build wheels on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    name: Build wheels (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
-        # 矩阵构建：覆盖 Windows, Ubuntu(Linux), Mac
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - name: Linux x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            sdist: true
+          - name: Linux ARM64
+            runner: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            sdist: false
+          - name: Windows x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            sdist: false
+          - name: macOS x86_64
+            runner: macos-13
+            target: x86_64-apple-darwin
+            sdist: false
+          - name: macOS ARM64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            sdist: false
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          
+
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
         with:
-          # 我们只需要 python 的 feature
-          # (sdist 参数负责连源码一起打包，我们只让 linux 机子去打 1 份源码包就好)
           command: build
-          args: --release --features python -o dist ${{ matrix.os == 'ubuntu-latest' && '--sdist' || '' }}
-          # 开启 zig 将支持更好的 Linux 下的交叉编译兼容性
+          target: ${{ matrix.target }}
+          args: --release --features python -o dist ${{ matrix.sdist && '--sdist' || '' }}
           rust-toolchain: stable
-      
-      # 把编译好的所有轮子暂时上传保存到当前流水线任务的缓存中
+          # zig 交叉编译器：让 Linux x86 runner 可以编译 ARM64 目标
+          manylinux: auto
+
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}
+          name: wheels-${{ matrix.name }}
           path: dist
 
-  # 第二阶段：下载刚刚所有机器编好的包，统合后发往 PyPI
+  # ═══════════════════════════════════════════════════════════
+  #  阶段 2: 发布到 PyPI
+  # ═══════════════════════════════════════════════════════════
   release:
     name: Release to PyPI
     runs-on: ubuntu-latest
@@ -54,56 +77,87 @@ jobs:
           path: dist
           pattern: wheels-*
           merge-multiple: true
-          
-      # 使用 pypa 官方 Action 发包
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
 
-  # 第三阶段：准备 npm 跨平台包并分发
+  # ═══════════════════════════════════════════════════════════
+  #  阶段 3: 编译 Node.js native addon（含 ARM64）
+  # ═══════════════════════════════════════════════════════════
   build-node:
-    name: Build Node addon on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    name: Build Node addon (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - name: Linux x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: Linux ARM64
+            runner: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+          - name: Windows x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: macOS x86_64
+            runner: macos-13
+            target: x86_64-apple-darwin
+          - name: macOS ARM64
+            runner: macos-latest
+            target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Linux ARM64 交叉编译需要 gcc-aarch64
+      - name: Install cross-compiler (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
       - name: Install dependencies
         run: npm install
-        
+
       - name: Build node module
-        # 使用 napi-rs 自带的 CLI 构建各平台原生包
-        run: npx napi build --platform --release --features nodejs
-        
-      # 将编出的 .node 暂存
+        run: npx napi build --platform --release --features nodejs --target ${{ matrix.target }}
+        env:
+          # Linux ARM64 交叉编译需要指定链接器
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-gcc' || '' }}
+
       - name: Upload node binding
         uses: actions/upload-artifact@v4
         with:
-          name: node-${{ matrix.os }}
+          name: node-${{ matrix.name }}
           path: "*.node"
 
+  # ═══════════════════════════════════════════════════════════
+  #  阶段 4: 发布到 NPM
+  # ═══════════════════════════════════════════════════════════
   release-npm:
     name: Release to NPM
     runs-on: ubuntu-latest
     needs: build-node
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
           registry-url: 'https://registry.npmjs.org'
 
-      # 把三个系统编好的 .node 全部下回当前目录
       - name: Download all bindings
         uses: actions/download-artifact@v4
         with:
@@ -111,7 +165,7 @@ jobs:
           pattern: node-*
           merge-multiple: true
 
-      # 在发包前编写一个万能入口文件 index.js 自动加载对应平台的二进制
+      # 万能入口：运行时自动加载对应平台的二进制
       - name: Generate JS Loader
         run: |
           cat << 'EOF' > index.js
@@ -131,7 +185,6 @@ jobs:
           EOF
 
       - name: Publish to NPM
-        # NODE_AUTH_TOKEN 环境变量会被 registry-url 自动读取以使用 npm token
         run: |
           npm install
           npm publish

@@ -91,7 +91,7 @@ fn 测试_全业务链路_社交网络复杂流转() {
     // 5. 第四阶段：复杂查询层结合 (Cypher + Vector)
     {
         // a. 纯图谱查询：测试修改后的结构：Alice follow 了谁？(应当是 Bob 和 Charlie)
-        let results = db.query(r#"MATCH (a {name: "Alice"})-[:follows]->(b) RETURN b"#).unwrap();
+        let results = db.tql(r#"MATCH (a {name: "Alice"})-[:follows]->(b) RETURN b"#).unwrap();
         assert_eq!(results.len(), 2, "Alice 的两次关注结果应当独立可见");
         
         // b. 特征过滤查询：从查理的属性入手，且通过 KNN 混合搜索寻找与其最相近的人，通过 Cypher 进行结果倒排过滤
@@ -127,7 +127,7 @@ fn 测试_全业务链路_社交网络复杂流转() {
         assert_eq!(db.node_count(), 2, "此时图谱网络内只剩 2 人");
         
         // Alice 是否还是 follow Bob?
-        let rel_check = db.query(r#"MATCH (a {name: "Alice"})-[:follows]->(b) RETURN b"#).unwrap();
+        let rel_check = db.tql(r#"MATCH (a {name: "Alice"})-[:follows]->(b) RETURN b"#).unwrap();
         // 虽然曾经 Alice -> Bob，并且 Alice -> Charlie。但是 Bob 被删了，只剩 Charlie
         assert_eq!(rel_check.len(), 1, "悬空出边应当在 Delete -> Compact 后被彻底摧毁");
         let survior_id = rel_check[0].get("b").unwrap().id;

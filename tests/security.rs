@@ -195,7 +195,7 @@ fn 测试_密集图谱_万级笛卡尔积防OOM_LazyEvaluation有效性() {
     // 2. 中心 (1) -> 叶子 (100) -> 中心 (1) = 100 条结果！
     // 预期总路径 10100 条。
     // 如果没有 LazyEvaluation，会在中间层产生 10100 份巨型 Node 深拷贝，造成严重阻塞内存飙升
-    let results = db.query("MATCH (a)-[:connects]->(b)-[:connects]->(c) RETURN c").unwrap();
+    let results = db.tql("MATCH (a)-[:connects]->(b)-[:connects]->(c) RETURN c").unwrap();
     
     assert_eq!(results.len(), 5000, "引擎现在支持默认 LIMIT，没有 LIMIT 的复杂笛卡尔积会在 5000 时优雅平滑截断，不再抛出恐慌错误！");
     
@@ -221,7 +221,7 @@ fn 测试_跨进程文件锁_强硬阻断双重绑定() {
     );
     
     let err_msg = db_b_result.err().unwrap().to_string();
-    assert!(err_msg.contains("already opened by another"), "错误信息不匹配：{}", err_msg);
+    assert!(err_msg.contains("already opened by another") || err_msg.contains("Database locked"), "错误信息不匹配：{}", err_msg);
 
     cleanup(&path);
 }
@@ -240,7 +240,7 @@ fn 测试_巨型恶意载荷拦截_防OOM与日志撑爆() {
     // 1. 直写 API 拦截
     let res = db.insert(&[0.1, 0.2], giant_payload.clone());
     assert!(res.is_err(), "10MB 超大直写必须被拦截");
-    assert!(res.unwrap_err().to_string().contains("exceeds maximum allowed limit (8MB)"));
+    assert!(res.unwrap_err().to_string().contains("Payload too large"));
 
     // 2. 事务层面拦截
     let mut tx = db.begin_tx();
@@ -252,7 +252,7 @@ fn 测试_巨型恶意载荷拦截_防OOM与日志撑爆() {
     );
     let err_str = tx_res.unwrap_err().to_string();
     assert!(
-        err_str.contains("exceeds maximum allowed limit (8MB)"),
+        err_str.contains("Payload too large"),
         "不在预期的错误范围内: {}", err_str
     );
     

@@ -59,9 +59,9 @@ pub(crate) fn execute_pipeline<T: VectorType>(
         for item in qv {
             let f = item.to_f32();
             if f.is_nan() || f.is_infinite() {
-                return Err(crate::error::TriviumError::Generic(
-                    "Query vector contains NaN or Infinity".to_string(),
-                ));
+                return Err(crate::error::TriviumError::InvalidVector {
+                    reason: "Query vector contains NaN or Infinity".to_string(),
+                });
             }
         }
     }
@@ -360,6 +360,16 @@ fn bq_pipeline<T: VectorType + Sync>(
     #[cfg(target_arch = "x86_64")]
     use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 
+    // ARM64 预取：使用通用的 __prefetch 内建
+    #[cfg(target_arch = "aarch64")]
+    #[inline(always)]
+    unsafe fn arm_prefetch(ptr: *const u8) {
+        // PLD (Prefetch for Load) to L1 cache
+        unsafe {
+            std::arch::asm!("prfm pldl1keep, [{ptr}]", ptr = in(reg) ptr, options(nostack, preserves_flags));
+        }
+    }
+
     // Stage 2: 可选 Int8 量化中间层（三级火箭）
     let int8_pool_ref = mt.int8_pool();
     let final_candidates: Vec<usize> =
@@ -385,6 +395,18 @@ fn bq_pipeline<T: VectorType + Sync>(
                             _mm_prefetch(
                                 i8pool.data.as_ptr().add(prefetch_offset) as *const i8,
                                 _MM_HINT_T0,
+                            );
+                        }
+                    }
+                }
+                #[cfg(target_arch = "aarch64")]
+                if iter_idx + 2 < bq_winners.len() {
+                    let prefetch_idx = bq_winners[iter_idx + 2];
+                    if i8pool.is_valid_index(prefetch_idx) {
+                        let prefetch_offset = prefetch_idx * dim;
+                        unsafe {
+                            arm_prefetch(
+                                i8pool.data.as_ptr().add(prefetch_offset) as *const u8,
                             );
                         }
                     }
@@ -423,6 +445,17 @@ fn bq_pipeline<T: VectorType + Sync>(
                         _mm_prefetch(
                             vectors.as_ptr().add(next_offset) as *const i8,
                             _MM_HINT_T0,
+                        );
+                    }
+                }
+            }
+            #[cfg(target_arch = "aarch64")]
+            if iter_idx + 1 < final_candidates.len() {
+                let next_offset = final_candidates[iter_idx + 1] * dim;
+                if next_offset + dim <= vectors.len() {
+                    unsafe {
+                        arm_prefetch(
+                            vectors.as_ptr().add(next_offset) as *const u8,
                         );
                     }
                 }
@@ -615,4 +648,486 @@ fn apply_dpp<T: VectorType>(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     Some(final_results)
+}
+
+// ═══════════════════════════════════════════════════════════
+//  单元测试
+// ═══════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::config::SearchConfig;
+    use crate::filter::Filter;
+    use crate::hook::{HookContext, NoopHook, SearchHook};
+    use crate::node::SearchHit;
+    use crate::storage::memtable::MemTable;
+    use std::sync::{Arc, Mutex};
+
+    /// 构建一个包含若干 f32 节点的内存 MemTable（无磁盘 IO）
+    fn make_memtable(dim: usize, nodes: &[(u64, Vec<f32>, serde_json::Value)]) -> MemTable<f32> {
+        let mut mt = MemTable::new(dim);
+        for (id, vec, payload) in nodes {
+            mt.insert_with_id(*id, vec, payload.clone()).unwrap();
+        }
+        mt
+    }
+
+    fn wrap(mt: MemTable<f32>) -> Arc<Mutex<MemTable<f32>>> {
+        Arc::new(Mutex::new(mt))
+    }
+
+    fn default_config() -> SearchConfig {
+        SearchConfig { top_k: 5, min_score: 0.0, expand_depth: 0, ..Default::default() }
+    }
+
+    // ════════ aggregate_seeds ════════
+
+    #[test]
+    fn test_aggregate_seeds_sorts_descending_and_truncates() {
+        let mt = make_memtable(2, &[
+            (1, vec![1.0, 0.0], serde_json::json!({"a": 1})),
+            (2, vec![0.0, 1.0], serde_json::json!({"a": 2})),
+            (3, vec![0.5, 0.5], serde_json::json!({"a": 3})),
+        ]);
+        let cfg = SearchConfig { top_k: 2, min_score: 0.0, ..Default::default() };
+        let mut seed_map = std::collections::HashMap::new();
+        seed_map.insert(1u64, 0.9f32);
+        seed_map.insert(2, 0.5);
+        seed_map.insert(3, 0.7);
+
+        let mut hits = Vec::new();
+        aggregate_seeds(&mt, &cfg, &seed_map, &mut hits);
+
+        // top_k=2 但 aggregate_seeds 内部 truncate 到 max(top_k, 15)
+        assert!(hits.len() <= 15);
+        // 排序检查：降序
+        for w in hits.windows(2) {
+            assert!(w[0].score >= w[1].score, "应按分数降序");
+        }
+    }
+
+    #[test]
+    fn test_aggregate_seeds_filters_by_min_score() {
+        let mt = make_memtable(2, &[
+            (1, vec![1.0, 0.0], serde_json::json!({})),
+            (2, vec![0.0, 1.0], serde_json::json!({})),
+        ]);
+        let cfg = SearchConfig { top_k: 10, min_score: 0.8, ..Default::default() };
+        let mut seed_map = std::collections::HashMap::new();
+        seed_map.insert(1u64, 0.9f32);
+        seed_map.insert(2, 0.3); // 低于 min_score
+
+        let mut hits = Vec::new();
+        aggregate_seeds(&mt, &cfg, &seed_map, &mut hits);
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, 1);
+    }
+
+    #[test]
+    fn test_aggregate_seeds_with_payload_filter() {
+        let mt = make_memtable(2, &[
+            (1, vec![1.0, 0.0], serde_json::json!({"role": "admin"})),
+            (2, vec![0.0, 1.0], serde_json::json!({"role": "user"})),
+        ]);
+        let cfg = SearchConfig {
+            top_k: 10, min_score: 0.0,
+            payload_filter: Some(Filter::eq("role", serde_json::json!("admin"))),
+            ..Default::default()
+        };
+        let mut seed_map = std::collections::HashMap::new();
+        seed_map.insert(1u64, 0.9f32);
+        seed_map.insert(2, 0.8);
+
+        let mut hits = Vec::new();
+        aggregate_seeds(&mt, &cfg, &seed_map, &mut hits);
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, 1);
+    }
+
+    #[test]
+    fn test_aggregate_seeds_empty_map() {
+        let mt = make_memtable(2, &[(1, vec![1.0, 0.0], serde_json::json!({}))]);
+        let cfg = default_config();
+        let seed_map = std::collections::HashMap::new();
+        let mut hits = Vec::new();
+        aggregate_seeds(&mt, &cfg, &seed_map, &mut hits);
+        assert!(hits.is_empty());
+    }
+
+    // ════════ recall_vector (brute-force 路径) ════════
+
+    #[test]
+    fn test_recall_vector_basic() {
+        let mut mt = make_memtable(3, &[
+            (1, vec![1.0, 0.0, 0.0], serde_json::json!({})),
+            (2, vec![0.0, 1.0, 0.0], serde_json::json!({})),
+            (3, vec![0.0, 0.0, 1.0], serde_json::json!({})),
+        ]);
+        mt.ensure_vectors_cache();
+
+        let cfg = SearchConfig { top_k: 2, min_score: 0.0, ..Default::default() };
+        let query: Vec<f32> = vec![1.0, 0.0, 0.0];
+        let mut seed_map = std::collections::HashMap::new();
+
+        recall_vector(&mt, &cfg, Some(&query), &mut seed_map);
+
+        assert!(!seed_map.is_empty(), "应召回至少一个节点");
+        // 节点 1 与 query 完全对齐，得分最高
+        let best_id = seed_map.iter().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
+        assert_eq!(*best_id, 1);
+    }
+
+    #[test]
+    fn test_recall_vector_none_query_is_noop() {
+        let mut mt = make_memtable(3, &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))]);
+        mt.ensure_vectors_cache();
+        let cfg = default_config();
+        let mut seed_map = std::collections::HashMap::new();
+        recall_vector(&mt, &cfg, None, &mut seed_map);
+        assert!(seed_map.is_empty());
+    }
+
+    #[test]
+    fn test_recall_vector_with_payload_filter() {
+        let mut mt = make_memtable(3, &[
+            (1, vec![1.0, 0.0, 0.0], serde_json::json!({"tag": "yes"})),
+            (2, vec![0.9, 0.1, 0.0], serde_json::json!({"tag": "no"})),
+        ]);
+        mt.ensure_vectors_cache();
+
+        let cfg = SearchConfig {
+            top_k: 5, min_score: 0.0,
+            payload_filter: Some(Filter::eq("tag", serde_json::json!("yes"))),
+            ..Default::default()
+        };
+        let query = vec![1.0, 0.0, 0.0];
+        let mut seed_map = std::collections::HashMap::new();
+        recall_vector(&mt, &cfg, Some(&query), &mut seed_map);
+
+        assert!(seed_map.contains_key(&1));
+        assert!(!seed_map.contains_key(&2), "node 2 应被 payload_filter 过滤");
+    }
+
+    // ════════ recall_text ════════
+
+    #[test]
+    fn test_recall_text_disabled_is_noop() {
+        let mt = make_memtable(2, &[(1, vec![1.0, 0.0], serde_json::json!({"text": "hello"}))]);
+        let cfg = SearchConfig { enable_text_hybrid_search: false, ..Default::default() };
+        let mut seed_map = std::collections::HashMap::new();
+        recall_text(&mt, &cfg, Some("hello"), &mut seed_map);
+        assert!(seed_map.is_empty());
+    }
+
+    #[test]
+    fn test_recall_text_none_query_is_noop() {
+        let mt = make_memtable(2, &[(1, vec![1.0, 0.0], serde_json::json!({"text": "hello"}))]);
+        let cfg = SearchConfig { enable_text_hybrid_search: true, ..Default::default() };
+        let mut seed_map = std::collections::HashMap::new();
+        recall_text(&mt, &cfg, None, &mut seed_map);
+        assert!(seed_map.is_empty());
+    }
+
+    // ════════ recall_residual ════════
+
+    #[test]
+    fn test_recall_residual_disabled_is_noop() {
+        let mut mt = make_memtable(3, &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))]);
+        mt.ensure_vectors_cache();
+        let cfg = SearchConfig { enable_advanced_pipeline: false, ..Default::default() };
+        let query = vec![1.0, 0.0, 0.0];
+        let mut seed_map = std::collections::HashMap::new();
+        seed_map.insert(1u64, 0.9f32);
+        let before = seed_map.clone();
+        recall_residual(&mt, &cfg, Some(&query), &mut seed_map);
+        assert_eq!(seed_map, before, "disabled 时 seed_map 不应变化");
+    }
+
+    #[test]
+    fn test_recall_residual_empty_seeds_is_noop() {
+        let mut mt = make_memtable(3, &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))]);
+        mt.ensure_vectors_cache();
+        let cfg = SearchConfig {
+            enable_advanced_pipeline: true, enable_sparse_residual: true, ..Default::default()
+        };
+        let query = vec![1.0, 0.0, 0.0];
+        let mut seed_map = std::collections::HashMap::new();
+        recall_residual(&mt, &cfg, Some(&query), &mut seed_map);
+        assert!(seed_map.is_empty());
+    }
+
+    // ════════ apply_dpp ════════
+
+    #[test]
+    fn test_apply_dpp_returns_none_when_pool_too_small() {
+        let mt = make_memtable(3, &[
+            (1, vec![1.0, 0.0, 0.0], serde_json::json!({})),
+            (2, vec![0.0, 1.0, 0.0], serde_json::json!({})),
+        ]);
+        let cfg = SearchConfig { top_k: 5, enable_dpp: true, dpp_quality_weight: 1.0, ..Default::default() };
+        let expanded = vec![
+            SearchHit { id: 1, score: 0.9, payload: serde_json::json!({}) },
+            SearchHit { id: 2, score: 0.5, payload: serde_json::json!({}) },
+        ];
+        // pool_valid.len() <= top_k → 返回 None
+        assert!(apply_dpp(&mt, &cfg, &expanded).is_none());
+    }
+
+    #[test]
+    fn test_apply_dpp_selects_diverse_subset() {
+        let mt = make_memtable(3, &[
+            (1, vec![1.0, 0.0, 0.0], serde_json::json!({})),
+            (2, vec![0.99, 0.01, 0.0], serde_json::json!({})),
+            (3, vec![0.0, 1.0, 0.0], serde_json::json!({})),
+            (4, vec![0.0, 0.0, 1.0], serde_json::json!({})),
+        ]);
+        let cfg = SearchConfig { top_k: 2, enable_dpp: true, dpp_quality_weight: 1.0, ..Default::default() };
+        let expanded = vec![
+            SearchHit { id: 1, score: 1.0, payload: serde_json::json!({}) },
+            SearchHit { id: 2, score: 0.95, payload: serde_json::json!({}) },
+            SearchHit { id: 3, score: 0.8, payload: serde_json::json!({}) },
+            SearchHit { id: 4, score: 0.7, payload: serde_json::json!({}) },
+        ];
+
+        let result = apply_dpp(&mt, &cfg, &expanded);
+        assert!(result.is_some());
+        let selected = result.unwrap();
+        assert_eq!(selected.len(), 2);
+        // DPP 应该选择多样化的组合，而不是得分最高但相似的 1 和 2
+        let ids: Vec<u64> = selected.iter().map(|h| h.id).collect();
+        assert!(ids.contains(&1), "最高分节点应被选中");
+        // 节点 2 与 1 高度相似，DPP 倾向选择 3 或 4 而非 2
+        assert!(!ids.contains(&2), "DPP 应优先选择多样化的节点而非相似节点");
+    }
+
+    // ════════ execute_pipeline 集成 ════════
+
+    #[test]
+    fn test_execute_pipeline_dimension_mismatch() {
+        let mt = wrap(make_memtable(3, &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))]));
+        let hook: Arc<dyn SearchHook> = Arc::new(NoopHook);
+        let cfg = default_config();
+        let bad_query = vec![1.0, 0.0]; // dim=2, 期望 dim=3
+        let mut ctx = HookContext::new();
+
+        let result = execute_pipeline(&mt, &hook, None, Some(&bad_query), &cfg, &mut ctx);
+        assert!(result.is_err(), "维度不匹配应返回错误");
+    }
+
+    #[test]
+    fn test_execute_pipeline_nan_query_rejected() {
+        let mt = wrap(make_memtable(3, &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))]));
+        let hook: Arc<dyn SearchHook> = Arc::new(NoopHook);
+        let cfg = default_config();
+        let nan_query = vec![f32::NAN, 0.0, 0.0];
+        let mut ctx = HookContext::new();
+
+        let result = execute_pipeline(&mt, &hook, None, Some(&nan_query), &cfg, &mut ctx);
+        assert!(result.is_err(), "NaN 查询向量应被拒绝");
+    }
+
+    #[test]
+    fn test_execute_pipeline_inf_query_rejected() {
+        let mt = wrap(make_memtable(3, &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))]));
+        let hook: Arc<dyn SearchHook> = Arc::new(NoopHook);
+        let cfg = default_config();
+        let inf_query = vec![f32::INFINITY, 0.0, 0.0];
+        let mut ctx = HookContext::new();
+
+        let result = execute_pipeline(&mt, &hook, None, Some(&inf_query), &cfg, &mut ctx);
+        assert!(result.is_err(), "Infinity 查询向量应被拒绝");
+    }
+
+    #[test]
+    fn test_execute_pipeline_empty_db() {
+        let mt = wrap(MemTable::<f32>::new(3));
+        let hook: Arc<dyn SearchHook> = Arc::new(NoopHook);
+        let cfg = default_config();
+        let query = vec![1.0, 0.0, 0.0];
+        let mut ctx = HookContext::new();
+
+        let results = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
+        assert!(results.is_empty(), "空库应返回空结果");
+    }
+
+    #[test]
+    fn test_execute_pipeline_basic_vector_search() {
+        let mt = wrap(make_memtable(3, &[
+            (1, vec![1.0, 0.0, 0.0], serde_json::json!({"name": "a"})),
+            (2, vec![0.0, 1.0, 0.0], serde_json::json!({"name": "b"})),
+            (3, vec![0.0, 0.0, 1.0], serde_json::json!({"name": "c"})),
+        ]));
+        let hook: Arc<dyn SearchHook> = Arc::new(NoopHook);
+        let cfg = SearchConfig { top_k: 2, min_score: 0.0, expand_depth: 0, ..Default::default() };
+        let query = vec![1.0, 0.0, 0.0];
+        let mut ctx = HookContext::new();
+
+        let results = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].id, 1, "最相似节点应排第一");
+    }
+
+    #[test]
+    fn test_execute_pipeline_respects_top_k() {
+        let nodes: Vec<(u64, Vec<f32>, serde_json::Value)> = (1..=10)
+            .map(|i| (i as u64, vec![1.0, i as f32 * 0.01, 0.0], serde_json::json!({})))
+            .collect();
+        let mt = wrap(make_memtable(3, &nodes));
+        let hook: Arc<dyn SearchHook> = Arc::new(NoopHook);
+        let cfg = SearchConfig { top_k: 3, min_score: 0.0, expand_depth: 0, ..Default::default() };
+        let query = vec![1.0, 0.0, 0.0];
+        let mut ctx = HookContext::new();
+
+        let results = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
+        assert!(results.len() <= 3, "结果数不应超过 top_k");
+    }
+
+    #[test]
+    fn test_execute_pipeline_records_timings() {
+        let mt = wrap(make_memtable(3, &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))]));
+        let hook: Arc<dyn SearchHook> = Arc::new(NoopHook);
+        let cfg = default_config();
+        let query = vec![1.0, 0.0, 0.0];
+        let mut ctx = HookContext::new();
+
+        let _ = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
+        assert!(!ctx.stage_timings.is_empty(), "管线应记录阶段计时");
+        let stage_names: Vec<&str> = ctx.stage_timings.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(stage_names.contains(&"hook_pre_search"));
+        assert!(stage_names.contains(&"hook_post_search"));
+    }
+
+    // ════════ Hook 集成 ════════
+
+    #[test]
+    fn test_hook_abort_returns_empty() {
+        struct AbortHook;
+        impl SearchHook for AbortHook {
+            fn on_pre_search(&self, _: &mut Vec<f32>, _: &mut SearchConfig, ctx: &mut HookContext) {
+                ctx.abort = true;
+            }
+        }
+
+        let mt = wrap(make_memtable(3, &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))]));
+        let hook: Arc<dyn SearchHook> = Arc::new(AbortHook);
+        let cfg = default_config();
+        let query = vec![1.0, 0.0, 0.0];
+        let mut ctx = HookContext::new();
+
+        let results = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
+        assert!(results.is_empty(), "abort=true 时应返回空结果");
+    }
+
+    #[test]
+    fn test_hook_custom_recall_overrides_builtin() {
+        struct FixedRecallHook;
+        impl SearchHook for FixedRecallHook {
+            fn on_custom_recall(&self, _: &[f32], _: &SearchConfig, _: &mut HookContext) -> Option<Vec<SearchHit>> {
+                Some(vec![SearchHit { id: 999, score: 1.0, payload: serde_json::Value::Null }])
+            }
+        }
+
+        let mt = wrap(make_memtable(3, &[
+            (1, vec![1.0, 0.0, 0.0], serde_json::json!({})),
+            (999, vec![0.0, 0.0, 1.0], serde_json::json!({"custom": true})),
+        ]));
+        let hook: Arc<dyn SearchHook> = Arc::new(FixedRecallHook);
+        let cfg = SearchConfig { top_k: 5, min_score: 0.0, expand_depth: 0, ..Default::default() };
+        let query = vec![1.0, 0.0, 0.0];
+        let mut ctx = HookContext::new();
+
+        let results = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, 999, "自定义召回应覆盖内置召回");
+    }
+
+    #[test]
+    fn test_hook_post_recall_filters() {
+        struct FilterLowScoreHook;
+        impl SearchHook for FilterLowScoreHook {
+            fn on_post_recall(&self, hits: &mut Vec<SearchHit>, _: &mut HookContext) {
+                hits.retain(|h| h.score > 0.5);
+            }
+        }
+
+        let mt = wrap(make_memtable(3, &[
+            (1, vec![1.0, 0.0, 0.0], serde_json::json!({})),
+            (2, vec![0.0, 1.0, 0.0], serde_json::json!({})),
+            (3, vec![0.0, 0.0, 1.0], serde_json::json!({})),
+        ]));
+        let hook: Arc<dyn SearchHook> = Arc::new(FilterLowScoreHook);
+        let cfg = SearchConfig { top_k: 10, min_score: 0.0, expand_depth: 0, ..Default::default() };
+        let query = vec![1.0, 0.0, 0.0];
+        let mut ctx = HookContext::new();
+
+        let results = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
+        for r in &results {
+            assert!(r.score > 0.5, "Hook 过滤后不应有低分结果: score={}", r.score);
+        }
+    }
+
+    #[test]
+    fn test_hook_rerank_reverses_order() {
+        struct ReverseRerankHook;
+        impl SearchHook for ReverseRerankHook {
+            fn on_rerank(&self, hits: &mut Vec<SearchHit>, _: &mut HookContext) -> Option<Vec<SearchHit>> {
+                let mut reversed = hits.clone();
+                reversed.reverse();
+                Some(reversed)
+            }
+        }
+
+        let mt = wrap(make_memtable(3, &[
+            (1, vec![1.0, 0.0, 0.0], serde_json::json!({})),
+            (2, vec![0.7, 0.7, 0.0], serde_json::json!({})),
+        ]));
+        let hook: Arc<dyn SearchHook> = Arc::new(ReverseRerankHook);
+        let cfg = SearchConfig { top_k: 5, min_score: 0.0, expand_depth: 0, ..Default::default() };
+        let query = vec![1.0, 0.0, 0.0];
+        let mut ctx = HookContext::new();
+
+        let results = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
+        assert!(results.len() >= 2);
+        // rerank hook 反转了顺序，原本分低的现在排前面
+        assert_eq!(results[0].id, 2, "rerank 反转后 node 2 应排第一");
+    }
+
+    // ════════ 参数钳位 (L0 安全防御) ════════
+
+    #[test]
+    fn test_pipeline_clamps_extreme_config() {
+        // top_k=0 应被钳到 1，不应 panic
+        let mt = wrap(make_memtable(3, &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))]));
+        let hook: Arc<dyn SearchHook> = Arc::new(NoopHook);
+        let cfg = SearchConfig { top_k: 0, min_score: 0.0, expand_depth: 0, ..Default::default() };
+        let query = vec![1.0, 0.0, 0.0];
+        let mut ctx = HookContext::new();
+
+        let results = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx);
+        assert!(results.is_ok(), "极端参数不应 panic");
+    }
+
+    // ════════ 图扩散集成 ════════
+
+    #[test]
+    fn test_pipeline_with_graph_expansion() {
+        let mut mt = make_memtable(3, &[
+            (1, vec![1.0, 0.0, 0.0], serde_json::json!({"name": "seed"})),
+            (2, vec![0.0, 1.0, 0.0], serde_json::json!({"name": "neighbor"})),
+        ]);
+        mt.link(1, 2, "related".to_string(), 0.8).unwrap();
+
+        let mt = wrap(mt);
+        let hook: Arc<dyn SearchHook> = Arc::new(NoopHook);
+        let cfg = SearchConfig { top_k: 5, min_score: 0.0, expand_depth: 1, ..Default::default() };
+        let query = vec![1.0, 0.0, 0.0];
+        let mut ctx = HookContext::new();
+
+        let results = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
+        let ids: Vec<u64> = results.iter().map(|h| h.id).collect();
+        assert!(ids.contains(&2), "图扩散应将邻居节点 2 纳入结果");
+    }
 }

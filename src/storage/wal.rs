@@ -132,7 +132,7 @@ impl Wal {
 
             Ok(())
         } else {
-            Err(TriviumError::Generic("WAL writer closed".into()))
+            Err(TriviumError::WalClosed)
         }
     }
 
@@ -179,7 +179,7 @@ impl Wal {
             }
             Ok(())
         } else {
-            Err(TriviumError::Generic("WAL writer closed".into()))
+            Err(TriviumError::WalClosed)
         }
     }
 

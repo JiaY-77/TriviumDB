@@ -5,7 +5,7 @@ use crate::index::int8::Int8Pool;
 use crate::index::text::TextIndex;
 use crate::node::{Edge, NodeId};
 use crate::storage::vec_pool::VecPool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// 计算给定 JSON 对象的行级特征布隆签名（共 64 位）
 fn calculate_json_signature(value: &serde_json::Value) -> u64 {
@@ -69,7 +69,7 @@ pub struct MemTable<T: VectorType> {
     // 附设文本倒排引擎 (完全可选，纯碎占用独立内存不干扰底座)
     text_index: TextIndex,
 
-    // 2. 元数据映射（关系型负载）—— 保持纯内存
+    // 2. 元数据映射（文档型负载）—— 保持纯内存
     payloads: HashMap<NodeId, serde_json::Value>,
 
     // 3. 图谱邻接表 —— 保持纯内存
@@ -80,6 +80,15 @@ pub struct MemTable<T: VectorType> {
 
     // 反向入度哈希网：用于 O(1) 解决删除节点时的全库雪崩扫表
     incoming_edges: HashMap<NodeId, Vec<NodeId>>,
+
+    // 边标签倒排索引：label → [(src, dst)]，加速图谱按标签查询
+    label_index: HashMap<String, Vec<(NodeId, NodeId)>>,
+
+    // 属性二级索引：field_name → (value_string → Vec<NodeId>)
+    // 按需注册，仅对已注册字段建索引
+    property_index: HashMap<String, HashMap<String, Vec<NodeId>>>,
+    /// 已注册的索引字段名集合
+    indexed_fields: HashSet<String>,
 
     // 节点不应期（疲劳状态）映射表：
     // 0 = 正常；1 = 疲劳中（被激活后，下一轮扩散大幅衰减，消费一次后清零）
@@ -115,10 +124,9 @@ impl<T: VectorType> MemTable<T> {
         for elem in vector {
             let f = elem.to_f32();
             if f.is_nan() || f.is_infinite() {
-                return Err(TriviumError::Generic(
-                    "Vector contains NaN or Infinity; insert rejected to prevent silent search corruption"
-                        .into(),
-                ));
+                return Err(TriviumError::InvalidVector {
+                    reason: "Vector contains NaN or Infinity; insert rejected to prevent silent search corruption".into(),
+                });
             }
         }
         Ok(())
@@ -136,6 +144,9 @@ impl<T: VectorType> MemTable<T> {
             edges: HashMap::new(),
             in_degrees: HashMap::new(),
             incoming_edges: HashMap::new(),
+            label_index: HashMap::new(),
+            property_index: HashMap::new(),
+            indexed_fields: HashSet::new(),
             fatigue_map: std::sync::RwLock::new(HashMap::new()),
             indices_to_ids: Vec::new(),
             ids_to_indices: HashMap::new(),
@@ -165,6 +176,9 @@ impl<T: VectorType> MemTable<T> {
             edges: HashMap::new(),
             in_degrees: HashMap::new(),
             incoming_edges: HashMap::new(),
+            label_index: HashMap::new(),
+            property_index: HashMap::new(),
+            indexed_fields: HashSet::new(),
             fatigue_map: std::sync::RwLock::new(HashMap::new()),
             indices_to_ids: Vec::new(),
             ids_to_indices: HashMap::new(),
@@ -225,8 +239,9 @@ impl<T: VectorType> MemTable<T> {
             self.fast_tags.push(sig);
             i
         };
-        self.payloads.insert(id, payload);
+        self.payloads.insert(id, payload.clone());
         self.ids_to_indices.insert(id, idx);
+        self.add_to_property_index(id, &payload);
         Ok(())
     }
 
@@ -234,10 +249,11 @@ impl<T: VectorType> MemTable<T> {
     pub fn register_node(&mut self, id: NodeId, payload: serde_json::Value) -> Result<()> {
         let sig = calculate_json_signature(&payload);
         let idx = self.indices_to_ids.len();
-        self.payloads.insert(id, payload);
+        self.payloads.insert(id, payload.clone());
         self.indices_to_ids.push(id);
         self.fast_tags.push(sig);
         self.ids_to_indices.insert(id, idx);
+        self.add_to_property_index(id, &payload);
         Ok(())
     }
 
@@ -279,11 +295,14 @@ impl<T: VectorType> MemTable<T> {
             i
         };
 
-        // 2. 更新关系型负载
-        self.payloads.insert(id, payload);
+        // 2. 更新文档型负载
+        self.payloads.insert(id, payload.clone());
 
         // 3. 构建反向映射
         self.ids_to_indices.insert(id, idx);
+
+        // 4. 维护属性索引
+        self.add_to_property_index(id, &payload);
 
         Ok(id)
     }
@@ -297,7 +316,7 @@ impl<T: VectorType> MemTable<T> {
         payload: serde_json::Value,
     ) -> Result<()> {
         if self.payloads.contains_key(&id) {
-            return Err(TriviumError::Generic(format!("Node {} already exists", id)));
+            return Err(TriviumError::NodeAlreadyExists(id));
         }
         if vector.len() != self.dim {
             return Err(TriviumError::DimensionMismatch {
@@ -321,8 +340,11 @@ impl<T: VectorType> MemTable<T> {
             self.fast_tags.push(sig);
             i
         };
-        self.payloads.insert(id, payload);
+        self.payloads.insert(id, payload.clone());
         self.ids_to_indices.insert(id, idx);
+
+        // 维护属性索引
+        self.add_to_property_index(id, &payload);
 
         // 防御性推进分配器指针，避免后续普通 insert 撞车
         if id >= self.next_id {
@@ -343,7 +365,7 @@ impl<T: VectorType> MemTable<T> {
 
         let edge = Edge {
             target_id: dst,
-            label,
+            label: label.clone(),
             weight,
         };
         self.edges.entry(src).or_default().push(edge);
@@ -351,6 +373,9 @@ impl<T: VectorType> MemTable<T> {
         // 增加目标节点的入度计数与反向哈希网记录
         *self.in_degrees.entry(dst).or_insert(0) += 1;
         self.incoming_edges.entry(dst).or_default().push(src);
+
+        // 维护边标签倒排索引
+        self.label_index.entry(label).or_default().push((src, dst));
 
         Ok(())
     }
@@ -496,6 +521,114 @@ impl<T: VectorType> MemTable<T> {
         self.edges.get(&id).map(|e| e.as_slice())
     }
 
+    /// 获取指向 id 的所有源节点（反向边）
+    pub fn get_incoming_sources(&self, id: NodeId) -> &[NodeId] {
+        self.incoming_edges.get(&id).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// 按标签查询所有边 (src, dst) 对，O(1) 查找
+    pub fn get_edges_by_label(&self, label: &str) -> &[(NodeId, NodeId)] {
+        self.label_index.get(label).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// 按 Payload JSON 字段值查找节点（遍历匹配，适用于小规模场景）
+    ///
+    /// 如需高性能可后续引入二级属性索引，当前先拿 field_index 的语义位置占好
+    pub fn find_nodes_by_field(&self, field: &str, value: &serde_json::Value) -> Vec<NodeId> {
+        self.payloads
+            .iter()
+            .filter_map(|(&id, payload)| {
+                if payload.get(field) == Some(value) {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    // ════════════════════════════════════════════════════════
+    //  属性二级索引 API
+    // ════════════════════════════════════════════════════════
+
+    /// 注册属性索引：对指定字段建立倒排索引，并回填所有已有节点
+    pub fn register_property_index(&mut self, field: &str) {
+        if self.indexed_fields.contains(field) {
+            return; // 已注册
+        }
+        self.indexed_fields.insert(field.to_string());
+
+        // 回填：扫描所有 payload，构建索引
+        let mut index: HashMap<String, Vec<NodeId>> = HashMap::new();
+        for (&id, payload) in &self.payloads {
+            if let Some(val) = payload.get(field) {
+                let key = value_to_index_key(val);
+                index.entry(key).or_default().push(id);
+            }
+        }
+        self.property_index.insert(field.to_string(), index);
+    }
+
+    /// 删除属性索引
+    pub fn drop_property_index(&mut self, field: &str) {
+        self.indexed_fields.remove(field);
+        self.property_index.remove(field);
+    }
+
+    /// 查询属性索引：O(1) 查找（如果字段有索引）
+    /// 返回 Some(ids) 表示命中索引，None 表示该字段无索引
+    pub fn find_by_property_index(&self, field: &str, value: &serde_json::Value) -> Option<&[NodeId]> {
+        if !self.indexed_fields.contains(field) {
+            return None;
+        }
+        let key = value_to_index_key(value);
+        self.property_index
+            .get(field)
+            .and_then(|m| m.get(&key))
+            .map(|v| v.as_slice())
+    }
+
+    /// 检查字段是否有属性索引
+    pub fn has_property_index(&self, field: &str) -> bool {
+        self.indexed_fields.contains(field)
+    }
+
+    /// 获取所有已注册索引的字段名
+    pub fn indexed_field_names(&self) -> &HashSet<String> {
+        &self.indexed_fields
+    }
+
+    // ── 属性索引维护辅助 ──
+
+    /// 将节点加入属性索引（在 insert 时调用）
+    fn add_to_property_index(&mut self, id: NodeId, payload: &serde_json::Value) {
+        for field in &self.indexed_fields.clone() {
+            if let Some(val) = payload.get(field) {
+                let key = value_to_index_key(val);
+                self.property_index
+                    .entry(field.clone())
+                    .or_default()
+                    .entry(key)
+                    .or_default()
+                    .push(id);
+            }
+        }
+    }
+
+    /// 将节点从属性索引中移除（在 delete/update 时调用）
+    fn remove_from_property_index(&mut self, id: NodeId, payload: &serde_json::Value) {
+        for field in &self.indexed_fields.clone() {
+            if let Some(val) = payload.get(field) {
+                let key = value_to_index_key(val);
+                if let Some(field_map) = self.property_index.get_mut(field) {
+                    if let Some(ids) = field_map.get_mut(&key) {
+                        ids.retain(|&i| i != id);
+                    }
+                }
+            }
+        }
+    }
+
     /// 删除节点：三层原子联删（向量标记为死区 + Payload移除 + 所有关联边清理）
     pub fn delete(&mut self, id: NodeId) -> Result<()> {
         if !self.payloads.contains_key(&id) {
@@ -509,13 +642,21 @@ impl<T: VectorType> MemTable<T> {
             self.free_slots.push(idx);    // 抛入环保回收池，供下一个 insert 使用！
         }
 
-        // 2. 元数据层
+        // 2. 属性索引清理（必须在 payload 移除之前）
+        if let Some(payload) = self.payloads.get(&id).cloned() {
+            self.remove_from_property_index(id, &payload);
+        }
+
+        // 3. 元数据层
         self.payloads.remove(&id);
 
         // 3. 图谱层：删除出边 + 清理其他节点指向该节点的入边
+        //    同时收集需要从 label_index 中清理的标签集合，最后批量清理
+        let mut dirty_labels: HashMap<String, Vec<(NodeId, NodeId)>> = HashMap::new();
+
         if let Some(outgoing_edges) = self.edges.remove(&id) {
             // 清理这些出边目标节点的入度计数与反向哈希网记录
-            for edge in outgoing_edges {
+            for edge in &outgoing_edges {
                 let target = edge.target_id;
                 if let Some(in_deg) = self.in_degrees.get_mut(&target) {
                     *in_deg = in_deg.saturating_sub(1);
@@ -523,6 +664,7 @@ impl<T: VectorType> MemTable<T> {
                 if let Some(incoming) = self.incoming_edges.get_mut(&target) {
                     incoming.retain(|&src| src != id);
                 }
+                dirty_labels.entry(edge.label.clone()).or_default().push((id, target));
             }
         }
 
@@ -530,11 +672,24 @@ impl<T: VectorType> MemTable<T> {
         if let Some(incoming) = self.incoming_edges.remove(&id) {
             for src_id in incoming {
                 if let Some(edge_list) = self.edges.get_mut(&src_id) {
+                    for edge in edge_list.iter() {
+                        if edge.target_id == id {
+                            dirty_labels.entry(edge.label.clone()).or_default().push((src_id, id));
+                        }
+                    }
                     edge_list.retain(|e| e.target_id != id);
                 }
             }
         }
         self.in_degrees.remove(&id);
+
+        // 批量清理 label_index：每个标签只做一次 retain，避免 O(N²) 雪崩
+        for (label, to_remove) in &dirty_labels {
+            if let Some(pairs) = self.label_index.get_mut(label) {
+                let remove_set: HashSet<&(NodeId, NodeId)> = to_remove.iter().collect();
+                pairs.retain(|pair| !remove_set.contains(pair));
+            }
+        }
 
         self.bq_dirty = true;
 
@@ -545,6 +700,14 @@ impl<T: VectorType> MemTable<T> {
     pub fn unlink(&mut self, src: NodeId, dst: NodeId) -> Result<()> {
         if let Some(edge_list) = self.edges.get_mut(&src) {
             let initial_len = edge_list.len();
+            // 先清理 label_index 中对应的条目
+            for edge in edge_list.iter() {
+                if edge.target_id == dst {
+                    if let Some(pairs) = self.label_index.get_mut(&edge.label) {
+                        pairs.retain(|&(s, d)| !(s == src && d == dst));
+                    }
+                }
+            }
             edge_list.retain(|e| e.target_id != dst);
             if edge_list.len() < initial_len {
                 let removed_count = initial_len - edge_list.len();
@@ -567,13 +730,16 @@ impl<T: VectorType> MemTable<T> {
 
     /// 更新节点的元数据（Payload），不影响向量和图谱
     pub fn update_payload(&mut self, id: NodeId, payload: serde_json::Value) -> Result<()> {
-        match self.payloads.get_mut(&id) {
-            Some(existing) => {
+        match self.payloads.get(&id).cloned() {
+            Some(old_payload) => {
                 let sig = calculate_json_signature(&payload);
                 if let Some(&idx) = self.ids_to_indices.get(&id) {
                     self.fast_tags[idx] = sig;
                 }
-                *existing = payload;
+                // 属性索引：先移除旧值，再添加新值
+                self.remove_from_property_index(id, &old_payload);
+                self.add_to_property_index(id, &payload);
+                self.payloads.insert(id, payload);
                 Ok(())
             }
             None => Err(TriviumError::NodeNotFound(id)),
@@ -667,7 +833,12 @@ impl<T: VectorType> MemTable<T> {
         let index_bytes = self.indices_to_ids.len() * std::mem::size_of::<NodeId>()
             + self.ids_to_indices.len()
                 * (std::mem::size_of::<NodeId>() + std::mem::size_of::<usize>());
-        vec_bytes + payload_bytes + edge_bytes + index_bytes
+        let label_index_bytes: usize = self
+            .label_index
+            .values()
+            .map(|pairs| pairs.len() * std::mem::size_of::<(NodeId, NodeId)>())
+            .sum();
+        vec_bytes + payload_bytes + edge_bytes + index_bytes + label_index_bytes
     }
 
     // --- 文本引擎接口 ---
@@ -715,5 +886,17 @@ impl<T: VectorType> MemTable<T> {
                 self.payloads.len()
             );
         }
+    }
+}
+
+/// 将 JSON 值转换为索引键字符串
+fn value_to_index_key(val: &serde_json::Value) -> String {
+    match val {
+        serde_json::Value::String(s) => format!("s:{}", s),
+        serde_json::Value::Number(n) => format!("n:{}", n),
+        serde_json::Value::Bool(b) => format!("b:{}", b),
+        serde_json::Value::Null => "null".to_string(),
+        // 复杂类型用 JSON 序列化作为键
+        other => format!("j:{}", other),
     }
 }

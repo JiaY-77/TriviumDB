@@ -240,9 +240,9 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
                     for item in vector {
                         let f = item.to_f32();
                         if f.is_nan() || f.is_infinite() {
-                            return Err(crate::error::TriviumError::Generic(
-                                "Vector contains NaN or Infinity".into(),
-                            ));
+                            return Err(crate::error::TriviumError::InvalidVector {
+                                reason: "Vector contains NaN or Infinity".into(),
+                            });
                         }
                     }
                     pre_assigned_ids.push(Some(sim_next_id));
@@ -251,10 +251,7 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
                 }
                 TxOp::InsertWithId { id, vector, .. } => {
                     if check_exists!(id) {
-                        return Err(crate::error::TriviumError::Generic(format!(
-                            "Node {} already exists",
-                            id
-                        )));
+                        return Err(crate::error::TriviumError::NodeAlreadyExists(*id));
                     }
                     if vector.len() != dim {
                         return Err(crate::error::TriviumError::DimensionMismatch {
@@ -265,9 +262,9 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
                     for item in vector {
                         let f = item.to_f32();
                         if f.is_nan() || f.is_infinite() {
-                            return Err(crate::error::TriviumError::Generic(
-                                "Vector contains NaN or Infinity".into(),
-                            ));
+                            return Err(crate::error::TriviumError::InvalidVector {
+                                reason: "Vector contains NaN or Infinity".into(),
+                            });
                         }
                     }
                     pre_assigned_ids.push(Some(*id));
@@ -317,9 +314,9 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
                     for item in vector {
                         let f = item.to_f32();
                         if f.is_nan() || f.is_infinite() {
-                            return Err(crate::error::TriviumError::Generic(
-                                "Vector contains NaN or Infinity".into(),
-                            ));
+                            return Err(crate::error::TriviumError::InvalidVector {
+                                reason: "Vector contains NaN or Infinity".into(),
+                            });
                         }
                     }
                     pre_assigned_ids.push(None);
@@ -337,9 +334,10 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
                     let id = pre_assigned_ids[i].unwrap();
                     let payload_str = payload.to_string();
                     if payload_str.len() > 8 * 1024 * 1024 {
-                        return Err(crate::error::TriviumError::Generic(
-                            "Payload size exceeds maximum allowed limit (8MB)".into(),
-                        ));
+                        return Err(crate::error::TriviumError::PayloadTooLarge {
+                            size_bytes: payload_str.len(),
+                            max_bytes: 8 * 1024 * 1024,
+                        });
                     }
                     generated_ids.push(id);
                     wal_entries.push(WalEntry::Insert {
@@ -355,9 +353,10 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
                 } => {
                     let payload_str = payload.to_string();
                     if payload_str.len() > 8 * 1024 * 1024 {
-                        return Err(crate::error::TriviumError::Generic(
-                            "Payload size exceeds maximum allowed limit (8MB)".into(),
-                        ));
+                        return Err(crate::error::TriviumError::PayloadTooLarge {
+                            size_bytes: payload_str.len(),
+                            max_bytes: 8 * 1024 * 1024,
+                        });
                     }
                     generated_ids.push(*id);
                     wal_entries.push(WalEntry::Insert {
@@ -391,9 +390,10 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
                 TxOp::UpdatePayload { id, payload } => {
                     let payload_str = payload.to_string();
                     if payload_str.len() > 8 * 1024 * 1024 {
-                        return Err(crate::error::TriviumError::Generic(
-                            "Payload size exceeds maximum allowed limit (8MB)".into(),
-                        ));
+                        return Err(crate::error::TriviumError::PayloadTooLarge {
+                            size_bytes: payload_str.len(),
+                            max_bytes: 8 * 1024 * 1024,
+                        });
                     }
                     wal_entries.push(WalEntry::UpdatePayload {
                         id: *id,

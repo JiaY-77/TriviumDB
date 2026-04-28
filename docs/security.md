@@ -478,7 +478,7 @@ libc::madvise(ptr, len, libc::MADV_DONTNEED);
 
 ---
 
-## FFI Hook 插件安全 (v0.5.1)
+## FFI Hook 插件安全 (v0.6.0)
 
 ### 30. FfiHook 动态库加载的安全边界
 

@@ -909,90 +909,61 @@ pub mod nodejs {
             let _ = dispatch!(self, mut db => db.build_text_index());
         }
 
-        // ── 元数据过滤 ──
+        // ── 属性二级索引 ──
 
-        /// 类 MongoDB 语法条件过滤，返回匹配节点列表
+        /// 创建属性索引：对指定 payload 字段建立倒排索引
+        ///
+        /// ```js
+        /// db.createIndex('name')   // 之后 tql('FIND {name: "Alice"} RETURN *') 使用 O(1) 索引
+        /// ```
         #[napi]
-        pub fn filter_where(&self, condition: serde_json::Value) -> napi::Result<Vec<JsNodeView>> {
-            let filter = json_to_filter(&condition)?;
-            let views = match &self.inner {
-                DbBackend::F32(db) => db
-                    .filter_where(&filter)
-                    .into_iter()
-                    .map(|n| {
-                        let edges_arr = n.edges
-                            .into_iter()
-                            .map(|e| JsEdge {
-                                target_id: e.target_id as f64,
-                                label: e.label,
-                                weight: e.weight as f64,
-                            })
-                            .collect::<Vec<_>>();
-                        JsNodeView {
-                            id: n.id as f64,
-                            vector: n.vector.iter().map(|&x| x as f64).collect(),
-                            payload: n.payload,
-                            num_edges: edges_arr.len() as u32,
-                            edges: edges_arr,
-                        }
-                    })
-                    .collect::<Vec<_>>(),
-                DbBackend::F16(db) => db
-                    .filter_where(&filter)
-                    .into_iter()
-                    .map(|n| {
-                        let edges_arr = n.edges
-                            .into_iter()
-                            .map(|e| JsEdge {
-                                target_id: e.target_id as f64,
-                                label: e.label,
-                                weight: e.weight as f64,
-                            })
-                            .collect::<Vec<_>>();
-                        JsNodeView {
-                            id: n.id as f64,
-                            vector: n.vector.iter().map(|x| x.to_f64()).collect(),
-                            payload: n.payload,
-                            num_edges: edges_arr.len() as u32,
-                            edges: edges_arr,
-                        }
-                    })
-                    .collect::<Vec<_>>(),
-                DbBackend::U64(db) => db
-                    .filter_where(&filter)
-                    .into_iter()
-                    .map(|n| {
-                        let edges_arr = n.edges
-                            .into_iter()
-                            .map(|e| JsEdge {
-                                target_id: e.target_id as f64,
-                                label: e.label,
-                                weight: e.weight as f64,
-                            })
-                            .collect::<Vec<_>>();
-                        JsNodeView {
-                            id: n.id as f64,
-                            vector: n.vector.iter().map(|&x| x as f64).collect(),
-                            payload: n.payload,
-                            num_edges: edges_arr.len() as u32,
-                            edges: edges_arr,
-                        }
-                    })
-                    .collect::<Vec<_>>(),
-            };
-            Ok(views)
+        pub fn create_index(&mut self, field: String) {
+            dispatch!(self, mut db => db.create_index(&field));
         }
 
-        // ── Cypher 图谱查询 ──
-
-        /// 执行类 Cypher 查询，返回每行变量绑定的 JSON 数组
-        ///
-        /// 每个结果行是 `{ varName: { id, payload, numEdges } }` 结构的对象
+        /// 删除属性索引（查询仍可用，退化为全扫描）
         #[napi]
-        pub fn query(&self, cypher: String) -> napi::Result<Vec<serde_json::Value>> {
-            // 辅助闭包：将一个 row(HashMap) 转成 serde_json::Value
+        pub fn drop_index(&mut self, field: String) {
+            dispatch!(self, mut db => db.drop_index(&field));
+        }
+
+        // ── 轻量级单字段查询 ──
+
+        /// 获取节点的 payload（不含向量，比 get() 更轻量）
+        #[napi]
+        pub fn get_payload(&self, id: f64) -> Option<serde_json::Value> {
+            dispatch!(self, db => db.get_payload(id as u64))
+        }
+
+        /// 获取节点的出边列表
+        #[napi]
+        pub fn get_edges(&self, id: f64) -> Vec<JsEdge> {
+            dispatch!(self, db => db.get_edges(id as u64))
+                .into_iter()
+                .map(|e| JsEdge {
+                    target_id: e.target_id as f64,
+                    label: e.label,
+                    weight: e.weight as f64,
+                })
+                .collect()
+        }
+
+        // ── TQL 统一查询 ──
+
+        /// 执行 TQL (Trivium Query Language) 统一查询
+        ///
+        /// 支持三种入口：MATCH (图遍历) / FIND (文档过滤) / SEARCH (向量检索)
+        ///
+        /// ```js
+        /// // 图遍历
+        /// const rows = db.tql('MATCH (a)-[:knows]->(b) WHERE b.age > 18 RETURN b')
+        /// // 文档过滤
+        /// const rows = db.tql('FIND {type: "event", heat: {$gte: 0.7}} RETURN *')
+        /// ```
+        #[napi]
+        pub fn tql(&self, query: String) -> napi::Result<Vec<serde_json::Value>> {
             fn row_to_json<T: crate::vector::VectorType>(
-                row: std::collections::HashMap<String, crate::node::NodeView<T>>,
+                row: std::collections::HashMap<String, crate::node::Node<T>>,
             ) -> serde_json::Value {
                 let mut obj = serde_json::Map::new();
                 for (var_name, node) in row {
@@ -1010,18 +981,40 @@ pub mod nodejs {
 
             match &self.inner {
                 DbBackend::F32(db) => db
-                    .query(&cypher)
+                    .tql(&query)
                     .map_err(|e| napi::Error::from_reason(e.to_string()))
                     .map(|rows| rows.into_iter().map(row_to_json).collect()),
                 DbBackend::F16(db) => db
-                    .query(&cypher)
+                    .tql(&query)
                     .map_err(|e| napi::Error::from_reason(e.to_string()))
                     .map(|rows| rows.into_iter().map(row_to_json).collect()),
                 DbBackend::U64(db) => db
-                    .query(&cypher)
+                    .tql(&query)
                     .map_err(|e| napi::Error::from_reason(e.to_string()))
                     .map(|rows| rows.into_iter().map(row_to_json).collect()),
             }
+        }
+
+        /// 执行 TQL 写操作（CREATE / SET / DELETE / DETACH DELETE）
+        ///
+        /// 返回 { affected: number, createdIds: number[] }
+        ///
+        /// ```js
+        /// const result = db.tqlMut('CREATE (a {name: "Alice", age: 30})')
+        /// console.log(result.affected)     // 1
+        /// console.log(result.createdIds)   // [1]
+        ///
+        /// db.tqlMut('MATCH (a {name: "Alice"}) SET a.age == 31')
+        /// db.tqlMut('MATCH (a {name: "Alice"}) DELETE a')
+        /// ```
+        #[napi]
+        pub fn tql_mut(&mut self, query: String) -> napi::Result<serde_json::Value> {
+            let result = dispatch!(self, mut db => db.tql_mut(&query))
+                .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+            Ok(serde_json::json!({
+                "affected": result.affected,
+                "createdIds": result.created_ids,
+            }))
         }
 
         // ── 持久化与管理 ──
@@ -1123,6 +1116,18 @@ pub mod nodejs {
         #[napi(getter)]
         pub fn dtype(&self) -> String {
             self.dtype.clone()
+        }
+
+        /// 检查节点是否存在
+        #[napi]
+        pub fn contains(&self, id: f64) -> bool {
+            dispatch!(self, db => db.contains(id as u64))
+        }
+
+        /// 显式关闭数据库（落盘后释放资源）
+        #[napi]
+        pub fn close(&mut self) -> napi::Result<()> {
+            self.flush()
         }
     } // impl TriviumDB
 } // mod nodejs

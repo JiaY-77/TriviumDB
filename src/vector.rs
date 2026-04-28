@@ -127,7 +127,53 @@ unsafe fn cosine_similarity_avx2(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+/// ARM NEON 加速路径：每次并行处理 4 个 f32
+/// ARM64 (aarch64) 默认支持 NEON，无需运行时检测
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn cosine_similarity_neon(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::aarch64::*;
+
+    let len = a.len().min(b.len());
+
+    unsafe {
+        let mut v_dot = vdupq_n_f32(0.0);
+        let mut v_na = vdupq_n_f32(0.0);
+        let mut v_nb = vdupq_n_f32(0.0);
+
+        let chunks = len / 4;
+        for i in 0..chunks {
+            let offset = i * 4;
+            let va = vld1q_f32(a.as_ptr().add(offset));
+            let vb = vld1q_f32(b.as_ptr().add(offset));
+            v_dot = vfmaq_f32(v_dot, va, vb); // dot += a * b
+            v_na = vfmaq_f32(v_na, va, va);   // na  += a * a
+            v_nb = vfmaq_f32(v_nb, vb, vb);   // nb  += b * b
+        }
+
+        // 水平归约：128-bit → 标量
+        let mut dot = vaddvq_f32(v_dot);
+        let mut norm_a = vaddvq_f32(v_na);
+        let mut norm_b = vaddvq_f32(v_nb);
+
+        // 处理尾部不足 4 个的元素
+        let tail_start = chunks * 4;
+        for i in tail_start..len {
+            dot += a[i] * b[i];
+            norm_a += a[i] * a[i];
+            norm_b += b[i] * b[i];
+        }
+
+        if norm_a == 0.0 || norm_b == 0.0 {
+            return 0.0;
+        }
+        dot / (norm_a.sqrt() * norm_b.sqrt())
+    }
+}
+
 /// 公开的分发函数：运行时自动选择最快路径
+///
+/// 优先级：x86 AVX2+FMA → ARM NEON → 标量回退
 #[inline]
 pub fn cosine_similarity_f32(a: &[f32], b: &[f32]) -> f32 {
     #[cfg(target_arch = "x86_64")]
@@ -137,6 +183,13 @@ pub fn cosine_similarity_f32(a: &[f32], b: &[f32]) -> f32 {
             return unsafe { cosine_similarity_avx2(a, b) };
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        // ARM64 默认支持 NEON（ARMv8 基线指令集），无需运行时检测
+        // SAFETY: aarch64 target 保证 NEON 可用
+        return unsafe { cosine_similarity_neon(a, b) };
+    }
+    #[allow(unreachable_code)]
     cosine_similarity_scalar(a, b)
 }
 

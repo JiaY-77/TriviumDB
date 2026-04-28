@@ -13,7 +13,7 @@
 
 # TriviumDB
 
-**向量 × 图谱 × 关系型 —— 三位一体的 AI 原生嵌入式数据库**
+**向量 × 图谱 × 文档 —— 三位一体的 AI 原生嵌入式数据库**
 
 > _Trivium_：拉丁语，意为"三条道路的交汇"。
 
@@ -29,7 +29,7 @@
 
 ## 一句话介绍
 
-TriviumDB 是一个用纯 Rust 编写的**嵌入式单文件数据库引擎**，将**向量检索（Vector）**、**属性图谱（Graph）**和**关系型元数据（Relational）**原生融合在同一个存储内核中。
+TriviumDB 是一个用纯 Rust 编写的**嵌入式单文件数据库引擎**，将**向量检索（Vector）**、**属性图谱（Graph）**和**文档型元数据（Document）**原生融合在同一个存储内核中。
 
 我们的目标是成为 **AI 应用领域的 SQLite**：
 
@@ -110,7 +110,7 @@ flowchart TD
 | 步骤         | 传统三库方案                 | TriviumDB                          |
 | ------------ | ---------------------------- | ---------------------------------- |
 | ① 存语义向量 | 调 Qdrant API 写入 embedding | `db.insert(vec, payload)` 一步完成 |
-| ② 存元数据   | 调 SQLite 写入时间、场景     | ↑ 同一步，payload 里就是 JSON      |
+| ② 存数据   | 调 SQLite 写入时间、场景     | ↑ 同一步，payload 里就是 JSON      |
 | ③ 存关系     | 调 Neo4j: 用户→地点→人物     | `db.link(user, cafe, "went_to")`   |
 | ④ 后续召回   | 3 次跨库查询 + 手写合并      | `db.search(vec, expand_depth=2)`   |
 | ⑤ 迁移数据   | 导出 3 份 + 写转换脚本       | 复制 `memory.tdb` 一个文件         |
@@ -234,7 +234,7 @@ maturin develop --features python
 TriviumDB/
 ├── src/
 │   ├── lib.rs              # 库入口 + 公开 API
-│   ├── database/           # 数据库核心模块（v0.5.1 模块化重构）
+│   ├── database/           # 数据库核心模块（v0.6.0 模块化重构）
 │   │   ├── mod.rs          # Database 结构体、CRUD、生命周期管理
 │   │   ├── config.rs       # StorageMode / Config / SearchConfig 配置
 │   │   ├── pipeline.rs     # 混合检索管线（L0-L9 + 6 个 Hook 注入点）
@@ -269,7 +269,7 @@ TriviumDB/
 │   ├── api-reference.md    # 完整 API 参考文档
 │   ├── features.md         # 支持特性详解
 │   ├── best-practices.md   # 最佳实践指南
-│   ├── hook-guide.md       # 🔌 Hook 开发指南（C++ FFI / Rust Hook）
+│   ├── hook-guide.md       # Hook 开发指南（C++ FFI / Rust Hook）
 │   └── security.md         # 安全设计说明
 ├── Cargo.toml
 ├── pyproject.toml          # Maturin 构建配置
@@ -280,89 +280,52 @@ TriviumDB/
 
 ## 路线图
 
-### v0.1 — MVP ✅
+### v0.1 — 核心引擎 MVP ✅
 
-- [x] Node / Edge 核心数据结构
-- [x] 内存 MemTable（SoA 向量池 + HashMap + 邻接表）
-- [x] BruteForce 向量检索
-- [x] `insert` / `link` / `search` / `delete` 基础 API
-- [x] 单文件 `.tdb` 序列化/反序列化
+- [x] Node / Edge 数据结构 + 内存 MemTable + BruteForce 向量检索
+- [x] 单文件 `.tdb` 序列化 + `insert` / `link` / `search` / `delete` API
 
-### v0.2 — 工业可用 ✅
+### v0.2 — 持久化与生态 ✅
 
-- [x] WAL 日志 + 崩溃恢复
-- [x] 后台 Compaction 线程
-- [x] 高级 Payload 过滤 ($eq/$ne/$gt/$gte/$lt/$lte/$in/$and/$or)
-- [x] PyO3 Python 绑定 + Maturin 打包
-- [x] rayon 并行向量扫描
-- [x] mmap 零拷贝文件加载
+- [x] WAL 崩溃恢复 + 后台 Compaction + mmap 零拷贝
+- [x] PyO3 Python 绑定 + rayon 并行扫描 + 高级 Payload 过滤
 
-### v0.3 — 生态拓展 ❓️
+### v0.3 — 性能与跨平台 ✅
 
-- [x] Node.js 扩展绑定 (napi-rs)
-- [x] 高级 Payload 过滤扩展 ($exists/$nin/$size/$all/$type)
-- [x] AVX2 + FMA SIMD 加速余弦相似度（运行时自动检测，标量回退）
-- [x] 性能基准测试套件 (Criterion benchmark)
+- [x] Node.js 绑定 (napi-rs)
+- [x] AVX2 + FMA SIMD 加速余弦相似度
 
-### v0.4 — 百万级架构 + 认知管线 + BQ 索引 ✅
+### v0.4 — 认知管线 + BQ 索引 ✅
 
-- [x] Mmap / Rom 双引擎热切换
-- [x] 验证前置事务架构 (Dry-Run 原子回滚)
-- [x] Tombstone 占位对齐序列化
-- [x] 认知检索管线内置（FISTA 残差搜索¹ / PPR 图扩散² / DPP 多样性采样³）
-- [x] 运行时可开关 `SearchConfig`，逐查询粒度动态控制管线各层
-- [x] 向量 / 配置 NaN / Inf / 维度容错拦截
-- [x] **BQ 向量索引**：Binary Quantization 三阶段火箭搜索管线
-- [x] **HNSW 完全移除**：零依赖，架构大幅精简，无图索引维护负担
-- [x] **BQ 自动化**：Compaction 守护线程自动重建，2 万节点自动激活，前台透明
-- [x] **BQ 元数据持久化**：bytemuck 零拷贝落入 .tdb header，重启极速恢复
-- [x] **边特异性强化**（本项目自研）：入度惩罚从 `log10` 改为 `powf(0.55)` 非线性衰减，显著压制高入度节点对扩散能量的集中效应
-- [x] **不应期（疲劳）机制**（灵感来源于生物神经元不应期概念）：Top-15 热点节点在本轮扩散后进入不应期，下轮传导能量削减 85%，一次性消耗后自动恢复，缓解长期使用中的重复召回问题
+- [x] Mmap / Rom 双引擎 + 验证前置事务 (Dry-Run)
+- [x] 认知检索管线（FISTA / PPR / DPP）
+- [x] BQ 三阶段火箭索引（自动激活 + 自动重建）
 
-### v0.5 — 千万级性能 (已实装)
+### v0.5 — 千万级架构 + Hook 系统 ✅
 
-> v0.5 将原先那些“企业级”的笨重发展路线（如引入 B树、换用难写的 FlatBuffers），通过一种极具想象力的“底层硬件逃课”方案**平替并超越**：
+- [x] Parallel Bit-Tag Array 硬件级布隆过滤 + Zero-Ghost 墓碑复用
+- [x] O(1) Reverse Hash Net 反向边查找
+- [x] 检索管线 6 阶段 Hook 注入 + FFI 动态库插件
+- [x] CI/CD 管线 + ASan + LibFuzzer 模糊测试
 
-- [x] **Parallel Bit-Tag Array (并行特征布隆阵列)**：**完美平替**了 `create_index` 与复杂的 `B-Tree` 倒排！通过为 JSON 生成硬件级 64 位布隆签名阵列，查询时利用 CPU 位掩码指令瞬间筛除 99% 不匹配数据！
-- [x] **逃离零拷贝重构地狱**：**完美规避**了 `FlatBuffers` 零拷贝化开发灾难！由于布隆特征层做到了不反序列化直接将垃圾数据截死在起跑线上，我们在继续保留极度自由宽松的 `serde_json` 开发体验不变的前提下，获得了极速反序列化的高空跳跃伞性能。
-- [x] **FreeList 墓碑复用技术 (Zero-Ghost Node)**：不再将 `ids_to_indices` 做成复杂的磁盘树，而是通过 O(1) 空洞回收链表，真正解决了图数据库删节点带来的关联废边和死指针降速噩梦。
-- [x] **O(1) Reverse Hash Net (反向图谱引擎)**：不再全量遍历边表，通过双向 HashMap 网使得删除和无向寻找的复杂度降低了几个数量级。
+### v0.6 — TQL 查询语言 + 跨架构适配 ✅ (当前)
 
-### v0.5.1 — 🔌 Hook 扩展系统 + 模块化重构 ✅ (NEW)
-
-- [x] **检索管线 Hook 系统**：在 L0-L9 管线的 6 个关键阶段注入自定义逻辑
-  - `on_pre_search` — 查询预处理（改写向量 / 修改配置 / 提前终止）
-  - `on_custom_recall` — 替代内置召回（对接外部 FAISS / ScaNN 等高性能模块）
-  - `on_post_recall` — 召回后处理（业务过滤 / 分数调权）
-  - `on_pre_graph_expand` — 图扩散前拦截（种子集过滤/增强）
-  - `on_rerank` — 自定义重排序（外置 Cross-Encoder / ONNX 推理）
-  - `on_post_search` — 最终后处理（统计埋点 / 回传自定义数据）
-- [x] **FFI 动态库插件加载**：`FfiHook` 支持运行时加载 C/C++ `.so/.dll` 插件
-- [x] **零开销默认 Hook**：未注册 Hook 时 `NoopHook` 编译器内联消除全部开销
-- [x] **Python / Node.js Hook 绑定**：`load_ffi_hook()` / `clear_hook()` / `search_with_context()` 已暴露至上层语言
-- [x] **管线计时统计**：`HookContext` 自动记录各阶段耗时
-- [x] **Database 模块化重构**：原 1815 行 `database.rs` 拆分为 `mod.rs` / `config.rs` / `pipeline.rs` / `transaction.rs`
-
-### v0.5.2 — 🔒 工程质量强化 + 绑定完善 ✅ (NEW)
-
-- [x] **Python / Node.js Hook 绑定**：`load_ffi_hook()` / `clear_hook()` / `search_with_context()` 全面暴露至上层语言
-- [x] **GitHub Actions CI/CD 管线**：跨平台测试（Linux/Windows/macOS） + ASan 内存安全检测 + Clippy/rustfmt 代码质量门禁
-- [x] **AddressSanitizer 集成**：nightly + `-Z sanitizer=address` 检测 unsafe 区域的堆溢出、UAF、内存泄漏
-- [x] **LibFuzzer 模糊测试**：针对 WAL 解析、Cypher 查询解析、JSON Filter 解析三大模块的持续 fuzzing
-- [x] **Filter::from_json()** 统一 JSON→Filter 解析入口，消除 Python/Node 绑定中的重复代码
-- [x] **WAL read_entries_from_reader()**：提取可测试的流式解析接口
-- [x] **文档全面更新**：新增 Hook 开发指南、安全文档补充 FFI 威胁模型、最佳实践补充 Hook 章节
-- [ ] 分布式分片存储 (待定极远期愿景)
-- [ ] 数据库可视化 UI 工具 (基于 Web 的监控视图开发中)
+- [x] TQL 统一查询语言（MATCH 图遍历 / FIND 文档过滤 / SEARCH 向量检索）
+- [x] TQL DML 写操作（CREATE / SET / DELETE / DETACH DELETE）
+- [x] 属性二级索引（O(1) 倒排查找 + TQL 自动加速）
+- [x] ARM NEON SIMD 适配 + 跨平台 CI（Apple Silicon / Linux ARM64 via QEMU）
+- [x] Python / Node.js 绑定 API 补全（tql_mut / create_index / get_payload 等）
+- [ ] 数据库可视化 UI 工具
 - [ ] CLI 工具 (`triviumdb-cli`)
 
 ---
+
 
 ## 与现有方案对比
 
 | 维度          | SQLite       | Qdrant      | Neo4j       | SurrealDB    | **TriviumDB**         |
 | ------------- | ------------ | ----------- | ----------- | ------------ | --------------------- |
-| 关系型数据    | ✅ SQL       | ❌ 仅过滤   | ⚠️ 属性     | ✅ SurrealQL | ✅ JSON + $gt/$in     |
+| 文档型数据    | ✅ SQL       | ❌ 仅过滤   | ⚠️ 属性     | ✅ SurrealQL | ✅ JSON + $gt/$in     |
 | 向量检索      | ❌ 需外挂    | ✅ HNSW     | ❌ 需插件   | ✅ ANN       | ✅ 自研 BQ 自适应     |
 | 图谱遍历      | ❌ JOIN 模拟 | ❌          | ✅ Cypher   | ✅ 图查询    | ✅ 原生邻接表         |
 | 嵌入式单文件  | ✅           | ❌ 独立服务 | ❌ JVM 服务 | ⚠️ RocksDB   | ✅ 单 .tdb            |
