@@ -343,6 +343,7 @@ fn INTRUDE_03_WAL尾部注入垃圾帧_回放容错() {
 ///   - +Inf (0x7F800000)  — 正无穷
 ///   - Denorm (0x00000001) — 最小非规范化浮点
 ///   - -Inf (0xFF800000)  — 负无穷
+///
 /// 传入 search() 验证引擎的输入验证层是否能拦截。
 #[test]
 fn INTRUDE_04_ASM构造NaN查询向量_搜索输入验证() {
@@ -535,13 +536,13 @@ fn INTRUDE_07_TDB加WAL双文件同时侵入_灾难级容错() {
 
     // 侵入 .wal：头部注入垃圾
     let wal_path = format!("{}.wal", path);
-    if let Ok(mut data) = std::fs::read(&wal_path) {
-        if data.len() >= 8 {
-            unsafe {
-                asm_nontemporal_poison(data.as_mut_ptr(), 0xBADBADBADBADBADu64);
-            }
-            std::fs::write(&wal_path, &data).unwrap();
+    if let Ok(mut data) = std::fs::read(&wal_path)
+        && data.len() >= 8
+    {
+        unsafe {
+            asm_nontemporal_poison(data.as_mut_ptr(), 0xBADBADBADBADBADu64);
         }
+        std::fs::write(&wal_path, &data).unwrap();
     }
 
     // 删除 flush_ok

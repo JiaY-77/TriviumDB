@@ -407,10 +407,10 @@ impl<T: VectorType> MemTable<T> {
 
     /// 消耗一次疲劳（在扩散使用后调用，清零不应期）
     pub fn consume_fatigue(&self, id: NodeId) {
-        if let Ok(mut map) = self.fatigue_map.write() {
-            if let Some(f) = map.get_mut(&id) {
-                *f = 0;
-            }
+        if let Ok(mut map) = self.fatigue_map.write()
+            && let Some(f) = map.get_mut(&id)
+        {
+            *f = 0;
         }
     }
 
@@ -634,10 +634,10 @@ impl<T: VectorType> MemTable<T> {
         for field in &self.indexed_fields.clone() {
             if let Some(val) = payload.get(field) {
                 let key = value_to_index_key(val);
-                if let Some(field_map) = self.property_index.get_mut(field) {
-                    if let Some(ids) = field_map.get_mut(&key) {
-                        ids.retain(|&i| i != id);
-                    }
+                if let Some(field_map) = self.property_index.get_mut(field)
+                    && let Some(ids) = field_map.get_mut(&key)
+                {
+                    ids.retain(|&i| i != id);
                 }
             }
         }
@@ -722,10 +722,10 @@ impl<T: VectorType> MemTable<T> {
             let initial_len = edge_list.len();
             // 先清理 label_index 中对应的条目
             for edge in edge_list.iter() {
-                if edge.target_id == dst {
-                    if let Some(pairs) = self.label_index.get_mut(&edge.label) {
-                        pairs.retain(|&(s, d)| !(s == src && d == dst));
-                    }
+                if edge.target_id == dst
+                    && let Some(pairs) = self.label_index.get_mut(&edge.label)
+                {
+                    pairs.retain(|&(s, d)| !(s == src && d == dst));
                 }
             }
             edge_list.retain(|e| e.target_id != dst);

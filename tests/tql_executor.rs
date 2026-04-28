@@ -62,11 +62,11 @@ fn build_test_db(name: &str) -> (Database<f32>, String) {
     .unwrap();
 
     // 建立图谱关系
-    db.link(1, 2, "knows".into(), 1.0).unwrap(); // Alice knows Bob
-    db.link(1, 5, "knows".into(), 1.0).unwrap(); // Alice knows Carol
-    db.link(2, 5, "reports_to".into(), 1.0).unwrap(); // Bob reports_to Carol
-    db.link(1, 3, "authored".into(), 1.0).unwrap(); // Alice authored Summit
-    db.link(5, 4, "authored".into(), 1.0).unwrap(); // Carol authored Report
+    db.link(1, 2, "knows", 1.0).unwrap(); // Alice knows Bob
+    db.link(1, 5, "knows", 1.0).unwrap(); // Alice knows Carol
+    db.link(2, 5, "reports_to", 1.0).unwrap(); // Bob reports_to Carol
+    db.link(1, 3, "authored", 1.0).unwrap(); // Alice authored Summit
+    db.link(5, 4, "authored", 1.0).unwrap(); // Carol authored Report
 
     (db, path)
 }

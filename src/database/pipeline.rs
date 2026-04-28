@@ -197,16 +197,18 @@ pub(crate) fn execute_pipeline<T: VectorType>(
     // ═══════════════════════════════════════════════════════
     //  L9: DPP 多样性采样
     // ═══════════════════════════════════════════════════════
-    if config.enable_advanced_pipeline && config.enable_dpp && expanded.len() > config.top_k {
-        if let Some(mut final_results) = apply_dpp(&mt, config, &expanded) {
-            // 🔌 Hook #6: on_post_search（DPP 分支）
-            {
-                let t0 = std::time::Instant::now();
-                hook.on_post_search(&mut final_results, ctx);
-                ctx.record_timing("hook_post_search", t0.elapsed());
-            }
-            return Ok(final_results);
+    if config.enable_advanced_pipeline
+        && config.enable_dpp
+        && expanded.len() > config.top_k
+        && let Some(mut final_results) = apply_dpp(&mt, config, &expanded)
+    {
+        // 🔌 Hook #6: on_post_search（DPP 分支）
+        {
+            let t0 = std::time::Instant::now();
+            hook.on_post_search(&mut final_results, ctx);
+            ctx.record_timing("hook_post_search", t0.elapsed());
         }
+        return Ok(final_results);
     }
 
     expanded.truncate(config.top_k);
@@ -274,7 +276,7 @@ fn recall_vector<T: VectorType>(
     let passes_filter = |id: NodeId| -> bool {
         match filter_ref {
             None => true,
-            Some(f) => mt.get_payload(id).map_or(false, |p| f.matches(p)),
+            Some(f) => mt.get_payload(id).is_some_and(|p| f.matches(p)),
         }
     };
 
@@ -352,11 +354,11 @@ fn bq_pipeline<T: VectorType + Sync>(
         let dist = bq_sigs[i].hamming_distance(&q_bq);
         if heap.len() < candidate_cnt {
             heap.push((dist, i));
-        } else if let Some(&(worst_dist, _)) = heap.peek() {
-            if dist < worst_dist {
-                heap.pop();
-                heap.push((dist, i));
-            }
+        } else if let Some(&(worst_dist, _)) = heap.peek()
+            && dist < worst_dist
+        {
+            heap.pop();
+            heap.push((dist, i));
         }
     }
 
@@ -379,63 +381,60 @@ fn bq_pipeline<T: VectorType + Sync>(
 
     // Stage 2: 可选 Int8 量化中间层（三级火箭）
     let int8_pool_ref = mt.int8_pool();
-    let final_candidates: Vec<usize> = if use_int8_rocket && int8_pool_ref.is_some() {
-        let i8pool = int8_pool_ref.unwrap();
-        let query_i8 = i8pool.quantize_query(query_vector);
-        let int8_top_n = (config.top_k * 10).max(50);
+    let final_candidates: Vec<usize> =
+        if let (true, Some(i8pool)) = (use_int8_rocket, int8_pool_ref) {
+            let query_i8 = i8pool.quantize_query(query_vector);
+            let int8_top_n = (config.top_k * 10).max(50);
 
-        let mut i8_heap: BinaryHeap<std::cmp::Reverse<(i32, usize)>> =
-            BinaryHeap::with_capacity(int8_top_n + 1);
+            let mut i8_heap: BinaryHeap<std::cmp::Reverse<(i32, usize)>> =
+                BinaryHeap::with_capacity(int8_top_n + 1);
 
-        for (iter_idx, &slot_idx) in bq_winners.iter().enumerate() {
-            if !i8pool.is_valid_index(slot_idx) {
-                continue;
-            }
-            // Int8 数据预取
-            #[cfg(target_arch = "x86_64")]
-            if iter_idx + 2 < bq_winners.len() {
-                let prefetch_idx = bq_winners[iter_idx + 2];
-                if i8pool.is_valid_index(prefetch_idx) {
-                    let prefetch_offset = prefetch_idx * dim;
-                    unsafe {
-                        _mm_prefetch(
-                            i8pool.data.as_ptr().add(prefetch_offset) as *const i8,
-                            _MM_HINT_T0,
-                        );
+            for (iter_idx, &slot_idx) in bq_winners.iter().enumerate() {
+                if !i8pool.is_valid_index(slot_idx) {
+                    continue;
+                }
+                // Int8 数据预取
+                #[cfg(target_arch = "x86_64")]
+                if iter_idx + 2 < bq_winners.len() {
+                    let prefetch_idx = bq_winners[iter_idx + 2];
+                    if i8pool.is_valid_index(prefetch_idx) {
+                        let prefetch_offset = prefetch_idx * dim;
+                        unsafe {
+                            _mm_prefetch(i8pool.data.as_ptr().add(prefetch_offset), _MM_HINT_T0);
+                        }
                     }
                 }
-            }
-            #[cfg(target_arch = "aarch64")]
-            if iter_idx + 2 < bq_winners.len() {
-                let prefetch_idx = bq_winners[iter_idx + 2];
-                if i8pool.is_valid_index(prefetch_idx) {
-                    let prefetch_offset = prefetch_idx * dim;
-                    unsafe {
-                        arm_prefetch(i8pool.data.as_ptr().add(prefetch_offset) as *const u8);
+                #[cfg(target_arch = "aarch64")]
+                if iter_idx + 2 < bq_winners.len() {
+                    let prefetch_idx = bq_winners[iter_idx + 2];
+                    if i8pool.is_valid_index(prefetch_idx) {
+                        let prefetch_offset = prefetch_idx * dim;
+                        unsafe {
+                            arm_prefetch(i8pool.data.as_ptr().add(prefetch_offset) as *const u8);
+                        }
                     }
                 }
-            }
 
-            let i8_score = i8pool.dot_score(slot_idx, &query_i8);
-            if i8_heap.len() < int8_top_n {
-                i8_heap.push(std::cmp::Reverse((i8_score, slot_idx)));
-            } else if let Some(&std::cmp::Reverse((worst_score, _))) = i8_heap.peek() {
-                if i8_score > worst_score {
+                let i8_score = i8pool.dot_score(slot_idx, &query_i8);
+                if i8_heap.len() < int8_top_n {
+                    i8_heap.push(std::cmp::Reverse((i8_score, slot_idx)));
+                } else if let Some(&std::cmp::Reverse((worst_score, _))) = i8_heap.peek()
+                    && i8_score > worst_score
+                {
                     i8_heap.pop();
                     i8_heap.push(std::cmp::Reverse((i8_score, slot_idx)));
                 }
             }
-        }
 
-        let mut elites: Vec<usize> = i8_heap
-            .into_iter()
-            .map(|std::cmp::Reverse((_, idx))| idx)
-            .collect();
-        elites.sort_unstable();
-        elites
-    } else {
-        bq_winners
-    };
+            let mut elites: Vec<usize> = i8_heap
+                .into_iter()
+                .map(|std::cmp::Reverse((_, idx))| idx)
+                .collect();
+            elites.sort_unstable();
+            elites
+        } else {
+            bq_winners
+        };
 
     // Stage 3: f32 AVX2+FMA 终极精排
     let mut refined = Vec::with_capacity(final_candidates.len());

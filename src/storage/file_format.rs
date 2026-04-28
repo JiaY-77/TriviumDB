@@ -194,7 +194,7 @@ fn save_tdb<T: VectorType>(
     let mut edge_block_size: u64 = 0;
     for (_src_id, edge) in &all_edges {
         // src(8) + dst(8) + label_len(2) + label_bytes + weight(4)
-        edge_block_size += 8 + 8 + 2 + edge.label.as_bytes().len() as u64 + 4;
+        edge_block_size += 8 + 8 + 2 + edge.label.len() as u64 + 4;
     }
     let bq_offset = edge_offset + edge_block_size;
 
@@ -356,7 +356,7 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
             )?;
             // 尝试从 BQ Block 恢复签名
             load_bq_block(&mut mt, bytes, bq_offset, mmap.len());
-            return Ok(mt);
+            Ok(mt)
         } else {
             tracing::warn!(
                 "检测到 .tdb/.vec 跨文件撕裂（.flush_ok 标记缺失或不匹配），\
@@ -571,7 +571,8 @@ fn load_bq_block<T: VectorType>(
     let bq_bytes = &bytes[data_start..data_end];
 
     // 检查对齐（BqSignature 为 [u64; 32]，需要 8 字节对齐）
-    let is_aligned = (bq_bytes.as_ptr() as usize) % std::mem::align_of::<BqSignature>() == 0;
+    let is_aligned =
+        (bq_bytes.as_ptr() as usize).is_multiple_of(std::mem::align_of::<BqSignature>());
 
     let sigs: Vec<BqSignature> = if is_aligned {
         // SAFETY: BqSignature: Pod + Zeroable + #[repr(C)]，对齐已验证，长度精确

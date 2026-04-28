@@ -116,10 +116,10 @@ pub fn betweenness_centrality<T: VectorType>(
 
             if let Some(edges) = mt.get_edges(v) {
                 for edge in edges {
-                    if let Some(lf) = label_filter {
-                        if edge.label != lf {
-                            continue;
-                        }
+                    if let Some(lf) = label_filter
+                        && edge.label != lf
+                    {
+                        continue;
                     }
                     let w = edge.target_id;
                     if !id_set.contains(&w) {
@@ -166,12 +166,12 @@ pub fn betweenness_centrality<T: VectorType>(
     }
 
     // 若使用采样，按比例放大
-    if let Some(k) = sample_size {
-        if k < n {
-            let scale = n as f64 / k as f64;
-            for val in centrality.values_mut() {
-                *val *= scale;
-            }
+    if let Some(k) = sample_size
+        && k < n
+    {
+        let scale = n as f64 / k as f64;
+        for val in centrality.values_mut() {
+            *val *= scale;
         }
     }
 

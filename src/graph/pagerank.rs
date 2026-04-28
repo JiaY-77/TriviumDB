@@ -86,10 +86,10 @@ pub fn pagerank<T: VectorType>(
 
             if let Some(edges) = mt.get_edges(src) {
                 for edge in edges {
-                    if let Some(lf) = label_filter {
-                        if edge.label != lf {
-                            continue;
-                        }
+                    if let Some(lf) = label_filter
+                        && edge.label != lf
+                    {
+                        continue;
                     }
                     let dst = edge.target_id;
                     if let Some(val) = new_scores.get_mut(&dst) {

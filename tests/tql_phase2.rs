@@ -406,7 +406,7 @@ fn 测试_投影裁剪_属性引用剥离向量() {
     assert!(!results.is_empty());
 
     for row in &results {
-        for (_var, node) in row {
+        for node in row.values() {
             // 投影裁剪后，仅属性引用的变量应无 vector 和 edges
             assert!(node.vector.is_empty(), "属性引用节点的 vector 应被裁剪");
             assert!(node.edges.is_empty(), "属性引用节点的 edges 应被裁剪");

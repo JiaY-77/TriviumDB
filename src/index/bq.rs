@@ -7,15 +7,9 @@ use bytemuck::{Pod, Zeroable};
 /// 将高精度的 f32 向量降维到 512 位，能使用位操作（XOR + Popcount）
 /// 实现超高吞吐量的 Hamming 距离初筛（粗排），替代千万级数据下昂贵的全局 f32 余弦。
 #[repr(C)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Pod, Zeroable, Default)]
 pub struct BqSignature {
     pub data: [u64; 32],
-}
-
-impl Default for BqSignature {
-    fn default() -> Self {
-        Self { data: [0; 32] }
-    }
 }
 
 impl BqSignature {

@@ -652,8 +652,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// let results = db.tql("FIND {type: \"event\", heat: {$gte: 0.7}} RETURN * LIMIT 10")?;
     /// ```
     pub fn tql(&self, input: &str) -> Result<crate::query::tql_executor::TqlResult<T>> {
-        let query =
-            crate::query::tql_parser::parse_tql(input).map_err(|e| TriviumError::QueryParse(e))?;
+        let query = crate::query::tql_parser::parse_tql(input).map_err(TriviumError::QueryParse)?;
         let mt = lock_or_recover(&self.memtable);
         crate::query::tql_executor::execute_tql(&query, &mt)
     }
@@ -678,7 +677,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         use crate::query::tql_executor::{MutationOp, TqlMutResult};
 
         let stmt = crate::query::tql_parser::parse_tql_statement(input)
-            .map_err(|e| TriviumError::QueryParse(e))?;
+            .map_err(TriviumError::QueryParse)?;
 
         match stmt {
             TqlStatement::Query(_) => {
@@ -732,25 +731,23 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                             // 优化：从 mutation AST 中提取变量名
                             if let TqlStatement::Mutation(ref m) =
                                 crate::query::tql_parser::parse_tql_statement(input)
-                                    .map_err(|e| TriviumError::QueryParse(e))?
-                            {
-                                if let crate::query::tql_ast::MutationAction::Create(ref create) =
+                                    .map_err(TriviumError::QueryParse)?
+                                && let crate::query::tql_ast::MutationAction::Create(ref create) =
                                     m.action
-                                {
-                                    for edge in &create.edges {
-                                        if edge.label == label && edge.weight == weight {
-                                            if src_id == 0 {
-                                                if let Some(&id) = var_id_map.get(&edge.src_var) {
-                                                    src_id = id;
-                                                }
-                                            }
-                                            if dst_id == 0 {
-                                                if let Some(&id) = var_id_map.get(&edge.dst_var) {
-                                                    dst_id = id;
-                                                }
-                                            }
-                                            break;
+                            {
+                                for edge in &create.edges {
+                                    if edge.label == label && edge.weight == weight {
+                                        if src_id == 0
+                                            && let Some(&id) = var_id_map.get(&edge.src_var)
+                                        {
+                                            src_id = id;
                                         }
+                                        if dst_id == 0
+                                            && let Some(&id) = var_id_map.get(&edge.dst_var)
+                                        {
+                                            dst_id = id;
+                                        }
+                                        break;
                                     }
                                 }
                             }

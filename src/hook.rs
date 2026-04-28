@@ -539,7 +539,7 @@ mod tests {
         // 所有方法应该什么都不做
         hook.on_pre_search(&mut vec, &mut config, &mut ctx);
         assert_eq!(vec, vec![1.0, 2.0, 3.0]); // 未被修改
-        assert_eq!(ctx.abort, false);
+        assert!(!ctx.abort);
 
         assert!(hook.on_custom_recall(&vec, &config, &mut ctx).is_none());
 

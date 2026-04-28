@@ -870,7 +870,7 @@ impl TqlParser {
             }
             TqlToken::Set | TqlToken::Delete | TqlToken::Detach => {
                 // 无 MATCH 前缀的 SET/DELETE → 语法错误
-                Err(format!("SET/DELETE requires a preceding MATCH clause"))
+                Err("SET/DELETE requires a preceding MATCH clause".to_string())
             }
             TqlToken::Match if self.is_dml_after_match() => {
                 let mutation = self.parse_match_then_dml()?;
@@ -1010,7 +1010,7 @@ impl TqlParser {
                 self.expect(&TqlToken::RParen)?;
 
                 // 如果目标节点有 payload，添加为新节点
-                let needs_create_dst = !dst_payload.as_object().map_or(true, |m| m.is_empty());
+                let needs_create_dst = !dst_payload.as_object().is_none_or(|m| m.is_empty());
                 if needs_create_dst {
                     nodes.push(CreateNode {
                         var: Some(dst_var.clone()),

@@ -13,7 +13,7 @@ fn test_reverse_edge_avalanche_deletion() {
     db.disable_auto_compaction();
 
     let center_id = db
-        .insert(&vec![0.0; 8], serde_json::json!({"role": "center"}))
+        .insert(&[0.0; 8], serde_json::json!({"role": "center"}))
         .unwrap();
 
     let num_fans = 10_000;
@@ -22,7 +22,7 @@ fn test_reverse_edge_avalanche_deletion() {
     let mut fan_ids = Vec::new();
     for i in 0..num_fans {
         let fan_id = db
-            .insert(&vec![1.0; 8], serde_json::json!({"role": "fan", "id": i}))
+            .insert(&[1.0; 8], serde_json::json!({"role": "fan", "id": i}))
             .unwrap();
         db.link(fan_id, center_id, "follows", 1.0).unwrap();
         fan_ids.push(fan_id);
@@ -67,8 +67,8 @@ fn test_reverse_edge_avalanche_deletion() {
     }
 
     // Verify unlink cleanup logic correctly removes reverse edge
-    let node_a = db.insert(&vec![0.0; 8], serde_json::json!("A")).unwrap();
-    let node_b = db.insert(&vec![0.0; 8], serde_json::json!("B")).unwrap();
+    let node_a = db.insert(&[0.0; 8], serde_json::json!("A")).unwrap();
+    let node_b = db.insert(&[0.0; 8], serde_json::json!("B")).unwrap();
     db.link(node_a, node_b, "test", 1.0).unwrap();
     db.unlink(node_a, node_b).unwrap();
     // After unlink, deleting B should theoretically not need to touch A anymore.

@@ -103,11 +103,10 @@ pub fn run_leiden(adj: &AdjacencySnapshot, config: &LeidenConfig) -> LeidenResul
                 if let Some((&best_c, _)) = votes
                     .iter()
                     .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    && best_c != current_c
                 {
-                    if best_c != current_c {
-                        node_to_cluster.insert(n, best_c);
-                        changed = true;
-                    }
+                    node_to_cluster.insert(n, best_c);
+                    changed = true;
                 }
             }
         }

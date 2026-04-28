@@ -47,10 +47,10 @@ pub fn shortest_path<T: VectorType>(
         if let Some(edges) = mt.get_edges(current) {
             for edge in edges {
                 // 标签过滤
-                if let Some(lf) = label_filter {
-                    if edge.label != lf {
-                        continue;
-                    }
+                if let Some(lf) = label_filter
+                    && edge.label != lf
+                {
+                    continue;
                 }
 
                 let next = edge.target_id;
@@ -136,10 +136,10 @@ fn dfs_variable_length<T: VectorType>(
     if let Some(edges) = mt.get_edges(current) {
         for edge in edges {
             // 标签过滤
-            if let Some(lf) = label_filter {
-                if edge.label != lf {
-                    continue;
-                }
+            if let Some(lf) = label_filter
+                && edge.label != lf
+            {
+                continue;
             }
 
             let next = edge.target_id;
@@ -230,10 +230,10 @@ fn dfs_all_paths<T: VectorType>(
 
     if let Some(edges) = mt.get_edges(current) {
         for edge in edges {
-            if let Some(lf) = label_filter {
-                if edge.label != lf {
-                    continue;
-                }
+            if let Some(lf) = label_filter
+                && edge.label != lf
+            {
+                continue;
             }
 
             let next = edge.target_id;
@@ -300,15 +300,15 @@ pub fn k_hop_neighbors<T: VectorType>(
 
         if let Some(edges) = mt.get_edges(current) {
             for edge in edges {
-                if let Some(lf) = label_filter {
-                    if edge.label != lf {
-                        continue;
-                    }
+                if let Some(lf) = label_filter
+                    && edge.label != lf
+                {
+                    continue;
                 }
 
                 let next = edge.target_id;
-                if !distances.contains_key(&next) {
-                    distances.insert(next, depth + 1);
+                if let std::collections::hash_map::Entry::Vacant(e) = distances.entry(next) {
+                    e.insert(depth + 1);
                     queue.push_back((next, depth + 1));
                 }
             }

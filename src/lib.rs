@@ -1,3 +1,9 @@
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::ptr_arg)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::suspicious_open_options)]
+#![allow(clippy::unnecessary_sort_by)]
+
 pub mod database;
 pub mod error;
 pub mod filter;

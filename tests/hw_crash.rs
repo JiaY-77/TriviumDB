@@ -345,10 +345,10 @@ fn assert_crash_and_recover(path: &str, mode: &str, label: &str) {
     // 验证 flushed 阶段节点的 payload 语义完整性
     let mut flushed = 0;
     for &id in &db.all_node_ids() {
-        if let Some(p) = db.get_payload(id) {
-            if p.get("phase").and_then(|v| v.as_str()) == Some("flushed") {
-                flushed += 1;
-            }
+        if let Some(p) = db.get_payload(id)
+            && p.get("phase").and_then(|v| v.as_str()) == Some("flushed")
+        {
+            flushed += 1;
         }
     }
     assert_eq!(flushed, 5, "{}: 5 个 flushed 节点 payload 应完整", label);
@@ -473,16 +473,16 @@ fn HW08_大Payload_8KB_WAL缓冲压力崩溃恢复() {
 
     // 验证大 payload 的数据完整性（不是被截断的 JSON）
     for &id in &db.all_node_ids() {
-        if let Some(p) = db.get_payload(id) {
-            if let Some(fat) = p.get("fat").and_then(|v| v.as_str()) {
-                assert_eq!(
-                    fat.len(),
-                    8000,
-                    "节点 {} 的 fat 字段应为 8000 字节，实际 {}",
-                    id,
-                    fat.len()
-                );
-            }
+        if let Some(p) = db.get_payload(id)
+            && let Some(fat) = p.get("fat").and_then(|v| v.as_str())
+        {
+            assert_eq!(
+                fat.len(),
+                8000,
+                "节点 {} 的 fat 字段应为 8000 字节，实际 {}",
+                id,
+                fat.len()
+            );
         }
     }
     eprintln!(

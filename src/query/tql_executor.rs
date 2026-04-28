@@ -141,10 +141,10 @@ fn execute_find<T: VectorType>(
         }
 
         // WHERE 二次过滤（FIND 场景下 var=None 作用于当前节点）
-        if let Some(pred) = &query.predicate {
-            if !eval_predicate_single(pred, id, mt) {
-                continue;
-            }
+        if let Some(pred) = &query.predicate
+            && !eval_predicate_single(pred, id, mt)
+        {
+            continue;
         }
 
         let node = match build_node(id, mt) {
@@ -268,10 +268,10 @@ fn tql_dfs<T: VectorType>(
     let node_pat = &pattern.nodes[layer_idx];
 
     // 内联 Filter 校验（Q1-B: 支持 Mongo 操作符）
-    if let Some(filter) = &node_pat.filter {
-        if !matches_filter_with_id(filter, current, mt) {
-            return Ok(true); // 不匹配，剪枝
-        }
+    if let Some(filter) = &node_pat.filter
+        && !matches_filter_with_id(filter, current, mt)
+    {
+        return Ok(true); // 不匹配，剪枝
     }
 
     // 环境入栈
@@ -294,12 +294,11 @@ fn tql_dfs<T: VectorType>(
         if passed {
             let mut row = HashMap::new();
             for var in return_vars {
-                if let Some(&idx) = var_map.get(var) {
-                    if let Some(id) = env[idx] {
-                        if let Some(node) = build_node(id, mt) {
-                            row.insert(var.clone(), node);
-                        }
-                    }
+                if let Some(&idx) = var_map.get(var)
+                    && let Some(id) = env[idx]
+                    && let Some(node) = build_node(id, mt)
+                {
+                    row.insert(var.clone(), node);
                 }
             }
             results.push(row);
@@ -471,14 +470,14 @@ fn collect_neighbors<T: VectorType>(
     let mut neighbors = Vec::new();
 
     // 正向邻居：current 的出边目标
-    if direction == EdgeDirection::Forward || direction == EdgeDirection::Both {
-        if let Some(edges) = mt.get_edges(current) {
-            for edge in edges {
-                if !labels.is_empty() && !labels.contains(&edge.label) {
-                    continue;
-                }
-                neighbors.push(edge.target_id);
+    if (direction == EdgeDirection::Forward || direction == EdgeDirection::Both)
+        && let Some(edges) = mt.get_edges(current)
+    {
+        for edge in edges {
+            if !labels.is_empty() && !labels.contains(&edge.label) {
+                continue;
             }
+            neighbors.push(edge.target_id);
         }
     }
 
@@ -570,10 +569,10 @@ fn execute_search<T: VectorType>(
             break;
         }
 
-        if let Some(pred) = &query.predicate {
-            if !eval_predicate_single(pred, id, mt) {
-                continue;
-            }
+        if let Some(pred) = &query.predicate
+            && !eval_predicate_single(pred, id, mt)
+        {
+            continue;
         }
 
         if let Some(node) = build_node(id, mt) {
@@ -682,14 +681,14 @@ fn eval_tql_expr<T: VectorType>(
 ) -> RuntimeValue {
     match expr {
         TqlExpr::Property { var, field } => {
-            if let Some(&idx) = var_map.get(var) {
-                if let Some(id) = env[idx] {
-                    if field == "id" {
-                        return RuntimeValue::Int(id as i64);
-                    }
-                    if let Some(payload) = mt.get_payload(id) {
-                        return json_to_runtime(&payload[field]);
-                    }
+            if let Some(&idx) = var_map.get(var)
+                && let Some(id) = env[idx]
+            {
+                if field == "id" {
+                    return RuntimeValue::Int(id as i64);
+                }
+                if let Some(payload) = mt.get_payload(id) {
+                    return json_to_runtime(&payload[field]);
                 }
             }
             RuntimeValue::Null
@@ -813,10 +812,10 @@ fn find_tql_candidates<T: VectorType>(node_pat: &TqlNodePattern, mt: &MemTable<T
 
     for id in all_ids {
         // Filter 精确校验
-        if let Some(filter) = &node_pat.filter {
-            if !matches_filter_with_id(filter, id, mt) {
-                continue;
-            }
+        if let Some(filter) = &node_pat.filter
+            && !matches_filter_with_id(filter, id, mt)
+        {
+            continue;
         }
 
         candidates.push(id);
@@ -838,12 +837,11 @@ fn try_property_index_lookup<T: VectorType>(
         Filter::And(filters) => {
             // 在 AND 条件中找第一个可以使用索引的条件（选择性最强的）
             for f in filters {
-                if let Filter::Eq(key, val) = f {
-                    if key != "id" {
-                        if let Some(ids) = mt.find_by_property_index(key, val) {
-                            return Some(ids.to_vec());
-                        }
-                    }
+                if let Filter::Eq(key, val) = f
+                    && key != "id"
+                    && let Some(ids) = mt.find_by_property_index(key, val)
+                {
+                    return Some(ids.to_vec());
                 }
             }
             None
@@ -868,18 +866,18 @@ fn find_tql_candidates_optimized<T: VectorType>(
     }
 
     // 标签索引下推：起始节点无约束 + 第一条边有单标签
-    if let Some(edge_pat) = first_edge {
-        if !edge_pat.labels.is_empty() {
-            let mut src_set: HashSet<NodeId> = HashSet::new();
-            for label in &edge_pat.labels {
-                for &(src, _dst) in mt.get_edges_by_label(label) {
-                    src_set.insert(src);
-                }
+    if let Some(edge_pat) = first_edge
+        && !edge_pat.labels.is_empty()
+    {
+        let mut src_set: HashSet<NodeId> = HashSet::new();
+        for label in &edge_pat.labels {
+            for &(src, _dst) in mt.get_edges_by_label(label) {
+                src_set.insert(src);
             }
-            let mut candidates: Vec<NodeId> = src_set.into_iter().collect();
-            candidates.sort_unstable(); // 稳定输出顺序
-            return candidates;
         }
+        let mut candidates: Vec<NodeId> = src_set.into_iter().collect();
+        candidates.sort_unstable(); // 稳定输出顺序
+        return candidates;
     }
 
     // 兜底：全表扫描
@@ -1135,16 +1133,16 @@ fn apply_aggregation<T: VectorType>(results: TqlResult<T>, exprs: &[ReturnExpr])
 
     // 对每组计算聚合
     let mut output = Vec::new();
-    for (_key, rows) in &groups {
+    for rows in groups.values() {
         let mut result_row: HashMap<String, Node<T>> = HashMap::new();
 
         // 保留分组列的值（取组内第一行的绑定）
         if let Some(first_row) = rows.first() {
             for expr in &group_exprs {
-                if let Some(var) = first_var_from_kind(&expr.kind) {
-                    if let Some(node) = first_row.get(&var) {
-                        result_row.insert(var, node.clone());
-                    }
+                if let Some(var) = first_var_from_kind(&expr.kind)
+                    && let Some(node) = first_row.get(&var)
+                {
+                    result_row.insert(var, node.clone());
                 }
             }
         }
@@ -1364,7 +1362,7 @@ fn generate_explain_plan<T: VectorType>(query: &TqlQuery, mt: &MemTable<T>) -> T
         ReturnClause::All => "ALL (*)".to_string(),
         ReturnClause::Variables(vars) => format!("variables: [{}]", vars.join(", ")),
         ReturnClause::Expressions(exprs) => {
-            let descs: Vec<String> = exprs.iter().map(|e| format_return_expr(e)).collect();
+            let descs: Vec<String> = exprs.iter().map(format_return_expr).collect();
             format!("expressions: [{}]", descs.join(", "))
         }
     };
@@ -1437,13 +1435,13 @@ fn analyze_candidate_strategy<T: VectorType>(
         }
         return "filter_scan (with inline filter)".to_string();
     }
-    if let Some(edge_pat) = first_edge {
-        if !edge_pat.labels.is_empty() {
-            return format!(
-                "label_index pushdown (labels: [{}])",
-                edge_pat.labels.join(", ")
-            );
-        }
+    if let Some(edge_pat) = first_edge
+        && !edge_pat.labels.is_empty()
+    {
+        return format!(
+            "label_index pushdown (labels: [{}])",
+            edge_pat.labels.join(", ")
+        );
     }
     "full_scan O(N)".to_string()
 }
@@ -1705,13 +1703,13 @@ fn execute_delete<T: VectorType>(
 
     for row in &results {
         for var in vars {
-            if let Some(node) = row.get(var) {
-                if deleted.insert(node.id) {
-                    ops.push(MutationOp::DeleteNode {
-                        id: node.id,
-                        detach,
-                    });
-                }
+            if let Some(node) = row.get(var)
+                && deleted.insert(node.id)
+            {
+                ops.push(MutationOp::DeleteNode {
+                    id: node.id,
+                    detach,
+                });
             }
         }
     }
