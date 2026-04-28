@@ -52,12 +52,13 @@ pub fn pagerank<T: VectorType>(
     let out_degrees: HashMap<NodeId, usize> = all_ids
         .iter()
         .map(|&id| {
-            let deg = mt.get_edges(id).map(|edges| {
-                match label_filter {
+            let deg = mt
+                .get_edges(id)
+                .map(|edges| match label_filter {
                     None => edges.len(),
                     Some(lf) => edges.iter().filter(|e| e.label == lf).count(),
-                }
-            }).unwrap_or(0);
+                })
+                .unwrap_or(0);
             (id, deg)
         })
         .collect();

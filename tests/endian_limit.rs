@@ -2,11 +2,11 @@
 //! 跨平台字节序兼容 (Cross-Endian) 与 32 位寻址边界模拟
 //! 对标 SQLite 在跨平台/端序异常时安全降级而不是 Panic
 
+use std::fs::OpenOptions;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::panic::catch_unwind;
 use triviumdb::Database;
 use triviumdb::database::Config;
-use std::fs::OpenOptions;
-use std::io::{Read, Write, Seek, SeekFrom};
-use std::panic::catch_unwind;
 
 const DIM: usize = 4;
 
@@ -51,11 +51,12 @@ fn 测试_人为端序颠倒污染_魔数与长度域应有效拦截不崩溃() 
     }
 
     // 核心断言：绝不能因为读取被篡改的文件而发生 Segfault 或 Panic
-    let result = catch_unwind(|| {
-        Database::<f32>::open(&path, DIM)
-    });
+    let result = catch_unwind(|| Database::<f32>::open(&path, DIM));
 
-    assert!(result.is_ok(), "引擎读取了端序颠倒的文件，触发了极危 Panic 崩溃！");
+    assert!(
+        result.is_ok(),
+        "引擎读取了端序颠倒的文件，触发了极危 Panic 崩溃！"
+    );
     let load_res = result.unwrap();
     // 合法行为：
     //   1. Err(Corrupted) → 拒绝加载 ✅
@@ -80,15 +81,18 @@ fn 测试_超大维数模拟拦截_防平台指针溢出() {
 
     // 模拟恶意输入一个导致 u64 会溢出或撑爆 32位 内存寻址极限的维度
     let huge_dim = 1 << 30; // 给定一个约 10 亿的向量维度
-    
+
     // 不应 Panic 崩溃
     let result = catch_unwind(|| {
-        let config = Config { dim: huge_dim, ..Default::default() };
+        let config = Config {
+            dim: huge_dim,
+            ..Default::default()
+        };
         Database::<f32>::open_with_config(&path, config)
     });
 
     assert!(result.is_ok(), "加载非法超巨维度触发了 Panic 崩溃");
     // 不可能返回成功（因为 10 亿维度一创建就要预留大量空间，可能会 Err 或者被安全拒绝）
-    
+
     cleanup(&path);
 }

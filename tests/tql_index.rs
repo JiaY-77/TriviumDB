@@ -33,9 +33,21 @@ fn 测试_创建索引后_FIND加速() {
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
     // 先插入数据
-    db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice", "type": "person"})).unwrap();
-    db.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob", "type": "person"})).unwrap();
-    db.insert(&[0.0, 0.0, 1.0, 0.0], serde_json::json!({"name": "Summit", "type": "event"})).unwrap();
+    db.insert(
+        &[1.0, 0.0, 0.0, 0.0],
+        serde_json::json!({"name": "Alice", "type": "person"}),
+    )
+    .unwrap();
+    db.insert(
+        &[0.0, 1.0, 0.0, 0.0],
+        serde_json::json!({"name": "Bob", "type": "person"}),
+    )
+    .unwrap();
+    db.insert(
+        &[0.0, 0.0, 1.0, 0.0],
+        serde_json::json!({"name": "Summit", "type": "event"}),
+    )
+    .unwrap();
 
     // 创建索引（会回填已有数据）
     db.create_index("type");
@@ -57,17 +69,31 @@ fn 测试_创建索引后_MATCH加速() {
     cleanup(&path);
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
-    let alice = db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"})).unwrap();
-    let bob = db.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob"})).unwrap();
+    let alice = db
+        .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"}))
+        .unwrap();
+    let bob = db
+        .insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob"}))
+        .unwrap();
     db.link(alice, bob, "knows", 1.0).unwrap();
 
     // 创建 name 索引
     db.create_index("name");
 
     // MATCH 使用索引定位起点
-    let results = db.tql(r#"MATCH (a {name: "Alice"})-[:knows]->(b) RETURN b"#).unwrap();
+    let results = db
+        .tql(r#"MATCH (a {name: "Alice"})-[:knows]->(b) RETURN b"#)
+        .unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0]["b"].payload.get("name").unwrap().as_str().unwrap(), "Bob");
+    assert_eq!(
+        results[0]["b"]
+            .payload
+            .get("name")
+            .unwrap()
+            .as_str()
+            .unwrap(),
+        "Bob"
+    );
 
     drop(db);
     cleanup(&path);
@@ -87,8 +113,10 @@ fn 测试_新插入节点自动进入索引() {
     db.create_index("name");
 
     // 之后插入的节点应自动进入索引
-    db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"})).unwrap();
-    db.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob"})).unwrap();
+    db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"}))
+        .unwrap();
+    db.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob"}))
+        .unwrap();
 
     let results = db.tql(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
     assert_eq!(results.len(), 1);
@@ -108,10 +136,15 @@ fn 测试_更新后索引同步() {
 
     db.create_index("status");
 
-    db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice", "status": "active"})).unwrap();
+    db.insert(
+        &[1.0, 0.0, 0.0, 0.0],
+        serde_json::json!({"name": "Alice", "status": "active"}),
+    )
+    .unwrap();
 
     // 更新 status
-    db.tql_mut(r#"MATCH (a {name: "Alice"}) SET a.status == "archived""#).unwrap();
+    db.tql_mut(r#"MATCH (a {name: "Alice"}) SET a.status == "archived""#)
+        .unwrap();
 
     // 旧值查不到
     let results = db.tql(r#"FIND {status: "active"} RETURN *"#).unwrap();
@@ -133,8 +166,10 @@ fn 测试_删除后索引清理() {
 
     db.create_index("name");
 
-    db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"})).unwrap();
-    db.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob"})).unwrap();
+    db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"}))
+        .unwrap();
+    db.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob"}))
+        .unwrap();
 
     // 删除 Alice
     db.tql_mut(r#"MATCH (a {name: "Alice"}) DELETE a"#).unwrap();
@@ -162,7 +197,8 @@ fn 测试_删除索引后仍可查询() {
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
     db.create_index("name");
-    db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"})).unwrap();
+    db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"}))
+        .unwrap();
 
     // 有索引时可以查
     let results = db.tql(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
@@ -192,9 +228,21 @@ fn 测试_多字段索引() {
     db.create_index("name");
     db.create_index("type");
 
-    db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice", "type": "person"})).unwrap();
-    db.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Summit", "type": "event"})).unwrap();
-    db.insert(&[0.0, 0.0, 1.0, 0.0], serde_json::json!({"name": "Report", "type": "event"})).unwrap();
+    db.insert(
+        &[1.0, 0.0, 0.0, 0.0],
+        serde_json::json!({"name": "Alice", "type": "person"}),
+    )
+    .unwrap();
+    db.insert(
+        &[0.0, 1.0, 0.0, 0.0],
+        serde_json::json!({"name": "Summit", "type": "event"}),
+    )
+    .unwrap();
+    db.insert(
+        &[0.0, 0.0, 1.0, 0.0],
+        serde_json::json!({"name": "Report", "type": "event"}),
+    )
+    .unwrap();
 
     let results = db.tql(r#"FIND {type: "event"} RETURN *"#).unwrap();
     assert_eq!(results.len(), 2, "应找到 2 个 event");

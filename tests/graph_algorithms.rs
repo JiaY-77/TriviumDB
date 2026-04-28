@@ -8,10 +8,10 @@
 //! - 字段查找 (find_nodes_by_field): Payload JSON 字段匹配
 
 use std::collections::HashMap;
-use triviumdb::graph::pathfinding::*;
-use triviumdb::graph::wcc::*;
 use triviumdb::graph::centrality::*;
 use triviumdb::graph::pagerank::*;
+use triviumdb::graph::pathfinding::*;
+use triviumdb::graph::wcc::*;
 use triviumdb::storage::memtable::MemTable;
 
 const DIM: usize = 2;
@@ -31,8 +31,12 @@ const DIM: usize = 2;
 fn build_path_graph() -> MemTable<f32> {
     let mut mt = MemTable::new(DIM);
     for i in 1..=5 {
-        mt.insert_with_id(i, &[i as f32, 0.0], serde_json::json!({"name": format!("N{}", i)}))
-            .unwrap();
+        mt.insert_with_id(
+            i,
+            &[i as f32, 0.0],
+            serde_json::json!({"name": format!("N{}", i)}),
+        )
+        .unwrap();
     }
     mt.link(1, 2, "knows".into(), 1.0).unwrap();
     mt.link(2, 3, "knows".into(), 1.0).unwrap();
@@ -52,8 +56,12 @@ fn build_path_graph() -> MemTable<f32> {
 fn build_disconnected_graph() -> MemTable<f32> {
     let mut mt = MemTable::new(DIM);
     for i in 1..=6 {
-        mt.insert_with_id(i, &[i as f32, 0.0], serde_json::json!({"name": format!("N{}", i)}))
-            .unwrap();
+        mt.insert_with_id(
+            i,
+            &[i as f32, 0.0],
+            serde_json::json!({"name": format!("N{}", i)}),
+        )
+        .unwrap();
     }
     mt.link(1, 2, "knows".into(), 1.0).unwrap();
     mt.link(2, 3, "knows".into(), 1.0).unwrap();
@@ -74,8 +82,12 @@ fn build_disconnected_graph() -> MemTable<f32> {
 fn build_star_graph() -> MemTable<f32> {
     let mut mt = MemTable::new(DIM);
     for i in 1..=5 {
-        mt.insert_with_id(i, &[i as f32, 0.0], serde_json::json!({"name": format!("N{}", i)}))
-            .unwrap();
+        mt.insert_with_id(
+            i,
+            &[i as f32, 0.0],
+            serde_json::json!({"name": format!("N{}", i)}),
+        )
+        .unwrap();
     }
     mt.link(1, 2, "connects".into(), 1.0).unwrap();
     mt.link(1, 3, "connects".into(), 1.0).unwrap();
@@ -88,7 +100,8 @@ fn build_star_graph() -> MemTable<f32> {
 fn build_chain_graph() -> MemTable<f32> {
     let mut mt = MemTable::new(DIM);
     for i in 1..=5 {
-        mt.insert_with_id(i, &[i as f32, 0.0], serde_json::json!({})).unwrap();
+        mt.insert_with_id(i, &[i as f32, 0.0], serde_json::json!({}))
+            .unwrap();
     }
     mt.link(1, 2, "e".into(), 1.0).unwrap();
     mt.link(2, 3, "e".into(), 1.0).unwrap();
@@ -287,9 +300,24 @@ fn 边标签索引_delete后清理() {
 #[test]
 fn 字段查找_多匹配() {
     let mut mt: MemTable<f32> = MemTable::new(DIM);
-    mt.insert_with_id(1, &[1.0, 0.0], serde_json::json!({"type": "person", "name": "Alice"})).unwrap();
-    mt.insert_with_id(2, &[2.0, 0.0], serde_json::json!({"type": "person", "name": "Bob"})).unwrap();
-    mt.insert_with_id(3, &[3.0, 0.0], serde_json::json!({"type": "event", "name": "Meeting"})).unwrap();
+    mt.insert_with_id(
+        1,
+        &[1.0, 0.0],
+        serde_json::json!({"type": "person", "name": "Alice"}),
+    )
+    .unwrap();
+    mt.insert_with_id(
+        2,
+        &[2.0, 0.0],
+        serde_json::json!({"type": "person", "name": "Bob"}),
+    )
+    .unwrap();
+    mt.insert_with_id(
+        3,
+        &[3.0, 0.0],
+        serde_json::json!({"type": "event", "name": "Meeting"}),
+    )
+    .unwrap();
 
     let persons = mt.find_nodes_by_field("type", &serde_json::json!("person"));
     assert_eq!(persons.len(), 2);
@@ -335,7 +363,8 @@ fn WCC_空图() {
 #[test]
 fn WCC_单节点() {
     let mut mt: MemTable<f32> = MemTable::new(DIM);
-    mt.insert_with_id(1, &[1.0, 0.0], serde_json::json!({})).unwrap();
+    mt.insert_with_id(1, &[1.0, 0.0], serde_json::json!({}))
+        .unwrap();
     let components = weakly_connected_components(&mt);
     assert_eq!(components.len(), 1);
     assert_eq!(components[0], vec![1]);
@@ -444,7 +473,8 @@ fn PageRank_总和收敛到1() {
     let total: f64 = result.iter().map(|(_, pr)| pr).sum();
     assert!(
         (total - 1.0).abs() < 0.01,
-        "PageRank 总和应接近 1.0，实际为 {}", total
+        "PageRank 总和应接近 1.0，实际为 {}",
+        total
     );
 }
 
@@ -462,7 +492,10 @@ fn PageRank_标签过滤() {
     let config = PageRankConfig::default();
     let result = pagerank(&mt, &config, Some("knows"));
     let pr_map: HashMap<u64, f64> = result.into_iter().collect();
-    assert!(pr_map[&3] > pr_map[&1], "节点 3 接收了 knows 链的全部权重传播");
+    assert!(
+        pr_map[&3] > pr_map[&1],
+        "节点 3 接收了 knows 链的全部权重传播"
+    );
 }
 
 #[test]

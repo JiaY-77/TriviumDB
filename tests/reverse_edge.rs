@@ -12,14 +12,18 @@ fn test_reverse_edge_avalanche_deletion() {
     let mut db = Database::<f32>::open(db_path, 8).unwrap();
     db.disable_auto_compaction();
 
-    let center_id = db.insert(&vec![0.0; 8], serde_json::json!({"role": "center"})).unwrap();
+    let center_id = db
+        .insert(&vec![0.0; 8], serde_json::json!({"role": "center"}))
+        .unwrap();
 
     let num_fans = 10_000;
-    
+
     // Create fan nodes and link to center
     let mut fan_ids = Vec::new();
     for i in 0..num_fans {
-        let fan_id = db.insert(&vec![1.0; 8], serde_json::json!({"role": "fan", "id": i})).unwrap();
+        let fan_id = db
+            .insert(&vec![1.0; 8], serde_json::json!({"role": "fan", "id": i}))
+            .unwrap();
         db.link(fan_id, center_id, "follows", 1.0).unwrap();
         fan_ids.push(fan_id);
     }
@@ -38,10 +42,16 @@ fn test_reverse_edge_avalanche_deletion() {
     db.delete(center_id).unwrap();
     let elapsed = start.elapsed();
 
-    println!("Deleted center node with {} incoming edges in {:?}", num_fans, elapsed);
+    println!(
+        "Deleted center node with {} incoming edges in {:?}",
+        num_fans, elapsed
+    );
 
     // Verify deletion speed (should be virtually instantaneous, < 500ms even in debug mode)
-    assert!(elapsed.as_millis() < 500, "Deletion took too long, might be hitting O(E) avalanche!");
+    assert!(
+        elapsed.as_millis() < 500,
+        "Deletion took too long, might be hitting O(E) avalanche!"
+    );
 
     // Verify correctness: center is gone
     assert!(db.get(center_id).is_none());
@@ -50,7 +60,10 @@ fn test_reverse_edge_avalanche_deletion() {
     // Verify correctness: all fans have NO outgoing edges pointing to center!
     for fan_id in &fan_ids {
         let fan_node = db.get(*fan_id).unwrap();
-        assert!(fan_node.edges.is_empty(), "Fan should not have any remaining edges to the deleted center");
+        assert!(
+            fan_node.edges.is_empty(),
+            "Fan should not have any remaining edges to the deleted center"
+        );
     }
 
     // Verify unlink cleanup logic correctly removes reverse edge

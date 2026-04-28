@@ -7,10 +7,10 @@
 //! - Mmap / Rom 模式 flush 往返
 //! - 删除节点后持久化完整性
 
+use std::path::Path;
+use triviumdb::Database;
 use triviumdb::database::{Config, StorageMode};
 use triviumdb::storage::wal::SyncMode;
-use triviumdb::Database;
-use std::path::Path;
 
 const DIM: usize = 4;
 
@@ -55,7 +55,11 @@ fn Rom模式_持久化后重新加载_数据完整() {
     cleanup(&path);
 
     {
-        let config = Config { dim: DIM, storage_mode: StorageMode::Rom, ..Default::default() };
+        let config = Config {
+            dim: DIM,
+            storage_mode: StorageMode::Rom,
+            ..Default::default()
+        };
         let mut db = Database::<f32>::open_with_config(&path, config).unwrap();
         {
             let mut tx = db.begin_tx();
@@ -66,7 +70,11 @@ fn Rom模式_持久化后重新加载_数据完整() {
         db.flush().unwrap();
     }
 
-    let config = Config { dim: DIM, storage_mode: StorageMode::Rom, ..Default::default() };
+    let config = Config {
+        dim: DIM,
+        storage_mode: StorageMode::Rom,
+        ..Default::default()
+    };
     let db = Database::<f32>::open_with_config(&path, config).unwrap();
     assert_eq!(db.node_count(), 2, "Rom 模式重加载后应有 2 个节点");
 
@@ -82,12 +90,19 @@ fn P0_1_Mmap模式_flush后应生成flush_ok标记() {
 
     {
         let mut db = Database::<f32>::open(&path, DIM).unwrap();
-        { let mut tx = db.begin_tx(); tx.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({})); tx.commit().unwrap(); }
+        {
+            let mut tx = db.begin_tx();
+            tx.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}));
+            tx.commit().unwrap();
+        }
         db.flush().unwrap();
     }
 
     let ok_path = format!("{}.flush_ok", path);
-    assert!(Path::new(&ok_path).exists(), "Mmap 模式 flush 后应生成 .flush_ok 标记");
+    assert!(
+        Path::new(&ok_path).exists(),
+        "Mmap 模式 flush 后应生成 .flush_ok 标记"
+    );
 
     cleanup(&path);
 }
@@ -99,7 +114,11 @@ fn P0_1_删除flush_ok后重加载_应降级或拒绝但不panic() {
 
     {
         let mut db = Database::<f32>::open(&path, DIM).unwrap();
-        { let mut tx = db.begin_tx(); tx.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({})); tx.commit().unwrap(); }
+        {
+            let mut tx = db.begin_tx();
+            tx.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}));
+            tx.commit().unwrap();
+        }
         db.flush().unwrap();
     }
 
@@ -109,7 +128,9 @@ fn P0_1_删除flush_ok后重加载_应降级或拒绝但不panic() {
     // 允许 Err（拒绝加载）或 Ok（安全降级），不允许 panic
     let result = Database::<f32>::open(&path, DIM);
     match result {
-        Ok(db) => { let _ = db.node_count(); }
+        Ok(db) => {
+            let _ = db.node_count();
+        }
         Err(_) => { /* 拒绝加载也是合法行为 */ }
     }
 
@@ -122,14 +143,26 @@ fn P0_1_Rom模式_不应残留flush_ok标记() {
     cleanup(&path);
 
     {
-        let config = Config { dim: DIM, storage_mode: StorageMode::Rom, ..Default::default() };
+        let config = Config {
+            dim: DIM,
+            storage_mode: StorageMode::Rom,
+            ..Default::default()
+        };
         let mut db = Database::<f32>::open_with_config(&path, config).unwrap();
-        { let mut tx = db.begin_tx(); tx.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({})); tx.commit().unwrap(); }
+        {
+            let mut tx = db.begin_tx();
+            tx.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}));
+            tx.commit().unwrap();
+        }
         db.flush().unwrap();
     }
 
     // Rom 模式无论是否有 flush_ok，重新打开都不应 panic
-    let config = Config { dim: DIM, storage_mode: StorageMode::Rom, ..Default::default() };
+    let config = Config {
+        dim: DIM,
+        storage_mode: StorageMode::Rom,
+        ..Default::default()
+    };
     let result = Database::<f32>::open_with_config(&path, config);
     assert!(result.is_ok(), "Rom 模式重新打开不应失败");
 
@@ -147,22 +180,38 @@ fn P0_2_WAL恢复后_新插入不复用已有ID() {
     {
         let mut db = Database::<f32>::open(&path, DIM).unwrap();
         db.set_sync_mode(SyncMode::Full);
-        db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"seq": 1})).unwrap();
+        db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"seq": 1}))
+            .unwrap();
         db.flush().unwrap(); // id=1 落盘，WAL 被清除
 
         // 继续插入（仅写 WAL，不 flush）
-        last_id = db.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"seq": 2})).unwrap();
+        last_id = db
+            .insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"seq": 2}))
+            .unwrap();
         // drop 时 Drop trait 显式 flush WAL BufWriter
     }
 
     // WAL 文件应非空
-    let wal_size = std::fs::metadata(format!("{}.wal", path)).map(|m| m.len()).unwrap_or(0);
-    assert!(wal_size > 0, "Drop 后 WAL 应非空（实际 {} bytes）", wal_size);
+    let wal_size = std::fs::metadata(format!("{}.wal", path))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    assert!(
+        wal_size > 0,
+        "Drop 后 WAL 应非空（实际 {} bytes）",
+        wal_size
+    );
 
     {
         let mut db = Database::<f32>::open(&path, DIM).unwrap();
-        let new_id = db.insert(&[0.0, 0.0, 1.0, 0.0], serde_json::json!({"seq": 3})).unwrap();
-        assert!(new_id > last_id, "WAL 回放后 next_id 应已推进：new_id={}, last_id={}", new_id, last_id);
+        let new_id = db
+            .insert(&[0.0, 0.0, 1.0, 0.0], serde_json::json!({"seq": 3}))
+            .unwrap();
+        assert!(
+            new_id > last_id,
+            "WAL 回放后 next_id 应已推进：new_id={}, last_id={}",
+            new_id,
+            last_id
+        );
         assert!(db.get(last_id).is_some(), "WAL 回放应恢复 seq=2 的节点");
     }
 
@@ -186,7 +235,11 @@ fn 删除后持久化再加载_节点确实消失() {
             tx.commit().unwrap()
         };
         del_id = ids[0];
-        { let mut tx = db.begin_tx(); tx.delete(del_id); tx.commit().unwrap(); }
+        {
+            let mut tx = db.begin_tx();
+            tx.delete(del_id);
+            tx.commit().unwrap();
+        }
         db.flush().unwrap();
     }
 

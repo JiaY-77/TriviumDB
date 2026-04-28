@@ -11,7 +11,9 @@ fn generate_vector(dim: usize) -> Vec<f32> {
     (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect()
 }
 
-fn db_path(name: &str) -> String { format!("bench_query_{}.tdb", name) }
+fn db_path(name: &str) -> String {
+    format!("bench_query_{}.tdb", name)
+}
 
 fn cleanup(path: &str) {
     for ext in &["", ".wal", ".vec", ".lock", ".flush_ok"] {
@@ -32,16 +34,18 @@ fn build_test_db(name: &str, node_count: usize) -> Database<f32> {
 
     for i in 0..node_count {
         let cat = categories[i % categories.len()];
-        let id = db.insert(
-            &generate_vector(DIM),
-            json!({
-                "type": cat,
-                "name": format!("node_{}", i),
-                "score": rng.gen_range(0.0..1.0_f64),
-                "priority": rng.gen_range(1..=10_u32),
-                "active": rng.gen_bool(0.7),
-            }),
-        ).unwrap();
+        let id = db
+            .insert(
+                &generate_vector(DIM),
+                json!({
+                    "type": cat,
+                    "name": format!("node_{}", i),
+                    "score": rng.gen_range(0.0..1.0_f64),
+                    "priority": rng.gen_range(1..=10_u32),
+                    "active": rng.gen_bool(0.7),
+                }),
+            )
+            .unwrap();
         ids.push(id);
     }
 
@@ -50,8 +54,13 @@ fn build_test_db(name: &str, node_count: usize) -> Database<f32> {
         for _ in 0..3 {
             let target = ids[rng.gen_range(0..node_count)];
             if ids[i] != target {
-                db.link(ids[i], target, categories[rng.gen_range(0..categories.len())], 
-                    rng.gen_range(0.1..1.0)).unwrap();
+                db.link(
+                    ids[i],
+                    target,
+                    categories[rng.gen_range(0..categories.len())],
+                    rng.gen_range(0.1..1.0),
+                )
+                .unwrap();
             }
         }
     }
@@ -82,7 +91,10 @@ fn bench_tql_match_by_prop(c: &mut Criterion) {
     let db = build_test_db("tql_match_prop", 5000);
 
     c.bench_function("tql_match_by_prop_no_index", |b| {
-        b.iter(|| db.tql(black_box("MATCH (a {type: \"event\"})-[]->(b) RETURN b")).unwrap())
+        b.iter(|| {
+            db.tql(black_box("MATCH (a {type: \"event\"})-[]->(b) RETURN b"))
+                .unwrap()
+        })
     });
 
     cleanup(&db_path("tql_match_prop"));
@@ -95,7 +107,8 @@ fn bench_tql_match_with_where(c: &mut Criterion) {
 
     c.bench_function("tql_match_where_clause", |b| {
         let q = format!(
-            "MATCH (a {{id: {}}})-[]->(b) WHERE b.priority > 5 RETURN b", anchor
+            "MATCH (a {{id: {}}})-[]->(b) WHERE b.priority > 5 RETURN b",
+            anchor
         );
         b.iter(|| db.tql(black_box(&q)).unwrap())
     });
@@ -107,7 +120,10 @@ fn bench_tql_find_no_index(c: &mut Criterion) {
     let db = build_test_db("tql_find_noidx", 5000);
 
     c.bench_function("tql_find_eq_no_index_5k", |b| {
-        b.iter(|| db.tql(black_box("FIND {type: \"person\"} RETURN *")).unwrap())
+        b.iter(|| {
+            db.tql(black_box("FIND {type: \"person\"} RETURN *"))
+                .unwrap()
+        })
     });
 
     cleanup(&db_path("tql_find_noidx"));
@@ -127,7 +143,10 @@ fn bench_tql_find_with_index(c: &mut Criterion) {
     db.create_index("type");
 
     c.bench_function("tql_find_eq_with_index_5k", |b| {
-        b.iter(|| db.tql(black_box("FIND {type: \"person\"} RETURN *")).unwrap())
+        b.iter(|| {
+            db.tql(black_box("FIND {type: \"person\"} RETURN *"))
+                .unwrap()
+        })
     });
 
     drop(db);
@@ -165,7 +184,11 @@ fn bench_tql_set(c: &mut Criterion) {
 
     // 预插入节点
     for i in 0..1000u32 {
-        db.insert(&generate_vector(DIM), json!({"name": format!("n{}", i), "val": 0})).unwrap();
+        db.insert(
+            &generate_vector(DIM),
+            json!({"name": format!("n{}", i), "val": 0}),
+        )
+        .unwrap();
     }
 
     let ids = db.all_node_ids();
@@ -195,18 +218,22 @@ fn bench_tql_delete(c: &mut Criterion) {
         db.insert(
             &generate_vector(DIM),
             json!({"type": "disposable", "seq": i}),
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     c.bench_function("tql_mut_detach_delete", |b| {
         b.iter(|| {
             // 删除后重新插入以保持可重复
-            let _ = db.tql_mut(black_box("MATCH (a {type: \"disposable\"}) DETACH DELETE a"));
+            let _ = db.tql_mut(black_box(
+                "MATCH (a {type: \"disposable\"}) DETACH DELETE a",
+            ));
             for i in 0..10u32 {
                 db.insert(
                     &generate_vector(DIM),
                     json!({"type": "disposable", "seq": i}),
-                ).unwrap();
+                )
+                .unwrap();
             }
         })
     });
@@ -231,7 +258,8 @@ fn bench_create_index(c: &mut Criterion) {
         db.insert(
             &generate_vector(DIM),
             json!({"category": format!("cat_{}", i % 50), "val": i}),
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     c.bench_function("create_index_5k_nodes", |b| {
@@ -306,7 +334,8 @@ fn bench_filter_via_tql(c: &mut Criterion) {
 
     c.bench_function("tql_find_eq_5k", |b| {
         b.iter(|| {
-            db.tql(black_box("FIND {type: \"event\"} RETURN *")).unwrap()
+            db.tql(black_box("FIND {type: \"event\"} RETURN *"))
+                .unwrap()
         })
     });
 
@@ -318,7 +347,8 @@ fn bench_filter_complex_via_tql(c: &mut Criterion) {
 
     c.bench_function("tql_find_complex_5k", |b| {
         b.iter(|| {
-            db.tql(black_box("FIND {type: \"event\", active: true} RETURN *")).unwrap()
+            db.tql(black_box("FIND {type: \"event\", active: true} RETURN *"))
+                .unwrap()
         })
     });
 
@@ -361,13 +391,19 @@ fn bench_index_vs_no_index(c: &mut Criterion) {
     let mut group = c.benchmark_group("index_comparison_10k");
 
     group.bench_function("find_type_no_index", |b| {
-        b.iter(|| db.tql(black_box("FIND {type: \"event\"} RETURN *")).unwrap())
+        b.iter(|| {
+            db.tql(black_box("FIND {type: \"event\"} RETURN *"))
+                .unwrap()
+        })
     });
 
     db.create_index("type");
 
     group.bench_function("find_type_with_index", |b| {
-        b.iter(|| db.tql(black_box("FIND {type: \"event\"} RETURN *")).unwrap())
+        b.iter(|| {
+            db.tql(black_box("FIND {type: \"event\"} RETURN *"))
+                .unwrap()
+        })
     });
 
     group.finish();

@@ -19,7 +19,11 @@ fn flatten_and_hash_json(prefix: &str, value: &serde_json::Value, sig: &mut u64)
     match value {
         serde_json::Value::Object(map) => {
             for (k, v) in map {
-                let new_prefix = if prefix.is_empty() { k.clone() } else { format!("{}.{}", prefix, k) };
+                let new_prefix = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{}.{}", prefix, k)
+                };
                 flatten_and_hash_json(&new_prefix, v, sig);
             }
         }
@@ -523,12 +527,18 @@ impl<T: VectorType> MemTable<T> {
 
     /// 获取指向 id 的所有源节点（反向边）
     pub fn get_incoming_sources(&self, id: NodeId) -> &[NodeId] {
-        self.incoming_edges.get(&id).map(|v| v.as_slice()).unwrap_or(&[])
+        self.incoming_edges
+            .get(&id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// 按标签查询所有边 (src, dst) 对，O(1) 查找
     pub fn get_edges_by_label(&self, label: &str) -> &[(NodeId, NodeId)] {
-        self.label_index.get(label).map(|v| v.as_slice()).unwrap_or(&[])
+        self.label_index
+            .get(label)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// 按 Payload JSON 字段值查找节点（遍历匹配，适用于小规模场景）
@@ -577,7 +587,11 @@ impl<T: VectorType> MemTable<T> {
 
     /// 查询属性索引：O(1) 查找（如果字段有索引）
     /// 返回 Some(ids) 表示命中索引，None 表示该字段无索引
-    pub fn find_by_property_index(&self, field: &str, value: &serde_json::Value) -> Option<&[NodeId]> {
+    pub fn find_by_property_index(
+        &self,
+        field: &str,
+        value: &serde_json::Value,
+    ) -> Option<&[NodeId]> {
         if !self.indexed_fields.contains(field) {
             return None;
         }
@@ -639,7 +653,7 @@ impl<T: VectorType> MemTable<T> {
         if let Some(idx) = self.ids_to_indices.remove(&id) {
             self.vec_pool.zero_out(idx);
             self.indices_to_ids[idx] = 0; // 盖上墓碑标识，防止后续被误认
-            self.free_slots.push(idx);    // 抛入环保回收池，供下一个 insert 使用！
+            self.free_slots.push(idx); // 抛入环保回收池，供下一个 insert 使用！
         }
 
         // 2. 属性索引清理（必须在 payload 移除之前）
@@ -664,7 +678,10 @@ impl<T: VectorType> MemTable<T> {
                 if let Some(incoming) = self.incoming_edges.get_mut(&target) {
                     incoming.retain(|&src| src != id);
                 }
-                dirty_labels.entry(edge.label.clone()).or_default().push((id, target));
+                dirty_labels
+                    .entry(edge.label.clone())
+                    .or_default()
+                    .push((id, target));
             }
         }
 
@@ -674,7 +691,10 @@ impl<T: VectorType> MemTable<T> {
                 if let Some(edge_list) = self.edges.get_mut(&src_id) {
                     for edge in edge_list.iter() {
                         if edge.target_id == id {
-                            dirty_labels.entry(edge.label.clone()).or_default().push((src_id, id));
+                            dirty_labels
+                                .entry(edge.label.clone())
+                                .or_default()
+                                .push((src_id, id));
                         }
                     }
                     edge_list.retain(|e| e.target_id != id);
@@ -873,9 +893,10 @@ impl<T: VectorType> MemTable<T> {
             if let serde_json::Value::Object(map) = payload {
                 for (_key, value) in map {
                     if let serde_json::Value::String(text) = value
-                        && !text.is_empty() {
-                            self.text_index.add_text(id, text);
-                        }
+                        && !text.is_empty()
+                    {
+                        self.text_index.add_text(id, text);
+                    }
                 }
             }
         }

@@ -15,11 +15,11 @@
 
 use crate::VectorType;
 use crate::database::config::SearchConfig;
+use crate::error::Result;
 use crate::hook::{HookContext, SearchHook};
 use crate::index::brute_force;
 use crate::node::{NodeId, SearchHit};
 use crate::storage::memtable::MemTable;
-use crate::error::Result;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// 安全获取 Mutex 锁（与 mod.rs 中的相同实现）
@@ -289,7 +289,15 @@ fn recall_vector<T: VectorType>(
     let use_int8_rocket = total_nodes > 100_000;
 
     let vector_hits: Vec<SearchHit> = if use_bq {
-        bq_pipeline(mt, config, query_vector, vectors, dim, use_int8_rocket, &passes_filter)
+        bq_pipeline(
+            mt,
+            config,
+            query_vector,
+            vectors,
+            dim,
+            use_int8_rocket,
+            &passes_filter,
+        )
     } else {
         brute_force_pipeline(mt, config, query_vector, vectors, dim, &passes_filter)
     };
@@ -313,9 +321,8 @@ fn bq_pipeline<T: VectorType + Sync>(
 
     let q_bq = crate::index::bq::BqSignature::from_vector(query_vector);
     let slot_count = mt.internal_slot_count();
-    let candidate_cnt = (((mt.node_count() as f32) * config.bq_candidate_ratio)
-        .ceil() as usize)
-        .max(config.top_k);
+    let candidate_cnt =
+        (((mt.node_count() as f32) * config.bq_candidate_ratio).ceil() as usize).max(config.top_k);
 
     let bq_sigs = mt.bq_signatures_slice();
     let id_map = mt.internal_indices();
@@ -358,7 +365,7 @@ fn bq_pipeline<T: VectorType + Sync>(
     bq_winners.sort_unstable();
 
     #[cfg(target_arch = "x86_64")]
-    use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+    use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
 
     // ARM64 预取：使用通用的 __prefetch 内建
     #[cfg(target_arch = "aarch64")]
@@ -372,64 +379,63 @@ fn bq_pipeline<T: VectorType + Sync>(
 
     // Stage 2: 可选 Int8 量化中间层（三级火箭）
     let int8_pool_ref = mt.int8_pool();
-    let final_candidates: Vec<usize> =
-        if use_int8_rocket && int8_pool_ref.is_some() {
-            let i8pool = int8_pool_ref.unwrap();
-            let query_i8 = i8pool.quantize_query(query_vector);
-            let int8_top_n = (config.top_k * 10).max(50);
+    let final_candidates: Vec<usize> = if use_int8_rocket && int8_pool_ref.is_some() {
+        let i8pool = int8_pool_ref.unwrap();
+        let query_i8 = i8pool.quantize_query(query_vector);
+        let int8_top_n = (config.top_k * 10).max(50);
 
-            let mut i8_heap: BinaryHeap<std::cmp::Reverse<(i32, usize)>> =
-                BinaryHeap::with_capacity(int8_top_n + 1);
+        let mut i8_heap: BinaryHeap<std::cmp::Reverse<(i32, usize)>> =
+            BinaryHeap::with_capacity(int8_top_n + 1);
 
-            for (iter_idx, &slot_idx) in bq_winners.iter().enumerate() {
-                if !i8pool.is_valid_index(slot_idx) {
-                    continue;
-                }
-                // Int8 数据预取
-                #[cfg(target_arch = "x86_64")]
-                if iter_idx + 2 < bq_winners.len() {
-                    let prefetch_idx = bq_winners[iter_idx + 2];
-                    if i8pool.is_valid_index(prefetch_idx) {
-                        let prefetch_offset = prefetch_idx * dim;
-                        unsafe {
-                            _mm_prefetch(
-                                i8pool.data.as_ptr().add(prefetch_offset) as *const i8,
-                                _MM_HINT_T0,
-                            );
-                        }
+        for (iter_idx, &slot_idx) in bq_winners.iter().enumerate() {
+            if !i8pool.is_valid_index(slot_idx) {
+                continue;
+            }
+            // Int8 数据预取
+            #[cfg(target_arch = "x86_64")]
+            if iter_idx + 2 < bq_winners.len() {
+                let prefetch_idx = bq_winners[iter_idx + 2];
+                if i8pool.is_valid_index(prefetch_idx) {
+                    let prefetch_offset = prefetch_idx * dim;
+                    unsafe {
+                        _mm_prefetch(
+                            i8pool.data.as_ptr().add(prefetch_offset) as *const i8,
+                            _MM_HINT_T0,
+                        );
                     }
                 }
-                #[cfg(target_arch = "aarch64")]
-                if iter_idx + 2 < bq_winners.len() {
-                    let prefetch_idx = bq_winners[iter_idx + 2];
-                    if i8pool.is_valid_index(prefetch_idx) {
-                        let prefetch_offset = prefetch_idx * dim;
-                        unsafe {
-                            arm_prefetch(
-                                i8pool.data.as_ptr().add(prefetch_offset) as *const u8,
-                            );
-                        }
-                    }
-                }
-
-                let i8_score = i8pool.dot_score(slot_idx, &query_i8);
-                if i8_heap.len() < int8_top_n {
-                    i8_heap.push(std::cmp::Reverse((i8_score, slot_idx)));
-                } else if let Some(&std::cmp::Reverse((worst_score, _))) = i8_heap.peek() {
-                    if i8_score > worst_score {
-                        i8_heap.pop();
-                        i8_heap.push(std::cmp::Reverse((i8_score, slot_idx)));
+            }
+            #[cfg(target_arch = "aarch64")]
+            if iter_idx + 2 < bq_winners.len() {
+                let prefetch_idx = bq_winners[iter_idx + 2];
+                if i8pool.is_valid_index(prefetch_idx) {
+                    let prefetch_offset = prefetch_idx * dim;
+                    unsafe {
+                        arm_prefetch(i8pool.data.as_ptr().add(prefetch_offset) as *const u8);
                     }
                 }
             }
 
-            let mut elites: Vec<usize> =
-                i8_heap.into_iter().map(|std::cmp::Reverse((_, idx))| idx).collect();
-            elites.sort_unstable();
-            elites
-        } else {
-            bq_winners
-        };
+            let i8_score = i8pool.dot_score(slot_idx, &query_i8);
+            if i8_heap.len() < int8_top_n {
+                i8_heap.push(std::cmp::Reverse((i8_score, slot_idx)));
+            } else if let Some(&std::cmp::Reverse((worst_score, _))) = i8_heap.peek() {
+                if i8_score > worst_score {
+                    i8_heap.pop();
+                    i8_heap.push(std::cmp::Reverse((i8_score, slot_idx)));
+                }
+            }
+        }
+
+        let mut elites: Vec<usize> = i8_heap
+            .into_iter()
+            .map(|std::cmp::Reverse((_, idx))| idx)
+            .collect();
+        elites.sort_unstable();
+        elites
+    } else {
+        bq_winners
+    };
 
     // Stage 3: f32 AVX2+FMA 终极精排
     let mut refined = Vec::with_capacity(final_candidates.len());
@@ -442,10 +448,7 @@ fn bq_pipeline<T: VectorType + Sync>(
                 let next_offset = final_candidates[iter_idx + 1] * dim;
                 if next_offset + dim <= vectors.len() {
                     unsafe {
-                        _mm_prefetch(
-                            vectors.as_ptr().add(next_offset) as *const i8,
-                            _MM_HINT_T0,
-                        );
+                        _mm_prefetch(vectors.as_ptr().add(next_offset) as *const i8, _MM_HINT_T0);
                     }
                 }
             }
@@ -454,9 +457,7 @@ fn bq_pipeline<T: VectorType + Sync>(
                 let next_offset = final_candidates[iter_idx + 1] * dim;
                 if next_offset + dim <= vectors.len() {
                     unsafe {
-                        arm_prefetch(
-                            vectors.as_ptr().add(next_offset) as *const u8,
-                        );
+                        arm_prefetch(vectors.as_ptr().add(next_offset) as *const u8);
                     }
                 }
             }
@@ -516,11 +517,7 @@ fn brute_force_pipeline<T: VectorType + Sync>(
             {
                 return 0; // True Negative
             }
-            if passes_filter(id) {
-                id
-            } else {
-                0
-            }
+            if passes_filter(id) { id } else { 0 }
         },
     )
 }
@@ -631,12 +628,8 @@ fn apply_dpp<T: VectorType>(
         return None;
     }
 
-    let selected_idx = crate::cognitive::dpp_greedy(
-        &pool_vecs,
-        &pool_scores,
-        limit,
-        config.dpp_quality_weight,
-    );
+    let selected_idx =
+        crate::cognitive::dpp_greedy(&pool_vecs, &pool_scores, limit, config.dpp_quality_weight);
 
     let mut final_results = Vec::with_capacity(limit);
     for &idx in &selected_idx {
@@ -678,19 +671,31 @@ mod tests {
     }
 
     fn default_config() -> SearchConfig {
-        SearchConfig { top_k: 5, min_score: 0.0, expand_depth: 0, ..Default::default() }
+        SearchConfig {
+            top_k: 5,
+            min_score: 0.0,
+            expand_depth: 0,
+            ..Default::default()
+        }
     }
 
     // ════════ aggregate_seeds ════════
 
     #[test]
     fn test_aggregate_seeds_sorts_descending_and_truncates() {
-        let mt = make_memtable(2, &[
-            (1, vec![1.0, 0.0], serde_json::json!({"a": 1})),
-            (2, vec![0.0, 1.0], serde_json::json!({"a": 2})),
-            (3, vec![0.5, 0.5], serde_json::json!({"a": 3})),
-        ]);
-        let cfg = SearchConfig { top_k: 2, min_score: 0.0, ..Default::default() };
+        let mt = make_memtable(
+            2,
+            &[
+                (1, vec![1.0, 0.0], serde_json::json!({"a": 1})),
+                (2, vec![0.0, 1.0], serde_json::json!({"a": 2})),
+                (3, vec![0.5, 0.5], serde_json::json!({"a": 3})),
+            ],
+        );
+        let cfg = SearchConfig {
+            top_k: 2,
+            min_score: 0.0,
+            ..Default::default()
+        };
         let mut seed_map = std::collections::HashMap::new();
         seed_map.insert(1u64, 0.9f32);
         seed_map.insert(2, 0.5);
@@ -709,11 +714,18 @@ mod tests {
 
     #[test]
     fn test_aggregate_seeds_filters_by_min_score() {
-        let mt = make_memtable(2, &[
-            (1, vec![1.0, 0.0], serde_json::json!({})),
-            (2, vec![0.0, 1.0], serde_json::json!({})),
-        ]);
-        let cfg = SearchConfig { top_k: 10, min_score: 0.8, ..Default::default() };
+        let mt = make_memtable(
+            2,
+            &[
+                (1, vec![1.0, 0.0], serde_json::json!({})),
+                (2, vec![0.0, 1.0], serde_json::json!({})),
+            ],
+        );
+        let cfg = SearchConfig {
+            top_k: 10,
+            min_score: 0.8,
+            ..Default::default()
+        };
         let mut seed_map = std::collections::HashMap::new();
         seed_map.insert(1u64, 0.9f32);
         seed_map.insert(2, 0.3); // 低于 min_score
@@ -727,12 +739,16 @@ mod tests {
 
     #[test]
     fn test_aggregate_seeds_with_payload_filter() {
-        let mt = make_memtable(2, &[
-            (1, vec![1.0, 0.0], serde_json::json!({"role": "admin"})),
-            (2, vec![0.0, 1.0], serde_json::json!({"role": "user"})),
-        ]);
+        let mt = make_memtable(
+            2,
+            &[
+                (1, vec![1.0, 0.0], serde_json::json!({"role": "admin"})),
+                (2, vec![0.0, 1.0], serde_json::json!({"role": "user"})),
+            ],
+        );
         let cfg = SearchConfig {
-            top_k: 10, min_score: 0.0,
+            top_k: 10,
+            min_score: 0.0,
             payload_filter: Some(Filter::eq("role", serde_json::json!("admin"))),
             ..Default::default()
         };
@@ -761,14 +777,21 @@ mod tests {
 
     #[test]
     fn test_recall_vector_basic() {
-        let mut mt = make_memtable(3, &[
-            (1, vec![1.0, 0.0, 0.0], serde_json::json!({})),
-            (2, vec![0.0, 1.0, 0.0], serde_json::json!({})),
-            (3, vec![0.0, 0.0, 1.0], serde_json::json!({})),
-        ]);
+        let mut mt = make_memtable(
+            3,
+            &[
+                (1, vec![1.0, 0.0, 0.0], serde_json::json!({})),
+                (2, vec![0.0, 1.0, 0.0], serde_json::json!({})),
+                (3, vec![0.0, 0.0, 1.0], serde_json::json!({})),
+            ],
+        );
         mt.ensure_vectors_cache();
 
-        let cfg = SearchConfig { top_k: 2, min_score: 0.0, ..Default::default() };
+        let cfg = SearchConfig {
+            top_k: 2,
+            min_score: 0.0,
+            ..Default::default()
+        };
         let query: Vec<f32> = vec![1.0, 0.0, 0.0];
         let mut seed_map = std::collections::HashMap::new();
 
@@ -776,7 +799,11 @@ mod tests {
 
         assert!(!seed_map.is_empty(), "应召回至少一个节点");
         // 节点 1 与 query 完全对齐，得分最高
-        let best_id = seed_map.iter().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
+        let best_id = seed_map
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0;
         assert_eq!(*best_id, 1);
     }
 
@@ -792,14 +819,18 @@ mod tests {
 
     #[test]
     fn test_recall_vector_with_payload_filter() {
-        let mut mt = make_memtable(3, &[
-            (1, vec![1.0, 0.0, 0.0], serde_json::json!({"tag": "yes"})),
-            (2, vec![0.9, 0.1, 0.0], serde_json::json!({"tag": "no"})),
-        ]);
+        let mut mt = make_memtable(
+            3,
+            &[
+                (1, vec![1.0, 0.0, 0.0], serde_json::json!({"tag": "yes"})),
+                (2, vec![0.9, 0.1, 0.0], serde_json::json!({"tag": "no"})),
+            ],
+        );
         mt.ensure_vectors_cache();
 
         let cfg = SearchConfig {
-            top_k: 5, min_score: 0.0,
+            top_k: 5,
+            min_score: 0.0,
             payload_filter: Some(Filter::eq("tag", serde_json::json!("yes"))),
             ..Default::default()
         };
@@ -808,15 +839,24 @@ mod tests {
         recall_vector(&mt, &cfg, Some(&query), &mut seed_map);
 
         assert!(seed_map.contains_key(&1));
-        assert!(!seed_map.contains_key(&2), "node 2 应被 payload_filter 过滤");
+        assert!(
+            !seed_map.contains_key(&2),
+            "node 2 应被 payload_filter 过滤"
+        );
     }
 
     // ════════ recall_text ════════
 
     #[test]
     fn test_recall_text_disabled_is_noop() {
-        let mt = make_memtable(2, &[(1, vec![1.0, 0.0], serde_json::json!({"text": "hello"}))]);
-        let cfg = SearchConfig { enable_text_hybrid_search: false, ..Default::default() };
+        let mt = make_memtable(
+            2,
+            &[(1, vec![1.0, 0.0], serde_json::json!({"text": "hello"}))],
+        );
+        let cfg = SearchConfig {
+            enable_text_hybrid_search: false,
+            ..Default::default()
+        };
         let mut seed_map = std::collections::HashMap::new();
         recall_text(&mt, &cfg, Some("hello"), &mut seed_map);
         assert!(seed_map.is_empty());
@@ -824,8 +864,14 @@ mod tests {
 
     #[test]
     fn test_recall_text_none_query_is_noop() {
-        let mt = make_memtable(2, &[(1, vec![1.0, 0.0], serde_json::json!({"text": "hello"}))]);
-        let cfg = SearchConfig { enable_text_hybrid_search: true, ..Default::default() };
+        let mt = make_memtable(
+            2,
+            &[(1, vec![1.0, 0.0], serde_json::json!({"text": "hello"}))],
+        );
+        let cfg = SearchConfig {
+            enable_text_hybrid_search: true,
+            ..Default::default()
+        };
         let mut seed_map = std::collections::HashMap::new();
         recall_text(&mt, &cfg, None, &mut seed_map);
         assert!(seed_map.is_empty());
@@ -837,7 +883,10 @@ mod tests {
     fn test_recall_residual_disabled_is_noop() {
         let mut mt = make_memtable(3, &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))]);
         mt.ensure_vectors_cache();
-        let cfg = SearchConfig { enable_advanced_pipeline: false, ..Default::default() };
+        let cfg = SearchConfig {
+            enable_advanced_pipeline: false,
+            ..Default::default()
+        };
         let query = vec![1.0, 0.0, 0.0];
         let mut seed_map = std::collections::HashMap::new();
         seed_map.insert(1u64, 0.9f32);
@@ -851,7 +900,9 @@ mod tests {
         let mut mt = make_memtable(3, &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))]);
         mt.ensure_vectors_cache();
         let cfg = SearchConfig {
-            enable_advanced_pipeline: true, enable_sparse_residual: true, ..Default::default()
+            enable_advanced_pipeline: true,
+            enable_sparse_residual: true,
+            ..Default::default()
         };
         let query = vec![1.0, 0.0, 0.0];
         let mut seed_map = std::collections::HashMap::new();
@@ -863,14 +914,30 @@ mod tests {
 
     #[test]
     fn test_apply_dpp_returns_none_when_pool_too_small() {
-        let mt = make_memtable(3, &[
-            (1, vec![1.0, 0.0, 0.0], serde_json::json!({})),
-            (2, vec![0.0, 1.0, 0.0], serde_json::json!({})),
-        ]);
-        let cfg = SearchConfig { top_k: 5, enable_dpp: true, dpp_quality_weight: 1.0, ..Default::default() };
+        let mt = make_memtable(
+            3,
+            &[
+                (1, vec![1.0, 0.0, 0.0], serde_json::json!({})),
+                (2, vec![0.0, 1.0, 0.0], serde_json::json!({})),
+            ],
+        );
+        let cfg = SearchConfig {
+            top_k: 5,
+            enable_dpp: true,
+            dpp_quality_weight: 1.0,
+            ..Default::default()
+        };
         let expanded = vec![
-            SearchHit { id: 1, score: 0.9, payload: serde_json::json!({}) },
-            SearchHit { id: 2, score: 0.5, payload: serde_json::json!({}) },
+            SearchHit {
+                id: 1,
+                score: 0.9,
+                payload: serde_json::json!({}),
+            },
+            SearchHit {
+                id: 2,
+                score: 0.5,
+                payload: serde_json::json!({}),
+            },
         ];
         // pool_valid.len() <= top_k → 返回 None
         assert!(apply_dpp(&mt, &cfg, &expanded).is_none());
@@ -878,18 +945,42 @@ mod tests {
 
     #[test]
     fn test_apply_dpp_selects_diverse_subset() {
-        let mt = make_memtable(3, &[
-            (1, vec![1.0, 0.0, 0.0], serde_json::json!({})),
-            (2, vec![0.99, 0.01, 0.0], serde_json::json!({})),
-            (3, vec![0.0, 1.0, 0.0], serde_json::json!({})),
-            (4, vec![0.0, 0.0, 1.0], serde_json::json!({})),
-        ]);
-        let cfg = SearchConfig { top_k: 2, enable_dpp: true, dpp_quality_weight: 1.0, ..Default::default() };
+        let mt = make_memtable(
+            3,
+            &[
+                (1, vec![1.0, 0.0, 0.0], serde_json::json!({})),
+                (2, vec![0.99, 0.01, 0.0], serde_json::json!({})),
+                (3, vec![0.0, 1.0, 0.0], serde_json::json!({})),
+                (4, vec![0.0, 0.0, 1.0], serde_json::json!({})),
+            ],
+        );
+        let cfg = SearchConfig {
+            top_k: 2,
+            enable_dpp: true,
+            dpp_quality_weight: 1.0,
+            ..Default::default()
+        };
         let expanded = vec![
-            SearchHit { id: 1, score: 1.0, payload: serde_json::json!({}) },
-            SearchHit { id: 2, score: 0.95, payload: serde_json::json!({}) },
-            SearchHit { id: 3, score: 0.8, payload: serde_json::json!({}) },
-            SearchHit { id: 4, score: 0.7, payload: serde_json::json!({}) },
+            SearchHit {
+                id: 1,
+                score: 1.0,
+                payload: serde_json::json!({}),
+            },
+            SearchHit {
+                id: 2,
+                score: 0.95,
+                payload: serde_json::json!({}),
+            },
+            SearchHit {
+                id: 3,
+                score: 0.8,
+                payload: serde_json::json!({}),
+            },
+            SearchHit {
+                id: 4,
+                score: 0.7,
+                payload: serde_json::json!({}),
+            },
         ];
 
         let result = apply_dpp(&mt, &cfg, &expanded);
@@ -907,7 +998,10 @@ mod tests {
 
     #[test]
     fn test_execute_pipeline_dimension_mismatch() {
-        let mt = wrap(make_memtable(3, &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))]));
+        let mt = wrap(make_memtable(
+            3,
+            &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))],
+        ));
         let hook: Arc<dyn SearchHook> = Arc::new(NoopHook);
         let cfg = default_config();
         let bad_query = vec![1.0, 0.0]; // dim=2, 期望 dim=3
@@ -919,7 +1013,10 @@ mod tests {
 
     #[test]
     fn test_execute_pipeline_nan_query_rejected() {
-        let mt = wrap(make_memtable(3, &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))]));
+        let mt = wrap(make_memtable(
+            3,
+            &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))],
+        ));
         let hook: Arc<dyn SearchHook> = Arc::new(NoopHook);
         let cfg = default_config();
         let nan_query = vec![f32::NAN, 0.0, 0.0];
@@ -931,7 +1028,10 @@ mod tests {
 
     #[test]
     fn test_execute_pipeline_inf_query_rejected() {
-        let mt = wrap(make_memtable(3, &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))]));
+        let mt = wrap(make_memtable(
+            3,
+            &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))],
+        ));
         let hook: Arc<dyn SearchHook> = Arc::new(NoopHook);
         let cfg = default_config();
         let inf_query = vec![f32::INFINITY, 0.0, 0.0];
@@ -955,13 +1055,21 @@ mod tests {
 
     #[test]
     fn test_execute_pipeline_basic_vector_search() {
-        let mt = wrap(make_memtable(3, &[
-            (1, vec![1.0, 0.0, 0.0], serde_json::json!({"name": "a"})),
-            (2, vec![0.0, 1.0, 0.0], serde_json::json!({"name": "b"})),
-            (3, vec![0.0, 0.0, 1.0], serde_json::json!({"name": "c"})),
-        ]));
+        let mt = wrap(make_memtable(
+            3,
+            &[
+                (1, vec![1.0, 0.0, 0.0], serde_json::json!({"name": "a"})),
+                (2, vec![0.0, 1.0, 0.0], serde_json::json!({"name": "b"})),
+                (3, vec![0.0, 0.0, 1.0], serde_json::json!({"name": "c"})),
+            ],
+        ));
         let hook: Arc<dyn SearchHook> = Arc::new(NoopHook);
-        let cfg = SearchConfig { top_k: 2, min_score: 0.0, expand_depth: 0, ..Default::default() };
+        let cfg = SearchConfig {
+            top_k: 2,
+            min_score: 0.0,
+            expand_depth: 0,
+            ..Default::default()
+        };
         let query = vec![1.0, 0.0, 0.0];
         let mut ctx = HookContext::new();
 
@@ -973,11 +1081,22 @@ mod tests {
     #[test]
     fn test_execute_pipeline_respects_top_k() {
         let nodes: Vec<(u64, Vec<f32>, serde_json::Value)> = (1..=10)
-            .map(|i| (i as u64, vec![1.0, i as f32 * 0.01, 0.0], serde_json::json!({})))
+            .map(|i| {
+                (
+                    i as u64,
+                    vec![1.0, i as f32 * 0.01, 0.0],
+                    serde_json::json!({}),
+                )
+            })
             .collect();
         let mt = wrap(make_memtable(3, &nodes));
         let hook: Arc<dyn SearchHook> = Arc::new(NoopHook);
-        let cfg = SearchConfig { top_k: 3, min_score: 0.0, expand_depth: 0, ..Default::default() };
+        let cfg = SearchConfig {
+            top_k: 3,
+            min_score: 0.0,
+            expand_depth: 0,
+            ..Default::default()
+        };
         let query = vec![1.0, 0.0, 0.0];
         let mut ctx = HookContext::new();
 
@@ -987,7 +1106,10 @@ mod tests {
 
     #[test]
     fn test_execute_pipeline_records_timings() {
-        let mt = wrap(make_memtable(3, &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))]));
+        let mt = wrap(make_memtable(
+            3,
+            &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))],
+        ));
         let hook: Arc<dyn SearchHook> = Arc::new(NoopHook);
         let cfg = default_config();
         let query = vec![1.0, 0.0, 0.0];
@@ -1011,7 +1133,10 @@ mod tests {
             }
         }
 
-        let mt = wrap(make_memtable(3, &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))]));
+        let mt = wrap(make_memtable(
+            3,
+            &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))],
+        ));
         let hook: Arc<dyn SearchHook> = Arc::new(AbortHook);
         let cfg = default_config();
         let query = vec![1.0, 0.0, 0.0];
@@ -1025,17 +1150,38 @@ mod tests {
     fn test_hook_custom_recall_overrides_builtin() {
         struct FixedRecallHook;
         impl SearchHook for FixedRecallHook {
-            fn on_custom_recall(&self, _: &[f32], _: &SearchConfig, _: &mut HookContext) -> Option<Vec<SearchHit>> {
-                Some(vec![SearchHit { id: 999, score: 1.0, payload: serde_json::Value::Null }])
+            fn on_custom_recall(
+                &self,
+                _: &[f32],
+                _: &SearchConfig,
+                _: &mut HookContext,
+            ) -> Option<Vec<SearchHit>> {
+                Some(vec![SearchHit {
+                    id: 999,
+                    score: 1.0,
+                    payload: serde_json::Value::Null,
+                }])
             }
         }
 
-        let mt = wrap(make_memtable(3, &[
-            (1, vec![1.0, 0.0, 0.0], serde_json::json!({})),
-            (999, vec![0.0, 0.0, 1.0], serde_json::json!({"custom": true})),
-        ]));
+        let mt = wrap(make_memtable(
+            3,
+            &[
+                (1, vec![1.0, 0.0, 0.0], serde_json::json!({})),
+                (
+                    999,
+                    vec![0.0, 0.0, 1.0],
+                    serde_json::json!({"custom": true}),
+                ),
+            ],
+        ));
         let hook: Arc<dyn SearchHook> = Arc::new(FixedRecallHook);
-        let cfg = SearchConfig { top_k: 5, min_score: 0.0, expand_depth: 0, ..Default::default() };
+        let cfg = SearchConfig {
+            top_k: 5,
+            min_score: 0.0,
+            expand_depth: 0,
+            ..Default::default()
+        };
         let query = vec![1.0, 0.0, 0.0];
         let mut ctx = HookContext::new();
 
@@ -1053,19 +1199,31 @@ mod tests {
             }
         }
 
-        let mt = wrap(make_memtable(3, &[
-            (1, vec![1.0, 0.0, 0.0], serde_json::json!({})),
-            (2, vec![0.0, 1.0, 0.0], serde_json::json!({})),
-            (3, vec![0.0, 0.0, 1.0], serde_json::json!({})),
-        ]));
+        let mt = wrap(make_memtable(
+            3,
+            &[
+                (1, vec![1.0, 0.0, 0.0], serde_json::json!({})),
+                (2, vec![0.0, 1.0, 0.0], serde_json::json!({})),
+                (3, vec![0.0, 0.0, 1.0], serde_json::json!({})),
+            ],
+        ));
         let hook: Arc<dyn SearchHook> = Arc::new(FilterLowScoreHook);
-        let cfg = SearchConfig { top_k: 10, min_score: 0.0, expand_depth: 0, ..Default::default() };
+        let cfg = SearchConfig {
+            top_k: 10,
+            min_score: 0.0,
+            expand_depth: 0,
+            ..Default::default()
+        };
         let query = vec![1.0, 0.0, 0.0];
         let mut ctx = HookContext::new();
 
         let results = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
         for r in &results {
-            assert!(r.score > 0.5, "Hook 过滤后不应有低分结果: score={}", r.score);
+            assert!(
+                r.score > 0.5,
+                "Hook 过滤后不应有低分结果: score={}",
+                r.score
+            );
         }
     }
 
@@ -1073,19 +1231,31 @@ mod tests {
     fn test_hook_rerank_reverses_order() {
         struct ReverseRerankHook;
         impl SearchHook for ReverseRerankHook {
-            fn on_rerank(&self, hits: &mut Vec<SearchHit>, _: &mut HookContext) -> Option<Vec<SearchHit>> {
+            fn on_rerank(
+                &self,
+                hits: &mut Vec<SearchHit>,
+                _: &mut HookContext,
+            ) -> Option<Vec<SearchHit>> {
                 let mut reversed = hits.clone();
                 reversed.reverse();
                 Some(reversed)
             }
         }
 
-        let mt = wrap(make_memtable(3, &[
-            (1, vec![1.0, 0.0, 0.0], serde_json::json!({})),
-            (2, vec![0.7, 0.7, 0.0], serde_json::json!({})),
-        ]));
+        let mt = wrap(make_memtable(
+            3,
+            &[
+                (1, vec![1.0, 0.0, 0.0], serde_json::json!({})),
+                (2, vec![0.7, 0.7, 0.0], serde_json::json!({})),
+            ],
+        ));
         let hook: Arc<dyn SearchHook> = Arc::new(ReverseRerankHook);
-        let cfg = SearchConfig { top_k: 5, min_score: 0.0, expand_depth: 0, ..Default::default() };
+        let cfg = SearchConfig {
+            top_k: 5,
+            min_score: 0.0,
+            expand_depth: 0,
+            ..Default::default()
+        };
         let query = vec![1.0, 0.0, 0.0];
         let mut ctx = HookContext::new();
 
@@ -1100,9 +1270,17 @@ mod tests {
     #[test]
     fn test_pipeline_clamps_extreme_config() {
         // top_k=0 应被钳到 1，不应 panic
-        let mt = wrap(make_memtable(3, &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))]));
+        let mt = wrap(make_memtable(
+            3,
+            &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))],
+        ));
         let hook: Arc<dyn SearchHook> = Arc::new(NoopHook);
-        let cfg = SearchConfig { top_k: 0, min_score: 0.0, expand_depth: 0, ..Default::default() };
+        let cfg = SearchConfig {
+            top_k: 0,
+            min_score: 0.0,
+            expand_depth: 0,
+            ..Default::default()
+        };
         let query = vec![1.0, 0.0, 0.0];
         let mut ctx = HookContext::new();
 
@@ -1114,15 +1292,27 @@ mod tests {
 
     #[test]
     fn test_pipeline_with_graph_expansion() {
-        let mut mt = make_memtable(3, &[
-            (1, vec![1.0, 0.0, 0.0], serde_json::json!({"name": "seed"})),
-            (2, vec![0.0, 1.0, 0.0], serde_json::json!({"name": "neighbor"})),
-        ]);
+        let mut mt = make_memtable(
+            3,
+            &[
+                (1, vec![1.0, 0.0, 0.0], serde_json::json!({"name": "seed"})),
+                (
+                    2,
+                    vec![0.0, 1.0, 0.0],
+                    serde_json::json!({"name": "neighbor"}),
+                ),
+            ],
+        );
         mt.link(1, 2, "related".to_string(), 0.8).unwrap();
 
         let mt = wrap(mt);
         let hook: Arc<dyn SearchHook> = Arc::new(NoopHook);
-        let cfg = SearchConfig { top_k: 5, min_score: 0.0, expand_depth: 1, ..Default::default() };
+        let cfg = SearchConfig {
+            top_k: 5,
+            min_score: 0.0,
+            expand_depth: 1,
+            ..Default::default()
+        };
         let query = vec![1.0, 0.0, 0.0];
         let mut ctx = HookContext::new();
 

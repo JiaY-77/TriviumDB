@@ -68,7 +68,10 @@ impl CompactionThread {
                     tracing::warn!("Compaction thread: MemTable Mutex poisoned, recovering...");
                     p.into_inner()
                 });
-                tracing::info!("Compaction I/O started for {}: foreground queries will be blocked during I/O", db_path.clone());
+                tracing::info!(
+                    "Compaction I/O started for {}: foreground queries will be blocked during I/O",
+                    db_path.clone()
+                );
 
                 match file_format::save(&mut mt, &db_path, storage_mode) {
                     Ok(_) => {
@@ -79,7 +82,7 @@ impl CompactionThread {
                             p.into_inner()
                         });
                         let _ = w.clear();
-                        
+
                         drop(w); // 优先释放 WAL 写锁
                         drop(mt); // 其次释放 内存大锁
                         tracing::debug!("Auto-compaction completed for {}", db_path);

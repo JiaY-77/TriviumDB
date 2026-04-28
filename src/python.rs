@@ -407,9 +407,7 @@ pub mod python {
         /// ```
         fn load_ffi_hook(&mut self, lib_path: &str) -> PyResult<()> {
             let ffi_hook = crate::hook::FfiHook::load(lib_path).map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "加载 FFI Hook 失败: {}", e
-                ))
+                pyo3::exceptions::PyRuntimeError::new_err(format!("加载 FFI Hook 失败: {}", e))
             })?;
             dispatch!(self, mut db => db.set_hook(ffi_hook));
             Ok(())
@@ -901,11 +899,15 @@ pub mod python {
                             id: n.id,
                             vector: n.vector.into_pyobject(py).unwrap().into_any().unbind(),
                             payload: json_to_pyobject(py, &n.payload),
-                            edges: n.edges.iter().map(|e| PyEdge {
-                                target_id: e.target_id,
-                                label: e.label.clone(),
-                                weight: e.weight,
-                            }).collect(),
+                            edges: n
+                                .edges
+                                .iter()
+                                .map(|e| PyEdge {
+                                    target_id: e.target_id,
+                                    label: e.label.clone(),
+                                    weight: e.weight,
+                                })
+                                .collect(),
                             num_edges: n.edges.len(),
                         }));
                     }
@@ -917,11 +919,15 @@ pub mod python {
                             id: n.id,
                             vector: f32_vec.into_pyobject(py).unwrap().into_any().unbind(),
                             payload: json_to_pyobject(py, &n.payload),
-                            edges: n.edges.iter().map(|e| PyEdge {
-                                target_id: e.target_id,
-                                label: e.label.clone(),
-                                weight: e.weight,
-                            }).collect(),
+                            edges: n
+                                .edges
+                                .iter()
+                                .map(|e| PyEdge {
+                                    target_id: e.target_id,
+                                    label: e.label.clone(),
+                                    weight: e.weight,
+                                })
+                                .collect(),
                             num_edges: n.edges.len(),
                         }));
                     }
@@ -932,11 +938,15 @@ pub mod python {
                             id: n.id,
                             vector: n.vector.into_pyobject(py).unwrap().into_any().unbind(),
                             payload: json_to_pyobject(py, &n.payload),
-                            edges: n.edges.iter().map(|e| PyEdge {
-                                target_id: e.target_id,
-                                label: e.label.clone(),
-                                weight: e.weight,
-                            }).collect(),
+                            edges: n
+                                .edges
+                                .iter()
+                                .map(|e| PyEdge {
+                                    target_id: e.target_id,
+                                    label: e.label.clone(),
+                                    weight: e.weight,
+                                })
+                                .collect(),
                             num_edges: n.edges.len(),
                         }));
                     }
@@ -1264,10 +1274,11 @@ pub mod python {
         /// db.tql_mut('MATCH (a {name: "Alice"}) DELETE a')
         /// ```
         fn tql_mut(&mut self, py: Python<'_>, query: &str) -> PyResult<PyObject> {
-            let result = dispatch!(self, mut db => db.tql_mut(query))
-                .map_err(|e: crate::error::TriviumError| {
+            let result = dispatch!(self, mut db => db.tql_mut(query)).map_err(
+                |e: crate::error::TriviumError| {
                     pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-                })?;
+                },
+            )?;
             let dict = PyDict::new(py);
             let _ = dict.set_item("affected", result.affected);
             let created: Vec<u64> = result.created_ids;

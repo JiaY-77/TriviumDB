@@ -30,16 +30,41 @@ fn build_test_db(path: &str) -> Database<f32> {
     cleanup(path);
     let mut db = Database::<f32>::open(path, DIM).unwrap();
 
-    let alice_id = db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice", "age": 30})).unwrap();
-    let bob_id = db.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob", "age": 25})).unwrap();
-    let carol_id = db.insert(&[0.0, 0.0, 1.0, 0.0], serde_json::json!({"name": "Carol", "age": 35})).unwrap();
-    let acme_id = db.insert(&[0.0, 0.0, 0.0, 1.0], serde_json::json!({"name": "Acme", "type": "company"})).unwrap();
-    let dave_id = db.insert(&[0.5, 0.5, 0.0, 0.0], serde_json::json!({"name": "Dave", "age": 28})).unwrap();
+    let alice_id = db
+        .insert(
+            &[1.0, 0.0, 0.0, 0.0],
+            serde_json::json!({"name": "Alice", "age": 30}),
+        )
+        .unwrap();
+    let bob_id = db
+        .insert(
+            &[0.0, 1.0, 0.0, 0.0],
+            serde_json::json!({"name": "Bob", "age": 25}),
+        )
+        .unwrap();
+    let carol_id = db
+        .insert(
+            &[0.0, 0.0, 1.0, 0.0],
+            serde_json::json!({"name": "Carol", "age": 35}),
+        )
+        .unwrap();
+    let acme_id = db
+        .insert(
+            &[0.0, 0.0, 0.0, 1.0],
+            serde_json::json!({"name": "Acme", "type": "company"}),
+        )
+        .unwrap();
+    let dave_id = db
+        .insert(
+            &[0.5, 0.5, 0.0, 0.0],
+            serde_json::json!({"name": "Dave", "age": 28}),
+        )
+        .unwrap();
 
-    db.link(alice_id, bob_id, "knows", 1.0).unwrap();     // Alice -> Bob
-    db.link(bob_id, carol_id, "knows", 1.0).unwrap();     // Bob -> Carol
-    db.link(alice_id, acme_id, "works_at", 1.0).unwrap();  // Alice -> Acme
-    db.link(dave_id, bob_id, "knows", 1.0).unwrap();       // Dave -> Bob
+    db.link(alice_id, bob_id, "knows", 1.0).unwrap(); // Alice -> Bob
+    db.link(bob_id, carol_id, "knows", 1.0).unwrap(); // Bob -> Carol
+    db.link(alice_id, acme_id, "works_at", 1.0).unwrap(); // Alice -> Acme
+    db.link(dave_id, bob_id, "knows", 1.0).unwrap(); // Dave -> Bob
 
     db
 }
@@ -54,12 +79,13 @@ fn 测试_反向单跳_谁认识Bob() {
     let db = build_test_db(&path);
 
     // Bob <-[:knows]- (b) → 谁 knows Bob？→ Alice 和 Dave
-    let results = db.tql(
-        r#"MATCH (a {name: "Bob"})<-[:knows]-(b) RETURN b"#
-    ).unwrap();
+    let results = db
+        .tql(r#"MATCH (a {name: "Bob"})<-[:knows]-(b) RETURN b"#)
+        .unwrap();
     assert_eq!(results.len(), 2, "Alice 和 Dave 都 knows Bob");
 
-    let names: Vec<&str> = results.iter()
+    let names: Vec<&str> = results
+        .iter()
         .map(|r| r["b"].payload.get("name").unwrap().as_str().unwrap())
         .collect();
     assert!(names.contains(&"Alice"));
@@ -75,9 +101,9 @@ fn 测试_反向单跳_无标签() {
     let db = build_test_db(&path);
 
     // Bob <-[]- (b) → 所有指向 Bob 的节点
-    let results = db.tql(
-        r#"MATCH (a {name: "Bob"})<-[]-(b) RETURN b"#
-    ).unwrap();
+    let results = db
+        .tql(r#"MATCH (a {name: "Bob"})<-[]-(b) RETURN b"#)
+        .unwrap();
     assert_eq!(results.len(), 2, "Alice 和 Dave 都指向 Bob");
 
     drop(db);
@@ -90,11 +116,19 @@ fn 测试_反向单跳_Carol() {
     let db = build_test_db(&path);
 
     // Carol <-[:knows]- (b) → 谁 knows Carol？→ 只有 Bob
-    let results = db.tql(
-        r#"MATCH (a {name: "Carol"})<-[:knows]-(b) RETURN b"#
-    ).unwrap();
+    let results = db
+        .tql(r#"MATCH (a {name: "Carol"})<-[:knows]-(b) RETURN b"#)
+        .unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0]["b"].payload.get("name").unwrap().as_str().unwrap(), "Bob");
+    assert_eq!(
+        results[0]["b"]
+            .payload
+            .get("name")
+            .unwrap()
+            .as_str()
+            .unwrap(),
+        "Bob"
+    );
 
     drop(db);
     cleanup(&path);
@@ -110,14 +144,19 @@ fn 测试_反向可变长_溯源() {
     let db = build_test_db(&path);
 
     // Carol <-[:knows*1..2]- (b) → 1跳: Bob, 2跳: Alice, Dave
-    let results = db.tql(
-        r#"MATCH (a {name: "Carol"})<-[:knows*1..2]-(b) RETURN b"#
-    ).unwrap();
+    let results = db
+        .tql(r#"MATCH (a {name: "Carol"})<-[:knows*1..2]-(b) RETURN b"#)
+        .unwrap();
     // 1-hop: Bob
     // 2-hop from Bob: Alice, Dave
-    assert!(results.len() >= 3, "应至少找到 Bob, Alice, Dave; got {}", results.len());
+    assert!(
+        results.len() >= 3,
+        "应至少找到 Bob, Alice, Dave; got {}",
+        results.len()
+    );
 
-    let names: Vec<&str> = results.iter()
+    let names: Vec<&str> = results
+        .iter()
         .map(|r| r["b"].payload.get("name").unwrap().as_str().unwrap())
         .collect();
     assert!(names.contains(&"Bob"), "1跳: Bob");
@@ -138,12 +177,13 @@ fn 测试_双向遍历_Bob的所有关联() {
     let db = build_test_db(&path);
 
     // Bob -[:knows]- (b) → 双向：Bob->Carol (正向) + Alice->Bob,Dave->Bob (反向)
-    let results = db.tql(
-        r#"MATCH (a {name: "Bob"})-[:knows]-(b) RETURN b"#
-    ).unwrap();
+    let results = db
+        .tql(r#"MATCH (a {name: "Bob"})-[:knows]-(b) RETURN b"#)
+        .unwrap();
     assert_eq!(results.len(), 3, "正向Carol + 反向Alice,Dave");
 
-    let names: Vec<&str> = results.iter()
+    let names: Vec<&str> = results
+        .iter()
         .map(|r| r["b"].payload.get("name").unwrap().as_str().unwrap())
         .collect();
     assert!(names.contains(&"Carol"), "正向: Bob->Carol");
@@ -164,9 +204,9 @@ fn 测试_双向遍历_无标签() {
     // So only forward: Bob, Acme (knows edges) + no backward
     // Actually Alice -> Bob (knows), Alice -> Acme (works_at)
     // Forward all: Bob, Acme; Backward: nobody
-    let results = db.tql(
-        r#"MATCH (a {name: "Alice"})-[]-(b) RETURN b"#
-    ).unwrap();
+    let results = db
+        .tql(r#"MATCH (a {name: "Alice"})-[]-(b) RETURN b"#)
+        .unwrap();
     // Alice outgoing: Bob(knows), Carol? no Alice->Carol is not in graph
     // Alice outgoing: Bob(knows), Acme(works_at)  — that's 2 forward
     // Alice incoming: nobody
@@ -186,12 +226,17 @@ fn 测试_入度统计_反向COUNT() {
     let db = build_test_db(&path);
 
     // 统计 Bob 的 knows 入度
-    let results = db.tql(
-        r#"MATCH (a {name: "Bob"})<-[:knows]-(b) RETURN count(b) AS in_degree"#
-    ).unwrap();
+    let results = db
+        .tql(r#"MATCH (a {name: "Bob"})<-[:knows]-(b) RETURN count(b) AS in_degree"#)
+        .unwrap();
     assert_eq!(results.len(), 1);
 
-    let count = results[0]["in_degree"].payload.get("in_degree").unwrap().as_i64().unwrap();
+    let count = results[0]["in_degree"]
+        .payload
+        .get("in_degree")
+        .unwrap()
+        .as_i64()
+        .unwrap();
     assert_eq!(count, 2, "Bob 的 knows 入度应为 2 (Alice + Dave)");
 
     drop(db);
@@ -207,9 +252,9 @@ fn 测试_EXPLAIN_反向模式() {
     let path = tmp_db("explain_rev");
     let db = build_test_db(&path);
 
-    let results = db.tql(
-        r#"EXPLAIN MATCH (a {name: "Bob"})<-[:knows]-(b) RETURN b"#
-    ).unwrap();
+    let results = db
+        .tql(r#"EXPLAIN MATCH (a {name: "Bob"})<-[:knows]-(b) RETURN b"#)
+        .unwrap();
     let plan = &results[0]["plan"].payload;
     let detail = plan.get("detail").unwrap().as_str().unwrap();
     assert!(detail.contains("knows"), "EXPLAIN 应展示边标签");

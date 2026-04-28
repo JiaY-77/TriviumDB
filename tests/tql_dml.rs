@@ -27,14 +27,19 @@ fn 测试_CREATE_单节点() {
     cleanup(&path);
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
-    let result = db.tql_mut(r#"CREATE (a {name: "Alice", age: 30})"#).unwrap();
+    let result = db
+        .tql_mut(r#"CREATE (a {name: "Alice", age: 30})"#)
+        .unwrap();
     assert_eq!(result.affected, 1, "应创建 1 个节点");
     assert_eq!(result.created_ids.len(), 1, "应返回 1 个 ID");
 
     // 验证节点存在
     let found = db.tql(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
     assert_eq!(found.len(), 1);
-    assert_eq!(found[0]["_"].payload.get("age").unwrap().as_i64().unwrap(), 30);
+    assert_eq!(
+        found[0]["_"].payload.get("age").unwrap().as_i64().unwrap(),
+        30
+    );
 
     drop(db);
     cleanup(&path);
@@ -46,7 +51,9 @@ fn 测试_CREATE_多节点() {
     cleanup(&path);
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
-    let result = db.tql_mut(r#"CREATE (a {name: "Alice"}), (b {name: "Bob"})"#).unwrap();
+    let result = db
+        .tql_mut(r#"CREATE (a {name: "Alice"}), (b {name: "Bob"})"#)
+        .unwrap();
     assert_eq!(result.affected, 2, "应创建 2 个节点");
     assert_eq!(result.created_ids.len(), 2);
 
@@ -65,8 +72,12 @@ fn 测试_MATCH_CREATE_边() {
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
     // 先创建两个节点
-    let alice_id = db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"})).unwrap();
-    let bob_id = db.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob"})).unwrap();
+    let alice_id = db
+        .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"}))
+        .unwrap();
+    let bob_id = db
+        .insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob"}))
+        .unwrap();
 
     // 通过 TQL 创建边
     let _query = format!(
@@ -104,15 +115,25 @@ fn 测试_SET_更新字段() {
     cleanup(&path);
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
-    let _alice_id = db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice", "age": 30})).unwrap();
+    let _alice_id = db
+        .insert(
+            &[1.0, 0.0, 0.0, 0.0],
+            serde_json::json!({"name": "Alice", "age": 30}),
+        )
+        .unwrap();
 
     // 更新 age
-    let result = db.tql_mut(r#"MATCH (a {name: "Alice"}) SET a.age == 31"#).unwrap();
+    let result = db
+        .tql_mut(r#"MATCH (a {name: "Alice"}) SET a.age == 31"#)
+        .unwrap();
     assert_eq!(result.affected, 1, "应更新 1 个节点");
 
     // 验证更新
     let found = db.tql(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
-    assert_eq!(found[0]["_"].payload.get("age").unwrap().as_i64().unwrap(), 31);
+    assert_eq!(
+        found[0]["_"].payload.get("age").unwrap().as_i64().unwrap(),
+        31
+    );
 
     drop(db);
     cleanup(&path);
@@ -124,13 +145,24 @@ fn 测试_SET_添加新字段() {
     cleanup(&path);
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
-    let _id = db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"})).unwrap();
+    let _id = db
+        .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"}))
+        .unwrap();
 
     // 添加新字段 email
-    db.tql_mut(r#"MATCH (a {name: "Alice"}) SET a.email == "alice@example.com""#).unwrap();
+    db.tql_mut(r#"MATCH (a {name: "Alice"}) SET a.email == "alice@example.com""#)
+        .unwrap();
 
     let found = db.tql(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
-    assert_eq!(found[0]["_"].payload.get("email").unwrap().as_str().unwrap(), "alice@example.com");
+    assert_eq!(
+        found[0]["_"]
+            .payload
+            .get("email")
+            .unwrap()
+            .as_str()
+            .unwrap(),
+        "alice@example.com"
+    );
 
     drop(db);
     cleanup(&path);
@@ -142,11 +174,21 @@ fn 测试_SET_批量更新() {
     cleanup(&path);
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
-    db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice", "status": "active"})).unwrap();
-    db.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob", "status": "active"})).unwrap();
+    db.insert(
+        &[1.0, 0.0, 0.0, 0.0],
+        serde_json::json!({"name": "Alice", "status": "active"}),
+    )
+    .unwrap();
+    db.insert(
+        &[0.0, 1.0, 0.0, 0.0],
+        serde_json::json!({"name": "Bob", "status": "active"}),
+    )
+    .unwrap();
 
     // 批量更新所有 active 用户的 status
-    let result = db.tql_mut(r#"MATCH (a {status: "active"}) SET a.status == "archived""#).unwrap();
+    let result = db
+        .tql_mut(r#"MATCH (a {status: "active"}) SET a.status == "archived""#)
+        .unwrap();
     assert_eq!(result.affected, 2, "应更新 2 个节点");
 
     drop(db);
@@ -163,7 +205,9 @@ fn 测试_DELETE_删除节点() {
     cleanup(&path);
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
-    let _id = db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"})).unwrap();
+    let _id = db
+        .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"}))
+        .unwrap();
 
     let result = db.tql_mut(r#"MATCH (a {name: "Alice"}) DELETE a"#).unwrap();
     assert_eq!(result.affected, 1, "应删除 1 个节点");
@@ -186,12 +230,18 @@ fn 测试_DETACH_DELETE_删除节点及边() {
     cleanup(&path);
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
-    let alice_id = db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"})).unwrap();
-    let bob_id = db.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob"})).unwrap();
+    let alice_id = db
+        .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"}))
+        .unwrap();
+    let bob_id = db
+        .insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob"}))
+        .unwrap();
     db.link(alice_id, bob_id, "knows", 1.0).unwrap();
 
     // DETACH DELETE Alice → 应自动断开 Alice->Bob 的边
-    let result = db.tql_mut(r#"MATCH (a {name: "Alice"}) DETACH DELETE a"#).unwrap();
+    let result = db
+        .tql_mut(r#"MATCH (a {name: "Alice"}) DETACH DELETE a"#)
+        .unwrap();
     assert_eq!(result.affected, 1, "应删除 1 个节点");
 
     // Alice 已删除
@@ -220,7 +270,8 @@ fn 测试_tql_mut_读查询降级() {
     cleanup(&path);
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
-    db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"})).unwrap();
+    db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"}))
+        .unwrap();
 
     // 用 tql_mut 执行读查询应返回 affected=0
     let result = db.tql_mut(r#"FIND {name: "Alice"} RETURN *"#).unwrap();

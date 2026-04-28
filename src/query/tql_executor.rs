@@ -14,7 +14,7 @@ use crate::error::TriviumError;
 use crate::filter::Filter;
 use crate::node::{Node, NodeId};
 use crate::storage::memtable::MemTable;
-use std::collections::{HashMap, HashSet, BTreeMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// TQL 查询结果：每行是一组变量绑定 → 节点快照
 pub type TqlResult<T> = Vec<HashMap<String, Node<T>>>;
@@ -32,11 +32,23 @@ pub struct TqlMutResult {
 #[derive(Debug, Clone)]
 pub enum MutationOp<T: VectorType> {
     /// 创建节点：(变量名, 零向量, payload)
-    InsertNode { var: String, vector: Vec<T>, payload: serde_json::Value },
+    InsertNode {
+        var: String,
+        vector: Vec<T>,
+        payload: serde_json::Value,
+    },
     /// 创建边
-    LinkEdge { src_id: NodeId, dst_id: NodeId, label: String, weight: f32 },
+    LinkEdge {
+        src_id: NodeId,
+        dst_id: NodeId,
+        label: String,
+        weight: f32,
+    },
     /// 更新字段
-    UpdatePayload { id: NodeId, payload: serde_json::Value },
+    UpdatePayload {
+        id: NodeId,
+        payload: serde_json::Value,
+    },
     /// 删除节点（detach=true 时自动断边）
     DeleteNode { id: NodeId, detach: bool },
 }
@@ -64,10 +76,14 @@ pub fn execute_tql<T: VectorType>(
     let mut results = match &query.entry {
         QueryEntry::Find { filter } => execute_find(filter, query, memtable, row_limit)?,
         QueryEntry::Match { pattern } => execute_match(pattern, query, memtable, row_limit, false)?,
-        QueryEntry::OptionalMatch { pattern } => execute_match(pattern, query, memtable, row_limit, true)?,
-        QueryEntry::Search { vector, top_k, expand } => {
-            execute_search(vector, *top_k, expand.as_ref(), query, memtable, row_limit)?
+        QueryEntry::OptionalMatch { pattern } => {
+            execute_match(pattern, query, memtable, row_limit, true)?
         }
+        QueryEntry::Search {
+            vector,
+            top_k,
+            expand,
+        } => execute_search(vector, *top_k, expand.as_ref(), query, memtable, row_limit)?,
     };
 
     // ORDER BY 排序
@@ -196,7 +212,8 @@ fn execute_match<T: VectorType>(
     }
 
     // 确定起始候选集（含标签索引下推优化）
-    let start_candidates = find_tql_candidates_optimized(&pattern.nodes[0], pattern.edges.first(), mt);
+    let start_candidates =
+        find_tql_candidates_optimized(&pattern.nodes[0], pattern.edges.first(), mt);
 
     let mut results = Vec::new();
     let mut budget: usize = 0;
@@ -209,7 +226,7 @@ fn execute_match<T: VectorType>(
             query.predicate.as_ref(),
             &return_vars,
             &var_map,
-            0,         // layer_idx
+            0, // layer_idx
             &mut env,
             start_id,
             &mut results,
@@ -242,9 +259,10 @@ fn tql_dfs<T: VectorType>(
 ) -> Result<bool, TriviumError> {
     *budget += 1;
     if *budget > max_budget {
-        return Err(TriviumError::QueryExecution(
-            format!("Query exceeded budget of {} steps", max_budget),
-        ));
+        return Err(TriviumError::QueryExecution(format!(
+            "Query exceeded budget of {} steps",
+            max_budget
+        )));
     }
 
     let node_pat = &pattern.nodes[layer_idx];
@@ -286,7 +304,9 @@ fn tql_dfs<T: VectorType>(
             }
             results.push(row);
             if results.len() >= row_limit {
-                if let Some((idx, old)) = old_val { env[idx] = old; }
+                if let Some((idx, old)) = old_val {
+                    env[idx] = old;
+                }
                 return Ok(false);
             }
         }
@@ -298,14 +318,29 @@ fn tql_dfs<T: VectorType>(
             let mut visited = HashSet::new();
             visited.insert(current);
             let cont = tql_dfs_variable_length(
-                mt, pattern, predicate, return_vars, var_map,
-                layer_idx, env, current, &edge_pat.labels,
-                hop.min, hop.max, 0, &mut visited,
-                results, budget, max_budget, row_limit,
+                mt,
+                pattern,
+                predicate,
+                return_vars,
+                var_map,
+                layer_idx,
+                env,
+                current,
+                &edge_pat.labels,
+                hop.min,
+                hop.max,
+                0,
+                &mut visited,
+                results,
+                budget,
+                max_budget,
+                row_limit,
                 edge_pat.direction,
             )?;
             if !cont {
-                if let Some((idx, old)) = old_val { env[idx] = old; }
+                if let Some((idx, old)) = old_val {
+                    env[idx] = old;
+                }
                 return Ok(false);
             }
         } else {
@@ -313,12 +348,23 @@ fn tql_dfs<T: VectorType>(
             let neighbors = collect_neighbors(mt, current, &edge_pat.labels, edge_pat.direction);
             for next_id in neighbors {
                 let cont = tql_dfs(
-                    mt, pattern, predicate, return_vars, var_map,
-                    layer_idx + 1, env, next_id,
-                    results, budget, max_budget, row_limit,
+                    mt,
+                    pattern,
+                    predicate,
+                    return_vars,
+                    var_map,
+                    layer_idx + 1,
+                    env,
+                    next_id,
+                    results,
+                    budget,
+                    max_budget,
+                    row_limit,
                 )?;
                 if !cont {
-                    if let Some((idx, old)) = old_val { env[idx] = old; }
+                    if let Some((idx, old)) = old_val {
+                        env[idx] = old;
+                    }
                     return Ok(false);
                 }
             }
@@ -357,9 +403,18 @@ fn tql_dfs_variable_length<T: VectorType>(
     // 当前深度在有效范围内 → 继续到下一层（匹配后续节点模式）
     if current_depth >= min_depth {
         let cont = tql_dfs(
-            mt, pattern, predicate, return_vars, var_map,
-            layer_idx + 1, env, current,
-            results, budget, max_budget, row_limit,
+            mt,
+            pattern,
+            predicate,
+            return_vars,
+            var_map,
+            layer_idx + 1,
+            env,
+            current,
+            results,
+            budget,
+            max_budget,
+            row_limit,
         )?;
         if !cont {
             return Ok(false);
@@ -376,10 +431,23 @@ fn tql_dfs_variable_length<T: VectorType>(
 
             visited.insert(next);
             let cont = tql_dfs_variable_length(
-                mt, pattern, predicate, return_vars, var_map,
-                layer_idx, env, next, labels,
-                min_depth, max_depth, current_depth + 1, visited,
-                results, budget, max_budget, row_limit,
+                mt,
+                pattern,
+                predicate,
+                return_vars,
+                var_map,
+                layer_idx,
+                env,
+                next,
+                labels,
+                min_depth,
+                max_depth,
+                current_depth + 1,
+                visited,
+                results,
+                budget,
+                max_budget,
+                row_limit,
                 direction,
             )?;
             visited.remove(&next);
@@ -450,11 +518,14 @@ fn execute_search<T: VectorType>(
     let query_vec: Vec<T> = vector.iter().map(|v| T::from_f32(*v as f32)).collect();
     let dim = query_vec.len();
 
-    let mut scored: Vec<(NodeId, f32)> = mt.all_node_ids()
+    let mut scored: Vec<(NodeId, f32)> = mt
+        .all_node_ids()
         .iter()
         .filter_map(|&id| {
             let vec = mt.get_vector(id)?;
-            if vec.len() != dim { return None; }
+            if vec.len() != dim {
+                return None;
+            }
             let score = T::similarity(&query_vec, vec);
             Some((id, score))
         })
@@ -473,8 +544,14 @@ fn execute_search<T: VectorType>(
 
         for &seed in &candidates.clone() {
             let neighbors = crate::graph::pathfinding::k_hop_neighbors(
-                mt, seed, ex.max_depth,
-                if ex.labels.len() == 1 { Some(ex.labels[0].as_str()) } else { None },
+                mt,
+                seed,
+                ex.max_depth,
+                if ex.labels.len() == 1 {
+                    Some(ex.labels[0].as_str())
+                } else {
+                    None
+                },
             );
             for (&nid, &dist) in &neighbors {
                 if dist >= ex.min_depth {
@@ -543,36 +620,26 @@ fn eval_predicate_env<T: VectorType>(
             };
 
             match id {
-                Some(nid) => {
-                    match mt.get_payload(nid) {
-                        Some(payload) => filter.matches(payload),
-                        None => false,
-                    }
-                }
+                Some(nid) => match mt.get_payload(nid) {
+                    Some(payload) => filter.matches(payload),
+                    None => false,
+                },
                 None => false,
             }
         }
 
         Predicate::And(a, b) => {
-            eval_predicate_env(a, env, var_map, mt)
-                && eval_predicate_env(b, env, var_map, mt)
+            eval_predicate_env(a, env, var_map, mt) && eval_predicate_env(b, env, var_map, mt)
         }
         Predicate::Or(a, b) => {
-            eval_predicate_env(a, env, var_map, mt)
-                || eval_predicate_env(b, env, var_map, mt)
+            eval_predicate_env(a, env, var_map, mt) || eval_predicate_env(b, env, var_map, mt)
         }
-        Predicate::Not(inner) => {
-            !eval_predicate_env(inner, env, var_map, mt)
-        }
+        Predicate::Not(inner) => !eval_predicate_env(inner, env, var_map, mt),
     }
 }
 
 /// 在单节点上下文中评估谓词（FIND / SEARCH 场景）
-fn eval_predicate_single<T: VectorType>(
-    pred: &Predicate,
-    id: NodeId,
-    mt: &MemTable<T>,
-) -> bool {
+fn eval_predicate_single<T: VectorType>(pred: &Predicate, id: NodeId, mt: &MemTable<T>) -> bool {
     match pred {
         Predicate::Compare { left, op, right } => {
             // 单节点场景下，属性访问的 var 被忽略，直接用当前 id
@@ -581,22 +648,16 @@ fn eval_predicate_single<T: VectorType>(
             compare_runtime(&lval, op, &rval)
         }
 
-        Predicate::DocFilter { filter, .. } => {
-            match mt.get_payload(id) {
-                Some(payload) => filter.matches(payload),
-                None => false,
-            }
-        }
+        Predicate::DocFilter { filter, .. } => match mt.get_payload(id) {
+            Some(payload) => filter.matches(payload),
+            None => false,
+        },
 
         Predicate::And(a, b) => {
             eval_predicate_single(a, id, mt) && eval_predicate_single(b, id, mt)
         }
-        Predicate::Or(a, b) => {
-            eval_predicate_single(a, id, mt) || eval_predicate_single(b, id, mt)
-        }
-        Predicate::Not(inner) => {
-            !eval_predicate_single(inner, id, mt)
-        }
+        Predicate::Or(a, b) => eval_predicate_single(a, id, mt) || eval_predicate_single(b, id, mt),
+        Predicate::Not(inner) => !eval_predicate_single(inner, id, mt),
     }
 }
 
@@ -724,10 +785,7 @@ fn cmp_f64(a: f64, op: &TqlCompOp, b: f64) -> bool {
 // ═══════════════════════════════════════════════════════════════════════
 
 /// TQL 版本的候选节点发现
-fn find_tql_candidates<T: VectorType>(
-    node_pat: &TqlNodePattern,
-    mt: &MemTable<T>,
-) -> Vec<NodeId> {
+fn find_tql_candidates<T: VectorType>(node_pat: &TqlNodePattern, mt: &MemTable<T>) -> Vec<NodeId> {
     // 🏆 O(1) 主键索引短路：检测 Filter 是否包含 id = N 的精确匹配
     if let Some(filter) = &node_pat.filter {
         if let Some(target_id) = extract_id_from_filter(filter) {
@@ -775,8 +833,7 @@ fn try_property_index_lookup<T: VectorType>(
 ) -> Option<Vec<NodeId>> {
     match filter {
         Filter::Eq(key, val) if key != "id" => {
-            mt.find_by_property_index(key, val)
-                .map(|ids| ids.to_vec())
+            mt.find_by_property_index(key, val).map(|ids| ids.to_vec())
         }
         Filter::And(filters) => {
             // 在 AND 条件中找第一个可以使用索引的条件（选择性最强的）
@@ -832,9 +889,7 @@ fn find_tql_candidates_optimized<T: VectorType>(
 /// 从 Filter 中提取 id 等值匹配的目标 ID（用于 O(1) 短路）
 fn extract_id_from_filter(filter: &Filter) -> Option<NodeId> {
     match filter {
-        Filter::Eq(key, val) if key == "id" => {
-            val.as_i64().map(|n| n as NodeId)
-        }
+        Filter::Eq(key, val) if key == "id" => val.as_i64().map(|n| n as NodeId),
         Filter::And(filters) => {
             for f in filters {
                 if let Some(id) = extract_id_from_filter(f) {
@@ -859,15 +914,17 @@ fn matches_filter_with_id<T: VectorType>(
             val.as_i64().is_some_and(|target| node_id == target as u64)
         }
         // 逻辑组合：递归处理
-        Filter::And(filters) => filters.iter().all(|f| matches_filter_with_id(f, node_id, mt)),
-        Filter::Or(filters) => filters.iter().any(|f| matches_filter_with_id(f, node_id, mt)),
+        Filter::And(filters) => filters
+            .iter()
+            .all(|f| matches_filter_with_id(f, node_id, mt)),
+        Filter::Or(filters) => filters
+            .iter()
+            .any(|f| matches_filter_with_id(f, node_id, mt)),
         // 其他操作符：回退到标准 payload 匹配
-        _ => {
-            match mt.get_payload(node_id) {
-                Some(payload) => filter.matches(payload),
-                None => false,
-            }
-        }
+        _ => match mt.get_payload(node_id) {
+            Some(payload) => filter.matches(payload),
+            None => false,
+        },
     }
 }
 
@@ -922,12 +979,12 @@ fn compare_for_sort(a: &RuntimeValue, b: &RuntimeValue) -> std::cmp::Ordering {
         (RuntimeValue::Float(a), RuntimeValue::Float(b)) => {
             a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
         }
-        (RuntimeValue::Int(a), RuntimeValue::Float(b)) => {
-            (*a as f64).partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-        }
-        (RuntimeValue::Float(a), RuntimeValue::Int(b)) => {
-            a.partial_cmp(&(*b as f64)).unwrap_or(std::cmp::Ordering::Equal)
-        }
+        (RuntimeValue::Int(a), RuntimeValue::Float(b)) => (*a as f64)
+            .partial_cmp(b)
+            .unwrap_or(std::cmp::Ordering::Equal),
+        (RuntimeValue::Float(a), RuntimeValue::Int(b)) => a
+            .partial_cmp(&(*b as f64))
+            .unwrap_or(std::cmp::Ordering::Equal),
         (RuntimeValue::Str(a), RuntimeValue::Str(b)) => a.cmp(b),
         (RuntimeValue::Null, RuntimeValue::Null) => std::cmp::Ordering::Equal,
         (RuntimeValue::Null, _) => std::cmp::Ordering::Greater, // NULL 排最后
@@ -1036,10 +1093,7 @@ fn is_aggregate(kind: &ReturnExprKind) -> bool {
 }
 
 /// 纯 DISTINCT 去重
-fn apply_distinct<T: VectorType>(
-    results: TqlResult<T>,
-    _exprs: &[ReturnExpr],
-) -> TqlResult<T> {
+fn apply_distinct<T: VectorType>(results: TqlResult<T>, _exprs: &[ReturnExpr]) -> TqlResult<T> {
     // 使用 payload 指纹去重：对每行生成签名
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
@@ -1063,10 +1117,7 @@ fn row_signature<T: VectorType>(row: &HashMap<String, Node<T>>) -> String {
 ///
 /// 非聚合列作为分组键，聚合列按组计算。
 /// 结果中聚合值写入节点的 payload 字段中（以 alias 或生成名为 key）。
-fn apply_aggregation<T: VectorType>(
-    results: TqlResult<T>,
-    exprs: &[ReturnExpr],
-) -> TqlResult<T> {
+fn apply_aggregation<T: VectorType>(results: TqlResult<T>, exprs: &[ReturnExpr]) -> TqlResult<T> {
     if results.is_empty() {
         return Vec::new();
     }
@@ -1101,7 +1152,10 @@ fn apply_aggregation<T: VectorType>(
         // 计算聚合列
         for agg_expr in &agg_exprs {
             if let ReturnExprKind::Aggregate(func, inner) = &agg_expr.kind {
-                let alias = agg_expr.alias.clone().unwrap_or_else(|| format!("{:?}", func).to_lowercase());
+                let alias = agg_expr
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}", func).to_lowercase());
                 let agg_val = compute_aggregate(*func, inner, rows);
 
                 // 将聚合值注入到一个合成节点的 payload 中
@@ -1136,7 +1190,11 @@ fn make_group_key<T: VectorType>(
             }
             ReturnExprKind::Property(v, field) => {
                 if let Some(node) = row.get(v) {
-                    let val = node.payload.get(field).cloned().unwrap_or(serde_json::Value::Null);
+                    let val = node
+                        .payload
+                        .get(field)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
                     parts.push(format!("{}.{}={}", v, field, val));
                 }
             }
@@ -1154,17 +1212,22 @@ fn compute_aggregate<T: VectorType>(
 ) -> serde_json::Value {
     match func {
         AggFunc::Count => {
-            let count = rows.iter().filter(|r| resolve_inner(inner, r).is_some()).count();
+            let count = rows
+                .iter()
+                .filter(|r| resolve_inner(inner, r).is_some())
+                .count();
             serde_json::json!(count)
         }
         AggFunc::Sum => {
-            let sum: f64 = rows.iter()
+            let sum: f64 = rows
+                .iter()
                 .filter_map(|r| resolve_inner_numeric(inner, r))
                 .sum();
             serde_json::json!(sum)
         }
         AggFunc::Avg => {
-            let vals: Vec<f64> = rows.iter()
+            let vals: Vec<f64> = rows
+                .iter()
                 .filter_map(|r| resolve_inner_numeric(inner, r))
                 .collect();
             if vals.is_empty() {
@@ -1174,19 +1237,30 @@ fn compute_aggregate<T: VectorType>(
             }
         }
         AggFunc::Min => {
-            let min = rows.iter()
+            let min = rows
+                .iter()
                 .filter_map(|r| resolve_inner_numeric(inner, r))
                 .fold(f64::INFINITY, f64::min);
-            if min.is_infinite() { serde_json::Value::Null } else { serde_json::json!(min) }
+            if min.is_infinite() {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(min)
+            }
         }
         AggFunc::Max => {
-            let max = rows.iter()
+            let max = rows
+                .iter()
                 .filter_map(|r| resolve_inner_numeric(inner, r))
                 .fold(f64::NEG_INFINITY, f64::max);
-            if max.is_infinite() { serde_json::Value::Null } else { serde_json::json!(max) }
+            if max.is_infinite() {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(max)
+            }
         }
         AggFunc::Collect => {
-            let vals: Vec<serde_json::Value> = rows.iter()
+            let vals: Vec<serde_json::Value> = rows
+                .iter()
                 .filter_map(|r| resolve_inner_json(inner, r))
                 .collect();
             serde_json::json!(vals)
@@ -1216,11 +1290,9 @@ fn resolve_inner_numeric<T: VectorType>(
             // count 风格: 变量存在就是 1
             row.get(v).map(|_| 1.0)
         }
-        ReturnExprKind::Property(v, field) => {
-            row.get(v).and_then(|node| {
-                node.payload.get(field).and_then(|v| v.as_f64())
-            })
-        }
+        ReturnExprKind::Property(v, field) => row
+            .get(v)
+            .and_then(|node| node.payload.get(field).and_then(|v| v.as_f64())),
         _ => None,
     }
 }
@@ -1231,9 +1303,7 @@ fn resolve_inner_json<T: VectorType>(
     row: &HashMap<String, Node<T>>,
 ) -> Option<serde_json::Value> {
     match inner {
-        ReturnExprKind::Var(v) => {
-            row.get(v).map(|n| serde_json::json!(n.id))
-        }
+        ReturnExprKind::Var(v) => row.get(v).map(|n| serde_json::json!(n.id)),
         ReturnExprKind::Property(v, field) => {
             row.get(v).and_then(|node| node.payload.get(field).cloned())
         }
@@ -1246,17 +1316,12 @@ fn resolve_inner_json<T: VectorType>(
 // ═══════════════════════════════════════════════════════════════════════
 
 /// 生成查询执行计划（不执行查询），返回单行结果
-fn generate_explain_plan<T: VectorType>(
-    query: &TqlQuery,
-    mt: &MemTable<T>,
-) -> TqlResult<T> {
+fn generate_explain_plan<T: VectorType>(query: &TqlQuery, mt: &MemTable<T>) -> TqlResult<T> {
     let mut plan = serde_json::Map::new();
 
     // 入口类型
     let (entry_type, entry_detail) = match &query.entry {
-        QueryEntry::Find { filter } => {
-            ("FIND".to_string(), format!("{:?}", filter))
-        }
+        QueryEntry::Find { filter } => ("FIND".to_string(), format!("{:?}", filter)),
         QueryEntry::Match { pattern } => {
             let detail = format_pattern_detail(pattern);
             ("MATCH".to_string(), detail)
@@ -1331,7 +1396,10 @@ fn generate_explain_plan<T: VectorType>(
     plan.insert("optimizations".into(), serde_json::json!(optimizations));
 
     // 统计信息
-    plan.insert("total_nodes".into(), serde_json::json!(mt.all_node_ids().len()));
+    plan.insert(
+        "total_nodes".into(),
+        serde_json::json!(mt.all_node_ids().len()),
+    );
     if let Some(lim) = query.limit {
         plan.insert("limit".into(), serde_json::json!(lim));
     }
@@ -1339,7 +1407,10 @@ fn generate_explain_plan<T: VectorType>(
         plan.insert("offset".into(), serde_json::json!(off));
     }
     if !query.order_by.is_empty() {
-        plan.insert("order_by_count".into(), serde_json::json!(query.order_by.len()));
+        plan.insert(
+            "order_by_count".into(),
+            serde_json::json!(query.order_by.len()),
+        );
     }
 
     // 封装为单行结果
@@ -1368,7 +1439,10 @@ fn analyze_candidate_strategy<T: VectorType>(
     }
     if let Some(edge_pat) = first_edge {
         if !edge_pat.labels.is_empty() {
-            return format!("label_index pushdown (labels: [{}])", edge_pat.labels.join(", "));
+            return format!(
+                "label_index pushdown (labels: [{}])",
+                edge_pat.labels.join(", ")
+            );
         }
     }
     "full_scan O(N)".to_string()
@@ -1379,7 +1453,11 @@ fn format_pattern_detail(pattern: &TqlPattern) -> String {
     let mut parts = Vec::new();
     for (i, node) in pattern.nodes.iter().enumerate() {
         let var = node.var.as_deref().unwrap_or("_");
-        let filter = if node.filter.is_some() { " {filter}" } else { "" };
+        let filter = if node.filter.is_some() {
+            " {filter}"
+        } else {
+            ""
+        };
         parts.push(format!("({}{})", var, filter));
 
         if i < pattern.edges.len() {
@@ -1433,10 +1511,7 @@ fn format_return_expr_kind(kind: &ReturnExprKind) -> String {
 /// - 扫描 ReturnClause::Expressions，识别仅通过 Property(var, field) 引用的变量
 /// - 对这些变量的 Node，清空 vector 和 edges（保留 id + payload）
 /// - 全变量引用 (Var(v)) 的节点保持完整
-fn apply_projection_pruning<T: VectorType>(
-    returns: &ReturnClause,
-    results: &mut TqlResult<T>,
-) {
+fn apply_projection_pruning<T: VectorType>(returns: &ReturnClause, results: &mut TqlResult<T>) {
     let exprs = match returns {
         ReturnClause::Expressions(exprs) => exprs,
         _ => return, // All / Variables 模式不裁剪
@@ -1465,8 +1540,8 @@ fn apply_projection_pruning<T: VectorType>(
 /// - 如果一个变量只出现在 Property(v, field) 中 → 仅属性引用，可裁剪
 /// - 聚合内部递归检查
 fn get_prunable_vars(exprs: &[ReturnExpr]) -> Vec<String> {
-    let mut full_vars: HashSet<String> = HashSet::new();    // 完整引用
-    let mut prop_vars: HashSet<String> = HashSet::new();    // 属性引用
+    let mut full_vars: HashSet<String> = HashSet::new(); // 完整引用
+    let mut prop_vars: HashSet<String> = HashSet::new(); // 属性引用
 
     for expr in exprs {
         classify_vars(&expr.kind, &mut full_vars, &mut prop_vars);
@@ -1507,12 +1582,8 @@ pub fn execute_tql_mutation<T: VectorType>(
     mt: &MemTable<T>,
 ) -> Result<Vec<MutationOp<T>>, TriviumError> {
     match &mutation.action {
-        MutationAction::Create(create) => {
-            execute_create(create, &mutation.source, mt)
-        }
-        MutationAction::Set(assignments) => {
-            execute_set(assignments, &mutation.source, mt)
-        }
+        MutationAction::Create(create) => execute_create(create, &mutation.source, mt),
+        MutationAction::Set(assignments) => execute_set(assignments, &mutation.source, mt),
         MutationAction::Delete { vars, detach } => {
             execute_delete(vars, *detach, &mutation.source, mt)
         }
@@ -1586,9 +1657,9 @@ fn execute_set<T: VectorType>(
     source: &Option<MutationSource>,
     mt: &MemTable<T>,
 ) -> Result<Vec<MutationOp<T>>, TriviumError> {
-    let source = source.as_ref().ok_or_else(|| {
-        TriviumError::QueryParse("SET requires a preceding MATCH clause".into())
-    })?;
+    let source = source
+        .as_ref()
+        .ok_or_else(|| TriviumError::QueryParse("SET requires a preceding MATCH clause".into()))?;
 
     // 运行 MATCH 查询获取匹配行
     let query = build_match_query(&source.pattern, source.predicate.as_ref());
@@ -1670,7 +1741,9 @@ fn resolve_match_vars<T: VectorType>(
 fn build_match_query(pattern: &TqlPattern, predicate: Option<&Predicate>) -> TqlQuery {
     TqlQuery {
         explain: false,
-        entry: QueryEntry::Match { pattern: pattern.clone() },
+        entry: QueryEntry::Match {
+            pattern: pattern.clone(),
+        },
         predicate: predicate.cloned(),
         returns: ReturnClause::All,
         order_by: Vec::new(),

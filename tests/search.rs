@@ -31,9 +31,18 @@ fn 基础搜索_余弦相似度最高的节点排在最前() {
 
     let ids = {
         let mut tx = db.begin_tx();
-        tx.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"label": "target"}));
-        tx.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"label": "other1"}));
-        tx.insert(&[0.0, 0.0, 1.0, 0.0], serde_json::json!({"label": "other2"}));
+        tx.insert(
+            &[1.0, 0.0, 0.0, 0.0],
+            serde_json::json!({"label": "target"}),
+        );
+        tx.insert(
+            &[0.0, 1.0, 0.0, 0.0],
+            serde_json::json!({"label": "other1"}),
+        );
+        tx.insert(
+            &[0.0, 0.0, 1.0, 0.0],
+            serde_json::json!({"label": "other2"}),
+        );
         tx.commit().unwrap()
     };
 
@@ -64,8 +73,8 @@ fn 搜索_min_score过滤_低分节点不出现() {
 
     {
         let mut tx = db.begin_tx();
-        tx.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}));  // 高分
-        tx.insert(&[0.0, 0.0, 0.0, 1.0], serde_json::json!({}));  // 低分（正交）
+        tx.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({})); // 高分
+        tx.insert(&[0.0, 0.0, 0.0, 1.0], serde_json::json!({})); // 低分（正交）
         tx.commit().unwrap();
     }
 
@@ -104,17 +113,27 @@ fn P1_5_BQ搜索_删除后不返回被删节点() {
 
     let ids = {
         let mut tx = db.begin_tx();
-        tx.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"label": "to_delete"}));
+        tx.insert(
+            &[1.0, 0.0, 0.0, 0.0],
+            serde_json::json!({"label": "to_delete"}),
+        );
         tx.insert(&[0.9, 0.1, 0.0, 0.0], serde_json::json!({"label": "keep1"}));
         tx.insert(&[0.8, 0.2, 0.0, 0.0], serde_json::json!({"label": "keep2"}));
         tx.commit().unwrap()
     };
     let del_id = ids[0];
 
-    { let mut tx = db.begin_tx(); tx.delete(del_id); tx.commit().unwrap(); }
+    {
+        let mut tx = db.begin_tx();
+        tx.delete(del_id);
+        tx.commit().unwrap();
+    }
 
     let results = db.search(&[1.0, 0.0, 0.0, 0.0], 5, 0, 0.0).unwrap();
-    assert!(!results.iter().any(|h| h.id == del_id), "已删除节点不应出现在搜索结果中");
+    assert!(
+        !results.iter().any(|h| h.id == del_id),
+        "已删除节点不应出现在搜索结果中"
+    );
 
     cleanup(&path);
 }
@@ -127,8 +146,14 @@ fn P1_5_BQ搜索_更新向量后_结果反映变化() {
 
     let ids = {
         let mut tx = db.begin_tx();
-        tx.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"label": "node_a"}));
-        tx.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"label": "node_b"}));
+        tx.insert(
+            &[1.0, 0.0, 0.0, 0.0],
+            serde_json::json!({"label": "node_a"}),
+        );
+        tx.insert(
+            &[0.0, 1.0, 0.0, 0.0],
+            serde_json::json!({"label": "node_b"}),
+        );
         tx.commit().unwrap()
     };
 
@@ -156,7 +181,9 @@ fn P1_5_BQ搜索与BruteForce一致性() {
     {
         let mut tx = db.begin_tx();
         for i in 0..20u32 {
-            let v: Vec<f32> = (0..DIM).map(|d| if d == (i % 4) as usize { 1.0 } else { 0.0 }).collect();
+            let v: Vec<f32> = (0..DIM)
+                .map(|d| if d == (i % 4) as usize { 1.0 } else { 0.0 })
+                .collect();
             tx.insert(&v, serde_json::json!({"i": i}));
         }
         tx.commit().unwrap();
@@ -208,7 +235,9 @@ fn 搜索_批量删除后_库变空_搜索返回空() {
 
     {
         let mut tx = db.begin_tx();
-        for id in &ids { tx.delete(*id); }
+        for id in &ids {
+            tx.delete(*id);
+        }
         tx.commit().unwrap();
     }
 

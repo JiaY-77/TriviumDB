@@ -147,8 +147,8 @@ unsafe fn cosine_similarity_neon(a: &[f32], b: &[f32]) -> f32 {
             let va = vld1q_f32(a.as_ptr().add(offset));
             let vb = vld1q_f32(b.as_ptr().add(offset));
             v_dot = vfmaq_f32(v_dot, va, vb); // dot += a * b
-            v_na = vfmaq_f32(v_na, va, va);   // na  += a * a
-            v_nb = vfmaq_f32(v_nb, vb, vb);   // nb  += b * b
+            v_na = vfmaq_f32(v_na, va, va); // na  += a * a
+            v_nb = vfmaq_f32(v_nb, vb, vb); // nb  += b * b
         }
 
         // 水平归约：128-bit → 标量

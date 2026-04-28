@@ -122,7 +122,7 @@ impl Filter {
                 mask
             }
             // 对于 Or, In, Gt 等操作，我们无法提取单根必达掩码，安全退化为0（即退化到原版全扫描）
-            _ => 0
+            _ => 0,
         }
     }
 
@@ -178,7 +178,8 @@ impl Filter {
     /// - `{"$and": [{...}, {...}]}` → `Filter::And([...])`
     /// - `{"name": "Alice"}` → `Filter::Eq("name", "Alice")`（隐式 $eq）
     pub fn from_json(val: &Value) -> Result<Self, String> {
-        let obj = val.as_object()
+        let obj = val
+            .as_object()
             .ok_or_else(|| "过滤条件必须是 JSON 对象".to_string())?;
 
         let mut filters = Vec::new();
@@ -186,15 +187,15 @@ impl Filter {
         for (key, v) in obj {
             match key.as_str() {
                 "$and" => {
-                    let arr = v.as_array()
-                        .ok_or_else(|| "$and 必须是数组".to_string())?;
-                    let sub: Result<Vec<Filter>, String> = arr.iter().map(Filter::from_json).collect();
+                    let arr = v.as_array().ok_or_else(|| "$and 必须是数组".to_string())?;
+                    let sub: Result<Vec<Filter>, String> =
+                        arr.iter().map(Filter::from_json).collect();
                     filters.push(Filter::And(sub?));
                 }
                 "$or" => {
-                    let arr = v.as_array()
-                        .ok_or_else(|| "$or 必须是数组".to_string())?;
-                    let sub: Result<Vec<Filter>, String> = arr.iter().map(Filter::from_json).collect();
+                    let arr = v.as_array().ok_or_else(|| "$or 必须是数组".to_string())?;
+                    let sub: Result<Vec<Filter>, String> =
+                        arr.iter().map(Filter::from_json).collect();
                     filters.push(Filter::Or(sub?));
                 }
                 field => {
@@ -204,41 +205,56 @@ impl Filter {
                             let f = match op.as_str() {
                                 "$eq" => Filter::Eq(field.to_string(), op_val.clone()),
                                 "$ne" => Filter::Ne(field.to_string(), op_val.clone()),
-                                "$gt" => Filter::Gt(field.to_string(),
-                                    op_val.as_f64().ok_or_else(|| "$gt 需要数字".to_string())?),
-                                "$gte" => Filter::Gte(field.to_string(),
-                                    op_val.as_f64().ok_or_else(|| "$gte 需要数字".to_string())?),
-                                "$lt" => Filter::Lt(field.to_string(),
-                                    op_val.as_f64().ok_or_else(|| "$lt 需要数字".to_string())?),
-                                "$lte" => Filter::Lte(field.to_string(),
-                                    op_val.as_f64().ok_or_else(|| "$lte 需要数字".to_string())?),
+                                "$gt" => Filter::Gt(
+                                    field.to_string(),
+                                    op_val.as_f64().ok_or_else(|| "$gt 需要数字".to_string())?,
+                                ),
+                                "$gte" => Filter::Gte(
+                                    field.to_string(),
+                                    op_val.as_f64().ok_or_else(|| "$gte 需要数字".to_string())?,
+                                ),
+                                "$lt" => Filter::Lt(
+                                    field.to_string(),
+                                    op_val.as_f64().ok_or_else(|| "$lt 需要数字".to_string())?,
+                                ),
+                                "$lte" => Filter::Lte(
+                                    field.to_string(),
+                                    op_val.as_f64().ok_or_else(|| "$lte 需要数字".to_string())?,
+                                ),
                                 "$in" => {
-                                    let arr = op_val.as_array()
+                                    let arr = op_val
+                                        .as_array()
                                         .ok_or_else(|| "$in 需要数组".to_string())?;
                                     Filter::In(field.to_string(), arr.clone())
                                 }
                                 "$nin" => {
-                                    let arr = op_val.as_array()
+                                    let arr = op_val
+                                        .as_array()
                                         .ok_or_else(|| "$nin 需要数组".to_string())?;
                                     Filter::Nin(field.to_string(), arr.clone())
                                 }
                                 "$exists" => {
-                                    let b = op_val.as_bool()
+                                    let b = op_val
+                                        .as_bool()
                                         .ok_or_else(|| "$exists 需要布尔值".to_string())?;
                                     Filter::Exists(field.to_string(), b)
                                 }
                                 "$size" => {
-                                    let n = op_val.as_u64()
-                                        .ok_or_else(|| "$size 需要正整数".to_string())? as usize;
+                                    let n = op_val
+                                        .as_u64()
+                                        .ok_or_else(|| "$size 需要正整数".to_string())?
+                                        as usize;
                                     Filter::Size(field.to_string(), n)
                                 }
                                 "$all" => {
-                                    let arr = op_val.as_array()
+                                    let arr = op_val
+                                        .as_array()
                                         .ok_or_else(|| "$all 需要数组".to_string())?;
                                     Filter::All(field.to_string(), arr.clone())
                                 }
                                 "$type" => {
-                                    let t = op_val.as_str()
+                                    let t = op_val
+                                        .as_str()
                                         .ok_or_else(|| "$type 需要字符串".to_string())?;
                                     Filter::TypeMatch(field.to_string(), t.to_string())
                                 }

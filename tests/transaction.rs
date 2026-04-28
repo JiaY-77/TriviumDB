@@ -105,7 +105,7 @@ fn 事务_dry_run_维度不匹配_应拒绝整个事务() {
     let result = {
         let mut tx = db.begin_tx();
         tx.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"ok": true}));
-        tx.insert(&[1.0, 0.0, 0.0],       serde_json::json!({"bad": true})); // 维度错误
+        tx.insert(&[1.0, 0.0, 0.0], serde_json::json!({"bad": true})); // 维度错误
         tx.commit()
     };
 
@@ -161,7 +161,8 @@ fn 事务_update_payload_正常工作() {
         tx.commit().unwrap()
     };
 
-    db.update_payload(ids[0], serde_json::json!({"v": 2})).unwrap();
+    db.update_payload(ids[0], serde_json::json!({"v": 2}))
+        .unwrap();
     let payload = db.get_payload(ids[0]).unwrap();
     assert_eq!(payload["v"], 2);
 
@@ -200,7 +201,11 @@ fn 事务_unlink_正常移除边() {
         tx.commit().unwrap()
     };
 
-    { let mut tx = db.begin_tx(); tx.link(ids[0], ids[1], "rel", 1.0); tx.commit().unwrap(); }
+    {
+        let mut tx = db.begin_tx();
+        tx.link(ids[0], ids[1], "rel", 1.0);
+        tx.commit().unwrap();
+    }
     assert_eq!(db.get_edges(ids[0]).len(), 1);
 
     db.unlink(ids[0], ids[1]).unwrap();
@@ -247,7 +252,11 @@ fn P1_4_删除后更新向量_应失败() {
         tx.commit().unwrap()
     };
 
-    { let mut tx = db.begin_tx(); tx.delete(ids[0]); tx.commit().unwrap(); }
+    {
+        let mut tx = db.begin_tx();
+        tx.delete(ids[0]);
+        tx.commit().unwrap();
+    }
 
     let result = db.update_vector(ids[0], &[0.0, 0.0, 0.0, 1.0]);
     assert!(result.is_err(), "对已删除节点 update_vector 应返回 Err");
@@ -267,7 +276,11 @@ fn P1_4_删除后更新payload_应失败() {
         tx.commit().unwrap()
     };
 
-    { let mut tx = db.begin_tx(); tx.delete(ids[0]); tx.commit().unwrap(); }
+    {
+        let mut tx = db.begin_tx();
+        tx.delete(ids[0]);
+        tx.commit().unwrap();
+    }
 
     let result = db.update_payload(ids[0], serde_json::json!({"hack": true}));
     assert!(result.is_err(), "对已删除节点 update_payload 应返回 Err");
@@ -283,9 +296,17 @@ fn 事务_insert_with_id_重复ID_预检失败() {
     cleanup(&path);
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
-    { let mut tx = db.begin_tx(); tx.insert_with_id(5, &[1.0, 0.0, 0.0, 0.0], serde_json::json!({})); tx.commit().unwrap(); }
+    {
+        let mut tx = db.begin_tx();
+        tx.insert_with_id(5, &[1.0, 0.0, 0.0, 0.0], serde_json::json!({}));
+        tx.commit().unwrap();
+    }
 
-    let result = { let mut tx = db.begin_tx(); tx.insert_with_id(5, &[0.0, 1.0, 0.0, 0.0], serde_json::json!({})); tx.commit() };
+    let result = {
+        let mut tx = db.begin_tx();
+        tx.insert_with_id(5, &[0.0, 1.0, 0.0, 0.0], serde_json::json!({}));
+        tx.commit()
+    };
     assert!(result.is_err(), "重复 insert_with_id 应失败");
 
     cleanup(&path);

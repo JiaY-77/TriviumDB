@@ -58,10 +58,7 @@ pub struct AdjacencySnapshot {
 /// 1. 获取 MemTable 锁 → snapshot 邻接表 → 释放锁
 /// 2. 调用本函数 (不持有任何锁)
 /// 3. 将结果写回 Payload (可选)
-pub fn run_leiden(
-    adj: &AdjacencySnapshot,
-    config: &LeidenConfig,
-) -> LeidenResult {
+pub fn run_leiden(adj: &AdjacencySnapshot, config: &LeidenConfig) -> LeidenResult {
     let nodes = &adj.node_ids;
 
     if nodes.is_empty() {
@@ -231,10 +228,20 @@ mod tests {
     fn test_two_cliques() {
         // 两个完全子图: {1,2,3} 和 {4,5,6}
         let snap = make_snapshot(vec![
-            (1, 2, 1.0), (1, 3, 1.0), (2, 3, 1.0), // 团 A
-            (4, 5, 1.0), (4, 6, 1.0), (5, 6, 1.0), // 团 B
+            (1, 2, 1.0),
+            (1, 3, 1.0),
+            (2, 3, 1.0), // 团 A
+            (4, 5, 1.0),
+            (4, 6, 1.0),
+            (5, 6, 1.0), // 团 B
         ]);
-        let result = run_leiden(&snap, &LeidenConfig { min_community_size: 3, ..Default::default() });
+        let result = run_leiden(
+            &snap,
+            &LeidenConfig {
+                min_community_size: 3,
+                ..Default::default()
+            },
+        );
         assert_eq!(result.num_clusters, 2, "应发现 2 个社区");
         // 同团节点应属于同一簇
         assert_eq!(result.node_to_cluster[&1], result.node_to_cluster[&2]);
@@ -246,11 +253,14 @@ mod tests {
     #[test]
     fn test_fragment_filtering() {
         // {1,2,3} 是团, {4,5} 是碎片 (< min_community_size=3)
-        let snap = make_snapshot(vec![
-            (1, 2, 1.0), (1, 3, 1.0), (2, 3, 1.0),
-            (4, 5, 1.0),
-        ]);
-        let result = run_leiden(&snap, &LeidenConfig { min_community_size: 3, ..Default::default() });
+        let snap = make_snapshot(vec![(1, 2, 1.0), (1, 3, 1.0), (2, 3, 1.0), (4, 5, 1.0)]);
+        let result = run_leiden(
+            &snap,
+            &LeidenConfig {
+                min_community_size: 3,
+                ..Default::default()
+            },
+        );
         assert_eq!(result.num_clusters, 1, "碎片簇应被过滤");
         assert!(result.node_to_cluster.contains_key(&1));
         assert!(!result.node_to_cluster.contains_key(&4), "碎片节点不应出现");
@@ -258,10 +268,14 @@ mod tests {
 
     #[test]
     fn test_centroid_computation() {
-        let snap = make_snapshot(vec![
-            (1, 2, 1.0), (1, 3, 1.0), (2, 3, 1.0),
-        ]);
-        let mut result = run_leiden(&snap, &LeidenConfig { min_community_size: 3, ..Default::default() });
+        let snap = make_snapshot(vec![(1, 2, 1.0), (1, 3, 1.0), (2, 3, 1.0)]);
+        let mut result = run_leiden(
+            &snap,
+            &LeidenConfig {
+                min_community_size: 3,
+                ..Default::default()
+            },
+        );
 
         let mut vectors = HashMap::new();
         vectors.insert(1u64, vec![1.0f32, 0.0, 0.0]);
@@ -272,6 +286,6 @@ mod tests {
         assert_eq!(result.centroids.len(), 1);
         let c = result.centroids.values().next().unwrap();
         // 质心应约为 (1/3, 1/3, 1/3)
-        assert!((c[0] - 1.0/3.0).abs() < 0.01);
+        assert!((c[0] - 1.0 / 3.0).abs() < 0.01);
     }
 }

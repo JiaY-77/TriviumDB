@@ -74,12 +74,12 @@ pub enum TqlToken {
     Star,      // *
 
     // ── 比较运算符 ──
-    Eq,   // ==
-    Ne,   // !=
-    Gte,  // >=
-    Lte,  // <=
-    Gt,   // >
-    Lt,   // <
+    Eq,  // ==
+    Ne,  // !=
+    Gte, // >=
+    Lte, // <=
+    Gt,  // >
+    Lt,  // <
 
     Eof,
 }
@@ -144,16 +144,46 @@ impl TqlLexer {
                 }
                 Some(ch) => {
                     let tok = match ch {
-                        '(' => { self.advance(); TqlToken::LParen }
-                        ')' => { self.advance(); TqlToken::RParen }
-                        '[' => { self.advance(); TqlToken::LBracket }
-                        ']' => { self.advance(); TqlToken::RBracket }
-                        '{' => { self.advance(); TqlToken::LBrace }
-                        '}' => { self.advance(); TqlToken::RBrace }
-                        ':' => { self.advance(); TqlToken::Colon }
-                        ',' => { self.advance(); TqlToken::Comma }
-                        '|' => { self.advance(); TqlToken::Pipe }
-                        '*' => { self.advance(); TqlToken::Star }
+                        '(' => {
+                            self.advance();
+                            TqlToken::LParen
+                        }
+                        ')' => {
+                            self.advance();
+                            TqlToken::RParen
+                        }
+                        '[' => {
+                            self.advance();
+                            TqlToken::LBracket
+                        }
+                        ']' => {
+                            self.advance();
+                            TqlToken::RBracket
+                        }
+                        '{' => {
+                            self.advance();
+                            TqlToken::LBrace
+                        }
+                        '}' => {
+                            self.advance();
+                            TqlToken::RBrace
+                        }
+                        ':' => {
+                            self.advance();
+                            TqlToken::Colon
+                        }
+                        ',' => {
+                            self.advance();
+                            TqlToken::Comma
+                        }
+                        '|' => {
+                            self.advance();
+                            TqlToken::Pipe
+                        }
+                        '*' => {
+                            self.advance();
+                            TqlToken::Star
+                        }
 
                         '.' => {
                             self.advance();
@@ -250,7 +280,10 @@ impl TqlLexer {
                                             Some('t') => s.push('\t'),
                                             Some('\\') => s.push('\\'),
                                             Some(c) if c == quote => s.push(c),
-                                            Some(c) => { s.push('\\'); s.push(c); }
+                                            Some(c) => {
+                                                s.push('\\');
+                                                s.push(c);
+                                            }
                                             None => return Err("Unterminated string escape".into()),
                                         }
                                     }
@@ -277,9 +310,7 @@ impl TqlLexer {
                             TqlToken::DollarOp(name)
                         }
 
-                        c if c.is_ascii_digit() => {
-                            self.read_number()?
-                        }
+                        c if c.is_ascii_digit() => self.read_number()?,
 
                         c if c.is_ascii_alphabetic() || c == '_' => {
                             let mut ident = String::new();
@@ -292,42 +323,42 @@ impl TqlLexer {
                                 }
                             }
                             match ident.to_uppercase().as_str() {
-                                "MATCH"   => TqlToken::Match,
-                                "WHERE"   => TqlToken::Where,
-                                "RETURN"  => TqlToken::Return,
-                                "LIMIT"   => TqlToken::Limit,
-                                "AND"     => TqlToken::And,
-                                "OR"      => TqlToken::Or,
-                                "NOT"     => TqlToken::Not,
-                                "FIND"    => TqlToken::Find,
-                                "SEARCH"  => TqlToken::Search,
-                                "VECTOR"  => TqlToken::Vector,
-                                "TOP"     => TqlToken::Top,
-                                "EXPAND"  => TqlToken::Expand,
+                                "MATCH" => TqlToken::Match,
+                                "WHERE" => TqlToken::Where,
+                                "RETURN" => TqlToken::Return,
+                                "LIMIT" => TqlToken::Limit,
+                                "AND" => TqlToken::And,
+                                "OR" => TqlToken::Or,
+                                "NOT" => TqlToken::Not,
+                                "FIND" => TqlToken::Find,
+                                "SEARCH" => TqlToken::Search,
+                                "VECTOR" => TqlToken::Vector,
+                                "TOP" => TqlToken::Top,
+                                "EXPAND" => TqlToken::Expand,
                                 "MATCHES" => TqlToken::Matches,
-                                "ORDER"   => TqlToken::Order,
-                                "BY"      => TqlToken::By,
-                                "ASC"     => TqlToken::Asc,
-                                "DESC"    => TqlToken::Desc,
-                                "OFFSET"  => TqlToken::Offset,
+                                "ORDER" => TqlToken::Order,
+                                "BY" => TqlToken::By,
+                                "ASC" => TqlToken::Asc,
+                                "DESC" => TqlToken::Desc,
+                                "OFFSET" => TqlToken::Offset,
                                 "DISTINCT" => TqlToken::Distinct,
-                                "AS"      => TqlToken::As,
+                                "AS" => TqlToken::As,
                                 "OPTIONAL" => TqlToken::Optional,
-                                "COUNT"   => TqlToken::Count,
-                                "SUM"     => TqlToken::Sum,
-                                "AVG"     => TqlToken::Avg,
-                                "MIN"     => TqlToken::Min,
-                                "MAX"     => TqlToken::Max,
+                                "COUNT" => TqlToken::Count,
+                                "SUM" => TqlToken::Sum,
+                                "AVG" => TqlToken::Avg,
+                                "MIN" => TqlToken::Min,
+                                "MAX" => TqlToken::Max,
                                 "COLLECT" => TqlToken::Collect,
                                 "EXPLAIN" => TqlToken::Explain,
-                                "CREATE"  => TqlToken::Create,
-                                "SET"     => TqlToken::Set,
-                                "DELETE"  => TqlToken::Delete,
-                                "DETACH"  => TqlToken::Detach,
-                                "TRUE"    => TqlToken::BoolLit(true),
-                                "FALSE"   => TqlToken::BoolLit(false),
-                                "NULL"    => TqlToken::Null,
-                                _         => TqlToken::Ident(ident),
+                                "CREATE" => TqlToken::Create,
+                                "SET" => TqlToken::Set,
+                                "DELETE" => TqlToken::Delete,
+                                "DETACH" => TqlToken::Detach,
+                                "TRUE" => TqlToken::BoolLit(true),
+                                "FALSE" => TqlToken::BoolLit(false),
+                                "NULL" => TqlToken::Null,
+                                _ => TqlToken::Ident(ident),
                             }
                         }
 
@@ -349,7 +380,10 @@ impl TqlLexer {
             if c.is_ascii_digit() {
                 num_str.push(c);
                 self.advance();
-            } else if c == '.' && !is_float && self.peek_ahead(1).is_some_and(|c| c.is_ascii_digit()) {
+            } else if c == '.'
+                && !is_float
+                && self.peek_ahead(1).is_some_and(|c| c.is_ascii_digit())
+            {
                 // 只有 "数字.数字" 才是浮点数，"数字.." 是整数 + DotDot
                 is_float = true;
                 num_str.push(c);

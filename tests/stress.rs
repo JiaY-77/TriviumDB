@@ -6,9 +6,9 @@
 //! - 图谱极度自环与重边
 //! - 狂暴随机写入后的图谱与数据一致性验证
 
-use triviumdb::database::Database;
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
+use triviumdb::database::Database;
 
 const DIM: usize = 4;
 
@@ -31,9 +31,13 @@ fn 测试_并发读写安全_单写多读互不恐慌() {
     cleanup(&path);
 
     let db = Arc::new(Mutex::new(Database::<f32>::open(&path, DIM).unwrap()));
-    
+
     // 初始化基座
-    let id_base = db.lock().unwrap().insert(&[1.0, 1.0, 1.0, 1.0], serde_json::json!({"init": true})).unwrap();
+    let id_base = db
+        .lock()
+        .unwrap()
+        .insert(&[1.0, 1.0, 1.0, 1.0], serde_json::json!({"init": true}))
+        .unwrap();
 
     let mut handles = vec![];
     let barrier = Arc::new(Barrier::new(6)); // 1 写 + 5 读
@@ -68,7 +72,7 @@ fn 测试_并发读写安全_单写多读互不恐慌() {
             let _ = lock.insert(&[j as f32, 0.0, 0.0, 0.0], serde_json::json!({"seq": j}));
             if j % 50 == 0 {
                 // 定期触发自动压缩重组（最危险的系统底层锁竞争区域）
-                lock.compact().unwrap(); 
+                lock.compact().unwrap();
             }
             drop(lock);
             writes += 1;
@@ -82,7 +86,11 @@ fn 测试_并发读写安全_单写多读互不恐慌() {
     }
     writer_handle.join().unwrap();
 
-    assert_eq!(db.lock().unwrap().node_count(), 501, "高速并发读写混合后，节点数量应完全正确且无丢失");
+    assert_eq!(
+        db.lock().unwrap().node_count(),
+        501,
+        "高速并发读写混合后，节点数量应完全正确且无丢失"
+    );
 
     cleanup(&path);
 }
@@ -98,12 +106,16 @@ fn 测试_极端病态向量_零向量不得引发NaN() {
 
     // 尝试插入完全是 0 的向量。全 0 向量在计算 Cosine Similarity 时分母会变成 0，导致 NaN。
     // 我们必须确保计算层进行了安全截断或者直接返回 0.0 得分，而不是让整个查询挂掉甚至泄漏 NaN。
-    let zero_id = db.insert(&[0.0, 0.0, 0.0, 0.0], serde_json::json!({"type": "zero"})).unwrap();
-    let normal_id = db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"type": "normal"})).unwrap();
+    let zero_id = db
+        .insert(&[0.0, 0.0, 0.0, 0.0], serde_json::json!({"type": "zero"}))
+        .unwrap();
+    let normal_id = db
+        .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"type": "normal"}))
+        .unwrap();
 
     // 使用正常查询向量去找，看零向量是否引发搜索崩溃
     let results = db.search(&[1.0, 0.0, 0.0, 0.0], 10, 0, -1.0).unwrap();
-    
+
     // 我们期望返回：第一名肯定是 normal_id。
     let normal_hit = results.iter().find(|h| h.id == normal_id).unwrap();
     assert!(normal_hit.score > 0.99, "正常节点必须精确匹配");
@@ -127,8 +139,12 @@ fn 测试_图谱自环与重边_极度震荡防雪崩() {
 
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
-    let id1 = db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "A"})).unwrap();
-    let id2 = db.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "B"})).unwrap();
+    let id1 = db
+        .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "A"}))
+        .unwrap();
+    let id2 = db
+        .insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "B"}))
+        .unwrap();
 
     // 疯狂的自我循环 (Self Loop)
     db.link(id1, id1, "self_love", 10.0).unwrap();
@@ -146,13 +162,23 @@ fn 测试_图谱自环与重边_极度震荡防雪崩() {
         top_k: 10,
         ..Default::default()
     };
-    let hits = db.search_advanced(&[1.0, 0.0, 0.0, 0.0], &search_config).unwrap();
+    let hits = db
+        .search_advanced(&[1.0, 0.0, 0.0, 0.0], &search_config)
+        .unwrap();
 
-    assert!(hits.len() > 0, "必须能返回结果，绝对不能被重边死循环或者耗尽调用栈");
+    assert!(
+        hits.len() > 0,
+        "必须能返回结果，绝对不能被重边死循环或者耗尽调用栈"
+    );
 
     // 取出来的值应该是正常数字，不能因为能量过度震荡出现 Infinity
     for h in hits {
-        assert!(!h.score.is_infinite() && !h.score.is_nan(), "在狂暴循环的图中能量不能溢出到 Infinity: Node {}, Score {}", h.id, h.score);
+        assert!(
+            !h.score.is_infinite() && !h.score.is_nan(),
+            "在狂暴循环的图中能量不能溢出到 Infinity: Node {}, Score {}",
+            h.id,
+            h.score
+        );
     }
 
     cleanup(&path);
@@ -170,21 +196,33 @@ fn 测试_暴力中断随机重放_多轮假死不丢数据() {
     // 模拟应用反复崩溃重启 4 次，每次在 WAL 里疯狂写很多没来得及 flush 的东西就“停电”
     for loop_i in 0..4 {
         let mut db = Database::<f32>::open(&path, DIM).unwrap();
-        assert_eq!(db.node_count(), total_inserted, "第 {} 次重载，节点数量必须与坠毁前强一致", loop_i);
-        
+        assert_eq!(
+            db.node_count(),
+            total_inserted,
+            "第 {} 次重载，节点数量必须与坠毁前强一致",
+            loop_i
+        );
+
         let mut tx = db.begin_tx();
         for j in 0..200 {
-            tx.insert(&[j as f32, loop_i as f32, 0.0, 0.0], serde_json::json!({"c": j}));
+            tx.insert(
+                &[j as f32, loop_i as f32, 0.0, 0.0],
+                serde_json::json!({"c": j}),
+            );
         }
         tx.commit().unwrap();
-        
+
         total_inserted += 200;
-        
+
         // 故意不 db.flush()，直接通过作用域 Drop 掉 db。模拟断电杀进程，全靠 WAL 保命。
     }
 
     let db = Database::<f32>::open(&path, DIM).unwrap();
-    assert_eq!(db.node_count(), 800, "多轮暴力中断后，所有通过 WAL 预写追加的数据必须一粒不落地找回");
+    assert_eq!(
+        db.node_count(),
+        800,
+        "多轮暴力中断后，所有通过 WAL 预写追加的数据必须一粒不落地找回"
+    );
 
     cleanup(&path);
 }
@@ -202,8 +240,19 @@ fn 测试_ID单调性_跨越删除和WAL回放后绝不复用() {
     for round in 0..3 {
         let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
-        let id = db.insert(&[round as f32, 0.0, 0.0, 0.0], serde_json::json!({"round": round})).unwrap();
-        assert!(id > prev_max_id, "第 {} 轮: 新 ID ({}) 必须严格大于历史最大 ID ({})", round, id, prev_max_id);
+        let id = db
+            .insert(
+                &[round as f32, 0.0, 0.0, 0.0],
+                serde_json::json!({"round": round}),
+            )
+            .unwrap();
+        assert!(
+            id > prev_max_id,
+            "第 {} 轮: 新 ID ({}) 必须严格大于历史最大 ID ({})",
+            round,
+            id,
+            prev_max_id
+        );
         prev_max_id = id;
 
         // 删除刚插入的节点
@@ -213,8 +262,13 @@ fn 测试_ID单调性_跨越删除和WAL回放后绝不复用() {
 
     // 最终再开一次，确认 ID 分配器已经向前推进
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
-    let final_id = db.insert(&[9.9, 9.9, 9.9, 9.9], serde_json::json!({"final": true})).unwrap();
-    assert!(final_id > prev_max_id, "WAL 多轮回放后 ID 分配器必须持续走高，不能回退复用");
+    let final_id = db
+        .insert(&[9.9, 9.9, 9.9, 9.9], serde_json::json!({"final": true}))
+        .unwrap();
+    assert!(
+        final_id > prev_max_id,
+        "WAL 多轮回放后 ID 分配器必须持续走高，不能回退复用"
+    );
 
     cleanup(&path);
 }
@@ -230,11 +284,18 @@ fn 测试_Mmap到Rom热切换_数据不丢不裂() {
 
     // 第 1 阶段：Mmap 模式写入并 flush
     {
-        let config = Config { dim: DIM, storage_mode: StorageMode::Mmap, ..Default::default() };
+        let config = Config {
+            dim: DIM,
+            storage_mode: StorageMode::Mmap,
+            ..Default::default()
+        };
         let mut db = Database::<f32>::open_with_config(&path, config).unwrap();
         let mut tx = db.begin_tx();
         for i in 0..50 {
-            tx.insert(&[i as f32, 0.0, 0.0, 0.0], serde_json::json!({"mode": "mmap", "i": i}));
+            tx.insert(
+                &[i as f32, 0.0, 0.0, 0.0],
+                serde_json::json!({"mode": "mmap", "i": i}),
+            );
         }
         tx.commit().unwrap();
         db.flush().unwrap();
@@ -242,22 +303,38 @@ fn 测试_Mmap到Rom热切换_数据不丢不裂() {
 
     // 第 2 阶段：用 Rom 模式重新打开同一库——引擎应自动读取 + 重组
     {
-        let config = Config { dim: DIM, storage_mode: StorageMode::Rom, ..Default::default() };
+        let config = Config {
+            dim: DIM,
+            storage_mode: StorageMode::Rom,
+            ..Default::default()
+        };
         let mut db = Database::<f32>::open_with_config(&path, config).unwrap();
-        assert_eq!(db.node_count(), 50, "从 Mmap 切换到 Rom 后，节点数量必须一致");
-        
+        assert_eq!(
+            db.node_count(),
+            50,
+            "从 Mmap 切换到 Rom 后，节点数量必须一致"
+        );
+
         // 验证数据可读
         let p = db.get_payload(1).unwrap();
         assert_eq!(p["mode"], "mmap");
-        
+
         // 在 Rom 模式下继续写入新数据
-        db.insert(&[99.0, 99.0, 99.0, 99.0], serde_json::json!({"mode": "rom"})).unwrap();
+        db.insert(
+            &[99.0, 99.0, 99.0, 99.0],
+            serde_json::json!({"mode": "rom"}),
+        )
+        .unwrap();
         db.flush().unwrap();
     }
 
     // 第 3 阶段：再切回 Mmap 检查所有 51 条都在
     {
-        let config = Config { dim: DIM, storage_mode: StorageMode::Mmap, ..Default::default() };
+        let config = Config {
+            dim: DIM,
+            storage_mode: StorageMode::Mmap,
+            ..Default::default()
+        };
         let db = Database::<f32>::open_with_config(&path, config).unwrap();
         assert_eq!(db.node_count(), 51, "双向模式热切换后数据必须完好无损");
     }
@@ -274,9 +351,15 @@ fn 测试_悬空边防御_删除节点后不得返回幽灵搜索结果() {
 
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
-    let id_a = db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "A"})).unwrap();
-    let id_b = db.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "B"})).unwrap();
-    let id_c = db.insert(&[0.0, 0.0, 1.0, 0.0], serde_json::json!({"name": "C"})).unwrap();
+    let id_a = db
+        .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "A"}))
+        .unwrap();
+    let id_b = db
+        .insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "B"}))
+        .unwrap();
+    let id_c = db
+        .insert(&[0.0, 0.0, 1.0, 0.0], serde_json::json!({"name": "C"}))
+        .unwrap();
 
     db.link(id_a, id_b, "follows", 1.0).unwrap();
     db.link(id_b, id_c, "follows", 1.0).unwrap();
@@ -327,7 +410,7 @@ fn 测试_空库极端操作_一切安全返回() {
 
     // 对空库执行 compact
     db.compact().unwrap(); // 必须安全
-    
+
     // 对空库 flush
     db.flush().unwrap(); // 必须安全
 
@@ -353,11 +436,20 @@ fn 测试_反复全删全插_墓碑与ID分配器绝不错位() {
     for cycle in 0..5 {
         let mut ids = vec![];
         for j in 0..100 {
-            let id = db.insert(
-                &[cycle as f32, j as f32, 0.0, 0.0],
-                serde_json::json!({"cycle": cycle, "j": j})
-            ).unwrap();
-            assert!(id > highest_id, "第 {} 轮第 {} 条: ID={} 必须大于历史最大 {}", cycle, j, id, highest_id);
+            let id = db
+                .insert(
+                    &[cycle as f32, j as f32, 0.0, 0.0],
+                    serde_json::json!({"cycle": cycle, "j": j}),
+                )
+                .unwrap();
+            assert!(
+                id > highest_id,
+                "第 {} 轮第 {} 条: ID={} 必须大于历史最大 {}",
+                cycle,
+                j,
+                id,
+                highest_id
+            );
             highest_id = id;
             ids.push(id);
         }
@@ -374,7 +466,12 @@ fn 测试_反复全删全插_墓碑与ID分配器绝不错位() {
     }
 
     // 最终再插入 1 条，确认整个系统依然完好如初
-    let final_id = db.insert(&[42.0, 42.0, 42.0, 42.0], serde_json::json!({"survived": true})).unwrap();
+    let final_id = db
+        .insert(
+            &[42.0, 42.0, 42.0, 42.0],
+            serde_json::json!({"survived": true}),
+        )
+        .unwrap();
     assert!(final_id > highest_id);
     assert_eq!(db.node_count(), 1);
 

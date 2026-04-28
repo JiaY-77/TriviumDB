@@ -36,7 +36,9 @@ fn robust_rename(from: &Path, to: &Path) -> std::io::Result<()> {
                     if os_err == Some(5) || os_err == Some(32) {
                         tracing::debug!(
                             "robust_rename: attempt {} failed (os_error={:?}), retrying in {:?}",
-                            attempt + 1, os_err, delay
+                            attempt + 1,
+                            os_err,
+                            delay
                         );
                         std::thread::sleep(delay);
                         delay = (delay * 2).min(std::time::Duration::from_millis(50));
@@ -210,13 +212,14 @@ fn save_tdb<T: VectorType>(
     // 2. Payload Block 包含 Tombstones
     for &nid in internal_indices {
         if nid != 0
-            && let Some(p) = memtable.get_payload(nid) {
-                let json_bytes = serde_json::to_vec(p).unwrap_or_default();
-                w.write_all(&nid.to_le_bytes())?;
-                w.write_all(&(json_bytes.len() as u32).to_le_bytes())?;
-                w.write_all(&json_bytes)?;
-                continue;
-            }
+            && let Some(p) = memtable.get_payload(nid)
+        {
+            let json_bytes = serde_json::to_vec(p).unwrap_or_default();
+            w.write_all(&nid.to_le_bytes())?;
+            w.write_all(&(json_bytes.len() as u32).to_le_bytes())?;
+            w.write_all(&json_bytes)?;
+            continue;
+        }
         // Tombstone
         w.write_all(&0u64.to_le_bytes())?;
         w.write_all(&0u32.to_le_bytes())?;
@@ -275,7 +278,9 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
     let mmap = unsafe { Mmap::map(&file) }.map_err(TriviumError::Io)?;
 
     if mmap.len() < HEADER_SIZE as usize {
-        return Err(TriviumError::CorruptedFile("File too small for header".into()));
+        return Err(TriviumError::CorruptedFile(
+            "File too small for header".into(),
+        ));
     }
 
     let bytes = &mmap[..];
@@ -304,7 +309,11 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
     // 兼容旧版 V3 及以下的冗余区块
     let edge_limit_offset = if version >= 4 {
         // v4/v5: edge block 的上限由 bq_offset（v5）或 文件末尾（v4）决定
-        if version >= 5 && bq_offset > 0 { bq_offset } else { mmap.len() }
+        if version >= 5 && bq_offset > 0 {
+            bq_offset
+        } else {
+            mmap.len()
+        }
     } else if mmap.len() >= 58 {
         u64::from_le_bytes(bytes[50..58].try_into().unwrap()) as usize
     } else {
@@ -539,9 +548,8 @@ fn load_bq_block<T: VectorType>(
         return; // 无 BQ Block 或文件不完整
     }
 
-    let bq_count = u64::from_le_bytes(
-        bytes[bq_offset..bq_offset + 8].try_into().unwrap_or([0; 8])
-    ) as usize;
+    let bq_count =
+        u64::from_le_bytes(bytes[bq_offset..bq_offset + 8].try_into().unwrap_or([0; 8])) as usize;
 
     if bq_count == 0 {
         return;

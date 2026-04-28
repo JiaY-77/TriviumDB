@@ -312,9 +312,8 @@ pub mod nodejs {
         /// ```
         #[napi]
         pub fn load_ffi_hook(&mut self, lib_path: String) -> napi::Result<()> {
-            let ffi_hook = crate::hook::FfiHook::load(&lib_path).map_err(|e| {
-                napi::Error::from_reason(format!("加载 FFI Hook 失败: {}", e))
-            })?;
+            let ffi_hook = crate::hook::FfiHook::load(&lib_path)
+                .map_err(|e| napi::Error::from_reason(format!("加载 FFI Hook 失败: {}", e)))?;
             dispatch!(self, mut db => db.set_hook(ffi_hook));
             Ok(())
         }
@@ -534,11 +533,15 @@ pub mod nodejs {
             match &self.inner {
                 DbBackend::F32(db) => db.get(id).map(|n| {
                     let num_edges = n.edges.len() as u32;
-                    let edges_arr = n.edges.into_iter().map(|e| JsEdge {
-                        target_id: e.target_id as f64,
-                        label: e.label.clone(),
-                        weight: e.weight as f64,
-                    }).collect();
+                    let edges_arr = n
+                        .edges
+                        .into_iter()
+                        .map(|e| JsEdge {
+                            target_id: e.target_id as f64,
+                            label: e.label.clone(),
+                            weight: e.weight as f64,
+                        })
+                        .collect();
                     JsNodeView {
                         id: n.id as f64,
                         vector: n.vector.iter().map(|&x| x as f64).collect(),
@@ -549,11 +552,15 @@ pub mod nodejs {
                 }),
                 DbBackend::F16(db) => db.get(id).map(|n| {
                     let num_edges = n.edges.len() as u32;
-                    let edges_arr = n.edges.into_iter().map(|e| JsEdge {
-                        target_id: e.target_id as f64,
-                        label: e.label.clone(),
-                        weight: e.weight as f64,
-                    }).collect();
+                    let edges_arr = n
+                        .edges
+                        .into_iter()
+                        .map(|e| JsEdge {
+                            target_id: e.target_id as f64,
+                            label: e.label.clone(),
+                            weight: e.weight as f64,
+                        })
+                        .collect();
                     JsNodeView {
                         id: n.id as f64,
                         vector: n.vector.iter().map(|x| x.to_f64()).collect(),
@@ -564,11 +571,15 @@ pub mod nodejs {
                 }),
                 DbBackend::U64(db) => db.get(id).map(|n| {
                     let num_edges = n.edges.len() as u32;
-                    let edges_arr = n.edges.into_iter().map(|e| JsEdge {
-                        target_id: e.target_id as f64,
-                        label: e.label.clone(),
-                        weight: e.weight as f64,
-                    }).collect();
+                    let edges_arr = n
+                        .edges
+                        .into_iter()
+                        .map(|e| JsEdge {
+                            target_id: e.target_id as f64,
+                            label: e.label.clone(),
+                            weight: e.weight as f64,
+                        })
+                        .collect();
                     JsNodeView {
                         id: n.id as f64,
                         vector: n.vector.iter().map(|&x| x as f64).collect(),
@@ -659,7 +670,10 @@ pub mod nodejs {
         /// **无锁设计**: 短暂持锁快照邻接表后立即释放，聚类在锁外计算。
         /// 调用期间数据库仍可正常读写。
         #[napi]
-        pub fn leiden_cluster(&self, config: Option<JsLeidenConfig>) -> napi::Result<JsClusterResult> {
+        pub fn leiden_cluster(
+            &self,
+            config: Option<JsLeidenConfig>,
+        ) -> napi::Result<JsClusterResult> {
             let cfg = config.unwrap_or(JsLeidenConfig {
                 min_community_size: None,
                 max_iterations: None,

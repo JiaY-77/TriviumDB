@@ -86,10 +86,10 @@ impl TextIndex {
             && let Ok(ac) = AhoCorasickBuilder::new()
                 .match_kind(MatchKind::LeftmostLongest)
                 .build(&keys)
-            {
-                self.ac_matcher = Some(ac);
-                self.keywords = keys;
-            }
+        {
+            self.ac_matcher = Some(ac);
+            self.keywords = keys;
+        }
 
         // 2. 计算 BM25 AvgDL
         self.total_docs = self.doc_lengths.len();

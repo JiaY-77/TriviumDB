@@ -431,7 +431,11 @@ impl<T: VectorType> VecPool<T> {
         self.has_dirty_base = false;
         self.invalidate_cache();
 
-        tracing::debug!("[VecPool] 追加写入: +{} 向量, 累计 {} 向量", append_count, new_total);
+        tracing::debug!(
+            "[VecPool] 追加写入: +{} 向量, 累计 {} 向量",
+            append_count,
+            new_total
+        );
         Ok(new_total)
     }
 
@@ -514,7 +518,8 @@ impl<T: VectorType> VecPool<T> {
         #[cfg(unix)]
         if let Some(ref m) = self.mmap {
             let _ = unsafe { m.unchecked_advise(memmap2::UncheckedAdvice::DontNeed) };
-            tracing::debug!("[VecPool] madvise(DONTNEED)：释放 {} MB 冷页",
+            tracing::debug!(
+                "[VecPool] madvise(DONTNEED)：释放 {} MB 冷页",
                 self.mmap_count * self.dim * std::mem::size_of::<T>() / (1024 * 1024)
             );
         }

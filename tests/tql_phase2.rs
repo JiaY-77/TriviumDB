@@ -26,11 +26,36 @@ fn build_test_db(path: &str) -> Database<f32> {
     cleanup(path);
     let mut db = Database::<f32>::open(path, DIM).unwrap();
 
-    let alice_id = db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice", "age": 30})).unwrap();
-    let bob_id = db.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob", "age": 25})).unwrap();
-    let carol_id = db.insert(&[0.0, 0.0, 1.0, 0.0], serde_json::json!({"name": "Carol", "age": 35})).unwrap();
-    let acme_id = db.insert(&[0.0, 0.0, 0.0, 1.0], serde_json::json!({"name": "Acme", "type": "company"})).unwrap();
-    let _dave_id = db.insert(&[0.5, 0.5, 0.0, 0.0], serde_json::json!({"name": "Dave", "age": 28})).unwrap();
+    let alice_id = db
+        .insert(
+            &[1.0, 0.0, 0.0, 0.0],
+            serde_json::json!({"name": "Alice", "age": 30}),
+        )
+        .unwrap();
+    let bob_id = db
+        .insert(
+            &[0.0, 1.0, 0.0, 0.0],
+            serde_json::json!({"name": "Bob", "age": 25}),
+        )
+        .unwrap();
+    let carol_id = db
+        .insert(
+            &[0.0, 0.0, 1.0, 0.0],
+            serde_json::json!({"name": "Carol", "age": 35}),
+        )
+        .unwrap();
+    let acme_id = db
+        .insert(
+            &[0.0, 0.0, 0.0, 1.0],
+            serde_json::json!({"name": "Acme", "type": "company"}),
+        )
+        .unwrap();
+    let _dave_id = db
+        .insert(
+            &[0.5, 0.5, 0.0, 0.0],
+            serde_json::json!({"name": "Dave", "age": 28}),
+        )
+        .unwrap();
 
     db.link(alice_id, bob_id, "knows", 1.0).unwrap();
     db.link(bob_id, carol_id, "knows", 1.0).unwrap();
@@ -49,7 +74,9 @@ fn 测试_聚合函数_COUNT() {
     let db = build_test_db(&path);
 
     // 统计 Alice 的 knows 好友数
-    let results = db.tql("MATCH (a)-[:knows]->(b) RETURN count(b) AS friend_count").unwrap();
+    let results = db
+        .tql("MATCH (a)-[:knows]->(b) RETURN count(b) AS friend_count")
+        .unwrap();
     assert_eq!(results.len(), 1, "COUNT 应聚合为单行");
 
     let row = &results[0];
@@ -66,13 +93,19 @@ fn 测试_聚合函数_AVG() {
     let path = tmp_db("agg_avg");
     let db = build_test_db(&path);
 
-    let results = db.tql("MATCH (a)-[:knows]->(b) RETURN avg(b.age) AS avg_age").unwrap();
+    let results = db
+        .tql("MATCH (a)-[:knows]->(b) RETURN avg(b.age) AS avg_age")
+        .unwrap();
     assert_eq!(results.len(), 1);
 
     let avg_node = &results[0]["avg_age"];
     let avg_val = avg_node.payload.get("avg_age").unwrap().as_f64().unwrap();
     // Bob=25, Carol=35 → avg = 30.0
-    assert!((avg_val - 30.0).abs() < 0.01, "AVG(age) should be 30.0, got {}", avg_val);
+    assert!(
+        (avg_val - 30.0).abs() < 0.01,
+        "AVG(age) should be 30.0, got {}",
+        avg_val
+    );
 
     drop(db);
     cleanup(&path);
@@ -88,8 +121,18 @@ fn 测试_聚合函数_SUM_MIN_MAX() {
 
     let row = &results[0];
     let total = row["total"].payload.get("total").unwrap().as_f64().unwrap();
-    let youngest = row["youngest"].payload.get("youngest").unwrap().as_f64().unwrap();
-    let oldest = row["oldest"].payload.get("oldest").unwrap().as_f64().unwrap();
+    let youngest = row["youngest"]
+        .payload
+        .get("youngest")
+        .unwrap()
+        .as_f64()
+        .unwrap();
+    let oldest = row["oldest"]
+        .payload
+        .get("oldest")
+        .unwrap()
+        .as_f64()
+        .unwrap();
 
     assert!((total - 60.0).abs() < 0.01, "SUM should be 60");
     assert!((youngest - 25.0).abs() < 0.01, "MIN should be 25");
@@ -104,7 +147,9 @@ fn 测试_聚合函数_COLLECT() {
     let path = tmp_db("agg_collect");
     let db = build_test_db(&path);
 
-    let results = db.tql("MATCH (a)-[:knows]->(b) RETURN collect(b.name) AS names").unwrap();
+    let results = db
+        .tql("MATCH (a)-[:knows]->(b) RETURN collect(b.name) AS names")
+        .unwrap();
     assert_eq!(results.len(), 1);
 
     let names = results[0]["names"].payload.get("names").unwrap();
@@ -151,7 +196,9 @@ fn 测试_AS别名_属性访问() {
     let path = tmp_db("as_alias");
     let db = build_test_db(&path);
 
-    let results = db.tql("MATCH (a)-[:knows]->(b) RETURN a.name, b.name").unwrap();
+    let results = db
+        .tql("MATCH (a)-[:knows]->(b) RETURN a.name, b.name")
+        .unwrap();
     // 应该能解析并返回结果
     assert!(!results.is_empty(), "属性投影应返回结果");
 
@@ -169,7 +216,9 @@ fn 测试_OPTIONAL_MATCH_语法解析() {
     let db = build_test_db(&path);
 
     // OPTIONAL MATCH 正常匹配
-    let results = db.tql("OPTIONAL MATCH (a)-[:knows]->(b) RETURN a, b").unwrap();
+    let results = db
+        .tql("OPTIONAL MATCH (a)-[:knows]->(b) RETURN a, b")
+        .unwrap();
     assert!(!results.is_empty(), "OPTIONAL MATCH 有匹配时应返回结果");
 
     drop(db);
@@ -190,7 +239,11 @@ fn 测试_标签索引下推_减少扫描() {
     // 带标签约束 → 使用 label_index 缩小候选集
     let r2 = db.tql("MATCH (a)-[:works_at]->(b) RETURN a, b").unwrap();
 
-    assert_eq!(r1.len(), 3, "无标签约束：Alice->Bob, Bob->Carol, Alice->Acme");
+    assert_eq!(
+        r1.len(),
+        3,
+        "无标签约束：Alice->Bob, Bob->Carol, Alice->Acme"
+    );
     assert_eq!(r2.len(), 1, "标签约束 works_at：仅 Alice->Acme");
 
     // 验证结果正确性
@@ -210,12 +263,20 @@ fn 测试_EXPLAIN_基础计划() {
     let path = tmp_db("explain_basic");
     let db = build_test_db(&path);
 
-    let results = db.tql("EXPLAIN MATCH (a)-[:knows]->(b) RETURN a, b").unwrap();
+    let results = db
+        .tql("EXPLAIN MATCH (a)-[:knows]->(b) RETURN a, b")
+        .unwrap();
     assert_eq!(results.len(), 1, "EXPLAIN 应返回单行计划");
 
     let plan = &results[0]["plan"].payload;
     assert_eq!(plan.get("entry").unwrap().as_str().unwrap(), "MATCH");
-    assert!(plan.get("detail").unwrap().as_str().unwrap().contains("knows"));
+    assert!(
+        plan.get("detail")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("knows")
+    );
     assert_eq!(plan.get("total_nodes").unwrap().as_i64().unwrap(), 5);
 
     drop(db);
@@ -227,11 +288,17 @@ fn 测试_EXPLAIN_标签索引下推策略() {
     let path = tmp_db("explain_label");
     let db = build_test_db(&path);
 
-    let results = db.tql("EXPLAIN MATCH (a)-[:works_at]->(b) RETURN a, b").unwrap();
+    let results = db
+        .tql("EXPLAIN MATCH (a)-[:works_at]->(b) RETURN a, b")
+        .unwrap();
     let plan = &results[0]["plan"].payload;
 
     let strategy = plan.get("candidate_strategy").unwrap().as_str().unwrap();
-    assert!(strategy.contains("label_index"), "策略应显示标签索引下推, got: {}", strategy);
+    assert!(
+        strategy.contains("label_index"),
+        "策略应显示标签索引下推, got: {}",
+        strategy
+    );
     assert!(strategy.contains("works_at"), "策略应包含标签名");
 
     drop(db);
@@ -243,11 +310,17 @@ fn 测试_EXPLAIN_ID短路策略() {
     let path = tmp_db("explain_id");
     let db = build_test_db(&path);
 
-    let results = db.tql("EXPLAIN MATCH (a {id: 1})-[:knows]->(b) RETURN b").unwrap();
+    let results = db
+        .tql("EXPLAIN MATCH (a {id: 1})-[:knows]->(b) RETURN b")
+        .unwrap();
     let plan = &results[0]["plan"].payload;
 
     let strategy = plan.get("candidate_strategy").unwrap().as_str().unwrap();
-    assert!(strategy.contains("id_shortcut"), "策略应显示 ID 短路, got: {}", strategy);
+    assert!(
+        strategy.contains("id_shortcut"),
+        "策略应显示 ID 短路, got: {}",
+        strategy
+    );
 
     drop(db);
     cleanup(&path);
@@ -262,7 +335,11 @@ fn 测试_EXPLAIN_全扫描策略() {
     let plan = &results[0]["plan"].payload;
 
     let strategy = plan.get("candidate_strategy").unwrap().as_str().unwrap();
-    assert!(strategy.contains("full_scan"), "无约束应显示全扫描, got: {}", strategy);
+    assert!(
+        strategy.contains("full_scan"),
+        "无约束应显示全扫描, got: {}",
+        strategy
+    );
 
     drop(db);
     cleanup(&path);
@@ -274,14 +351,22 @@ fn 测试_EXPLAIN_优化提示() {
     let db = build_test_db(&path);
 
     // 聚合 + LIMIT → 应显示 aggregation + LIMIT early termination
-    let results = db.tql("EXPLAIN MATCH (a)-[:knows]->(b) RETURN count(b) AS cnt LIMIT 10").unwrap();
+    let results = db
+        .tql("EXPLAIN MATCH (a)-[:knows]->(b) RETURN count(b) AS cnt LIMIT 10")
+        .unwrap();
     let plan = &results[0]["plan"].payload;
 
     let opts = plan.get("optimizations").unwrap().as_array().unwrap();
     let opt_strs: Vec<&str> = opts.iter().map(|v| v.as_str().unwrap()).collect();
     assert!(opt_strs.contains(&"aggregation"), "应包含 aggregation 优化");
-    assert!(opt_strs.contains(&"LIMIT early termination"), "应包含 LIMIT 优化");
-    assert!(opt_strs.contains(&"label index pushdown"), "应包含标签索引下推");
+    assert!(
+        opt_strs.contains(&"LIMIT early termination"),
+        "应包含 LIMIT 优化"
+    );
+    assert!(
+        opt_strs.contains(&"label index pushdown"),
+        "应包含标签索引下推"
+    );
 
     drop(db);
     cleanup(&path);
@@ -296,7 +381,10 @@ fn 测试_EXPLAIN_FIND入口() {
     let plan = &results[0]["plan"].payload;
 
     assert_eq!(plan.get("entry").unwrap().as_str().unwrap(), "FIND");
-    assert_eq!(plan.get("candidate_strategy").unwrap().as_str().unwrap(), "full_scan");
+    assert_eq!(
+        plan.get("candidate_strategy").unwrap().as_str().unwrap(),
+        "full_scan"
+    );
 
     drop(db);
     cleanup(&path);
@@ -312,7 +400,9 @@ fn 测试_投影裁剪_属性引用剥离向量() {
     let db = build_test_db(&path);
 
     // RETURN a.name, b.age → a 和 b 都是仅属性引用，vector + edges 应被清空
-    let results = db.tql("MATCH (a)-[:knows]->(b) RETURN a.name, b.age").unwrap();
+    let results = db
+        .tql("MATCH (a)-[:knows]->(b) RETURN a.name, b.age")
+        .unwrap();
     assert!(!results.is_empty());
 
     for row in &results {
@@ -357,12 +447,17 @@ fn 测试_投影裁剪_EXPLAIN显示() {
     let path = tmp_db("proj_explain");
     let db = build_test_db(&path);
 
-    let results = db.tql("EXPLAIN MATCH (a)-[:knows]->(b) RETURN a.name, b.age").unwrap();
+    let results = db
+        .tql("EXPLAIN MATCH (a)-[:knows]->(b) RETURN a.name, b.age")
+        .unwrap();
     let plan = &results[0]["plan"].payload;
 
     let opts = plan.get("optimizations").unwrap().as_array().unwrap();
     let opt_strs: Vec<&str> = opts.iter().map(|v| v.as_str().unwrap()).collect();
-    assert!(opt_strs.contains(&"projection pruning"), "EXPLAIN 应显示投影裁剪优化");
+    assert!(
+        opt_strs.contains(&"projection pruning"),
+        "EXPLAIN 应显示投影裁剪优化"
+    );
 
     drop(db);
     cleanup(&path);

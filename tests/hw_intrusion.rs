@@ -16,9 +16,9 @@
 //!  - NaN/Inf/Denorm : 通过 asm 向量寄存器直接注入 IEEE 754 特殊浮点值
 //!  - 字节级覆写     : 在序列化文件关键偏移处注入垃圾字节
 
-use triviumdb::Database;
 use std::fs::OpenOptions;
-use std::io::{Write, Seek, SeekFrom};
+use std::io::{Seek, SeekFrom, Write};
+use triviumdb::Database;
 
 const DIM: usize = 4;
 
@@ -40,7 +40,8 @@ fn seed_db(path: &str, count: usize) {
         db.insert(
             &[i as f32, (i as f32).sin(), (i as f32).cos(), 1.0],
             serde_json::json!({"idx": i, "tag": format!("node_{}", i)}),
-        ).unwrap();
+        )
+        .unwrap();
     }
     db.flush().unwrap();
 }
@@ -117,7 +118,12 @@ unsafe fn asm_nontemporal_poison(ptr: *mut u8, poison: u64) {
 
 #[cfg(not(target_arch = "x86_64"))]
 fn asm_make_nan_vector() -> [f32; DIM] {
-    [f32::NAN, f32::INFINITY, f32::MIN_POSITIVE * 0.5, f32::NEG_INFINITY]
+    [
+        f32::NAN,
+        f32::INFINITY,
+        f32::MIN_POSITIVE * 0.5,
+        f32::NEG_INFINITY,
+    ]
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -141,17 +147,19 @@ fn INTRUDE_01_BTS单比特翻转_TDB文件多点侵入() {
 
     // 使用 bts 在多个关键偏移处翻转比特
     let flip_offsets: Vec<u32> = vec![
-        0,                       // 文件头第 0 字节
-        16 * 8 + 3,             // 头部区域的第 3 位
-        (len / 4) as u32 * 8,   // 文件 1/4 处（可能是向量区域）
-        (len / 2) as u32 * 8,   // 文件中部（可能是 payload 区域）
-        (len - 8) as u32 * 8,   // 文件尾部
+        0,                    // 文件头第 0 字节
+        16 * 8 + 3,           // 头部区域的第 3 位
+        (len / 4) as u32 * 8, // 文件 1/4 处（可能是向量区域）
+        (len / 2) as u32 * 8, // 文件中部（可能是 payload 区域）
+        (len - 8) as u32 * 8, // 文件尾部
     ];
 
     for &bit_off in &flip_offsets {
         let byte_idx = (bit_off / 8) as usize;
         if byte_idx < len {
-            unsafe { asm_bit_flip(data.as_mut_ptr().add(byte_idx), bit_off % 8); }
+            unsafe {
+                asm_bit_flip(data.as_mut_ptr().add(byte_idx), bit_off % 8);
+            }
         }
     }
 
@@ -162,14 +170,20 @@ fn INTRUDE_01_BTS单比特翻转_TDB文件多点侵入() {
 
     // 尝试加载：不允许 panic
     let result = std::panic::catch_unwind(|| Database::<f32>::open(&path, DIM));
-    assert!(result.is_ok(), "bit-flip 后引擎不应 panic，应优雅拒绝或降级");
+    assert!(
+        result.is_ok(),
+        "bit-flip 后引擎不应 panic，应优雅拒绝或降级"
+    );
 
     match result.unwrap() {
         Ok(db) => {
             // 加载成功（降级模式），验证不会返回垃圾数据导致后续 panic
             let _ = db.node_count();
             let _ = db.all_node_ids();
-            eprintln!("  ✅ BTS bit-flip: 引擎降级加载，{} 个节点存活", db.node_count());
+            eprintln!(
+                "  ✅ BTS bit-flip: 引擎降级加载，{} 个节点存活",
+                db.node_count()
+            );
         }
         Err(e) => {
             eprintln!("  ✅ BTS bit-flip: 引擎正确拒绝加载损坏文件: {}", e);
@@ -201,10 +215,7 @@ fn INTRUDE_02_MOVNTI非时序毒写_DMA级侵入() {
     for &off in &offsets {
         if off + 8 <= len {
             unsafe {
-                asm_nontemporal_poison(
-                    data.as_mut_ptr().add(off),
-                    0xDEADBEEFCAFEBABEu64,
-                );
+                asm_nontemporal_poison(data.as_mut_ptr().add(off), 0xDEADBEEFCAFEBABEu64);
             }
         }
     }
@@ -251,7 +262,8 @@ fn INTRUDE_03_WAL尾部注入垃圾帧_回放容错() {
             db.insert(
                 &[i as f32, 0.0, 0.0, 0.0],
                 serde_json::json!({"valid": true, "seq": i}),
-            ).unwrap();
+            )
+            .unwrap();
         }
         db.flush().unwrap();
 
@@ -260,7 +272,8 @@ fn INTRUDE_03_WAL尾部注入垃圾帧_回放容错() {
             db.insert(
                 &[i as f32, 0.0, 0.0, 0.0],
                 serde_json::json!({"wal_tail": true, "seq": i}),
-            ).unwrap();
+            )
+            .unwrap();
         }
         // Drop 会 flush WAL BufWriter
     }
@@ -303,10 +316,15 @@ fn INTRUDE_03_WAL尾部注入垃圾帧_回放容错() {
 
     match result.unwrap() {
         Ok(db) => {
-            assert!(db.node_count() >= 5,
-                "至少 5 个已 flush 的节点应存活，实际 {}", db.node_count());
-            eprintln!("  ✅ WAL 注入容错: {} 个节点存活（垃圾尾部被正确丢弃）",
-                db.node_count());
+            assert!(
+                db.node_count() >= 5,
+                "至少 5 个已 flush 的节点应存活，实际 {}",
+                db.node_count()
+            );
+            eprintln!(
+                "  ✅ WAL 注入容错: {} 个节点存活（垃圾尾部被正确丢弃）",
+                db.node_count()
+            );
         }
         Err(e) => {
             eprintln!("  ⚠️ WAL 注入后加载失败（保守拒绝策略）: {}", e);
@@ -349,7 +367,10 @@ fn INTRUDE_04_ASM构造NaN查询向量_搜索输入验证() {
     match result {
         Ok(Ok(hits)) => {
             // 引擎接受了但应返回合理结果（可能全部 score=NaN 被过滤）
-            eprintln!("  ✅ NaN 向量查询: 引擎返回 {} 条结果（已降级处理）", hits.len());
+            eprintln!(
+                "  ✅ NaN 向量查询: 引擎返回 {} 条结果（已降级处理）",
+                hits.len()
+            );
         }
         Ok(Err(e)) => {
             eprintln!("  ✅ NaN 向量查询: 引擎正确拒绝: {}", e);
@@ -375,7 +396,11 @@ fn INTRUDE_05_文件头Magic全覆写_格式校验拦截() {
     seed_db(&path, 10);
 
     let tdb_path = path.clone();
-    let mut file = OpenOptions::new().read(true).write(true).open(&tdb_path).unwrap();
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&tdb_path)
+        .unwrap();
     file.seek(SeekFrom::Start(0)).unwrap();
 
     // 用 asm 构造毒 magic
@@ -390,7 +415,9 @@ fn INTRUDE_05_文件头Magic全覆写_格式校验拦截() {
         );
     }
     #[cfg(not(target_arch = "x86_64"))]
-    { poison = [0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD]; }
+    {
+        poison = [0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD];
+    }
 
     file.write_all(&poison).unwrap();
     drop(file);
@@ -401,8 +428,10 @@ fn INTRUDE_05_文件头Magic全覆写_格式校验拦截() {
 
     match result.unwrap() {
         Ok(db) => {
-            eprintln!("  ⚠️ 文件头覆写后竟然加载成功（{} 节点）—— 考虑增加 magic 校验",
-                db.node_count());
+            eprintln!(
+                "  ⚠️ 文件头覆写后竟然加载成功（{} 节点）—— 考虑增加 magic 校验",
+                db.node_count()
+            );
         }
         Err(e) => {
             eprintln!("  ✅ 文件头覆写: 引擎正确拒绝: {}", e);
@@ -423,7 +452,7 @@ fn INTRUDE_05_文件头Magic全覆写_格式校验拦截() {
 fn INTRUDE_06_渐进式比特衰减_NAND_Flash老化模拟() {
     let path = tmp_db("bitrot");
     cleanup(&path);
-    seed_db(&path, 50);  // 多写一些以拉大文件
+    seed_db(&path, 50); // 多写一些以拉大文件
 
     let tdb_path = path.clone();
     let mut data = std::fs::read(&tdb_path).unwrap();
@@ -443,8 +472,10 @@ fn INTRUDE_06_渐进式比特衰减_NAND_Flash老化模拟() {
     std::fs::write(&tdb_path, &data).unwrap();
     std::fs::remove_file(format!("{}.flush_ok", path)).ok();
 
-    eprintln!("  📊 文件大小 {} bytes, 翻转了 {} 个比特 (密度: 1/512 bytes)",
-        len, flipped);
+    eprintln!(
+        "  📊 文件大小 {} bytes, 翻转了 {} 个比特 (密度: 1/512 bytes)",
+        len, flipped
+    );
 
     let result = std::panic::catch_unwind(|| Database::<f32>::open(&path, DIM));
     assert!(result.is_ok(), "渐进式 bit-rot 不应导致 panic");
@@ -479,18 +510,14 @@ fn INTRUDE_07_TDB加WAL双文件同时侵入_灾难级容错() {
     {
         let mut db = Database::<f32>::open(&path, DIM).unwrap();
         for i in 0..10u32 {
-            db.insert(
-                &[i as f32, 0.0, 0.0, 0.0],
-                serde_json::json!({"v": i}),
-            ).unwrap();
+            db.insert(&[i as f32, 0.0, 0.0, 0.0], serde_json::json!({"v": i}))
+                .unwrap();
         }
         db.flush().unwrap();
         // 继续写 WAL
         for i in 10..15u32 {
-            db.insert(
-                &[i as f32, 0.0, 0.0, 0.0],
-                serde_json::json!({"v": i}),
-            ).unwrap();
+            db.insert(&[i as f32, 0.0, 0.0, 0.0], serde_json::json!({"v": i}))
+                .unwrap();
         }
     }
 
@@ -499,7 +526,9 @@ fn INTRUDE_07_TDB加WAL双文件同时侵入_灾难级容错() {
     if let Ok(mut data) = std::fs::read(&tdb_path) {
         let mid = data.len() / 2;
         if mid + 8 <= data.len() {
-            unsafe { asm_nontemporal_poison(data.as_mut_ptr().add(mid), 0xDEADC0DEu64); }
+            unsafe {
+                asm_nontemporal_poison(data.as_mut_ptr().add(mid), 0xDEADC0DEu64);
+            }
             std::fs::write(&tdb_path, &data).unwrap();
         }
     }
@@ -508,7 +537,9 @@ fn INTRUDE_07_TDB加WAL双文件同时侵入_灾难级容错() {
     let wal_path = format!("{}.wal", path);
     if let Ok(mut data) = std::fs::read(&wal_path) {
         if data.len() >= 8 {
-            unsafe { asm_nontemporal_poison(data.as_mut_ptr(), 0xBADBADBADBADBADu64); }
+            unsafe {
+                asm_nontemporal_poison(data.as_mut_ptr(), 0xBADBADBADBADBADu64);
+            }
             std::fs::write(&wal_path, &data).unwrap();
         }
     }

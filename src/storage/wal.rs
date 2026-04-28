@@ -48,8 +48,7 @@ pub enum WalEntry<T> {
 /// WAL 磁盘同步模式
 ///
 /// 控制每条 WAL 写入后是否强制落盘，在速度和安全之间权衡。
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum SyncMode {
     /// 每条 WAL 写入后立即 fsync（最安全，防 OS 崩溃丢数据）
     /// 适用于：金融数据、不可丢失的关键业务
@@ -62,7 +61,6 @@ pub enum SyncMode {
     /// 不主动 flush，完全依赖 OS 缓冲（最快，仅用于测试）
     Off,
 }
-
 
 /// Write-Ahead Logger
 /// 每次变更先追加写入 .wal 文件，保证崩溃时可恢复。
@@ -188,7 +186,9 @@ impl Wal {
     /// 每条记录都会校验 CRC32：
     ///   - 校验通过 → 回放
     ///   - 校验失败 / 截断 → 安全停止，丢弃后续残缺数据
-    pub fn read_entries<T: serde::de::DeserializeOwned>(db_path: &str) -> Result<(Vec<WalEntry<T>>, u64)> {
+    pub fn read_entries<T: serde::de::DeserializeOwned>(
+        db_path: &str,
+    ) -> Result<(Vec<WalEntry<T>>, u64)> {
         let wal_path = format!("{}.wal", db_path);
         if !Path::new(&wal_path).exists() {
             return Ok((Vec::new(), 0));

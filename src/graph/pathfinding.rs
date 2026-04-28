@@ -317,5 +317,3 @@ pub fn k_hop_neighbors<T: VectorType>(
 
     distances
 }
-
-

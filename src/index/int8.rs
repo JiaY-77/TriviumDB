@@ -47,13 +47,19 @@ impl Int8Pool {
 
         for chunk in flat_vectors.chunks_exact(dim) {
             for (d, &val) in chunk.iter().enumerate() {
-                if val < mins[d] { mins[d] = val; }
-                if val > maxs[d] { maxs[d] = val; }
+                if val < mins[d] {
+                    mins[d] = val;
+                }
+                if val > maxs[d] {
+                    maxs[d] = val;
+                }
             }
         }
 
         // 计算每个维度的缩放因子
-        let scales: Vec<f32> = mins.iter().zip(maxs.iter())
+        let scales: Vec<f32> = mins
+            .iter()
+            .zip(maxs.iter())
             .map(|(&mn, &mx)| {
                 let range = mx - mn;
                 if range < 1e-12 { 1.0 } else { 254.0 / range }
@@ -71,7 +77,13 @@ impl Int8Pool {
             }
         }
 
-        Self { mins, scales, data, dim, count }
+        Self {
+            mins,
+            scales,
+            data,
+            dim,
+            count,
+        }
     }
 
     /// 从泛型向量池构建（支持 f16 等类型透传）
@@ -83,12 +95,16 @@ impl Int8Pool {
     /// 将查询向量量化为 i8（使用与库内相同的校准参数）
     #[inline]
     pub fn quantize_query<T: VectorType>(&self, query: &[T]) -> Vec<i8> {
-        query.iter().enumerate().map(|(d, val)| {
-            let f = val.to_f32();
-            ((f - self.mins[d]) * self.scales[d] - 127.0)
-                .round()
-                .clamp(-127.0, 127.0) as i8
-        }).collect()
+        query
+            .iter()
+            .enumerate()
+            .map(|(d, val)| {
+                let f = val.to_f32();
+                ((f - self.mins[d]) * self.scales[d] - 127.0)
+                    .round()
+                    .clamp(-127.0, 127.0) as i8
+            })
+            .collect()
     }
 
     /// 极速 Int8 点积打分（对称量化点积）

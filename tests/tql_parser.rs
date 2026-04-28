@@ -7,9 +7,9 @@
 //! - SEARCH: 向量检索 + EXPAND
 //! - WHERE: 统一谓词（Cypher 比较 + Mongo 文档过滤 + 混合）
 
-use triviumdb::query::tql_parser::parse_tql;
-use triviumdb::query::tql_ast::*;
 use triviumdb::filter::Filter;
+use triviumdb::query::tql_ast::*;
+use triviumdb::query::tql_parser::parse_tql;
 
 // ═══════════════════════════════════════════════════════════════════════
 //  FIND 入口测试
@@ -215,42 +215,35 @@ fn WHERE_Cypher比较() {
 
 #[test]
 fn WHERE_AND组合() {
-    let q = parse_tql(
-        r#"MATCH (a)-[:knows]->(b) WHERE a.name == "Alice" AND b.age > 20 RETURN b"#
-    ).unwrap();
+    let q = parse_tql(r#"MATCH (a)-[:knows]->(b) WHERE a.name == "Alice" AND b.age > 20 RETURN b"#)
+        .unwrap();
     assert!(matches!(q.predicate, Some(Predicate::And(_, _))));
 }
 
 #[test]
 fn WHERE_OR组合() {
-    let q = parse_tql(
-        r#"MATCH (a)-[:knows]->(b) WHERE a.score > 0.5 OR b.type == "vip" RETURN b"#
-    ).unwrap();
+    let q = parse_tql(r#"MATCH (a)-[:knows]->(b) WHERE a.score > 0.5 OR b.type == "vip" RETURN b"#)
+        .unwrap();
     assert!(matches!(q.predicate, Some(Predicate::Or(_, _))));
 }
 
 #[test]
 fn WHERE_括号优先级() {
-    let q = parse_tql(
-        r#"MATCH (a)-[]->(b) WHERE (a.x > 1 OR a.y > 2) AND b.z == 3 RETURN b"#
-    ).unwrap();
+    let q =
+        parse_tql(r#"MATCH (a)-[]->(b) WHERE (a.x > 1 OR a.y > 2) AND b.z == 3 RETURN b"#).unwrap();
     // 结构应为 And(Or(x>1, y>2), z==3)
     assert!(matches!(q.predicate, Some(Predicate::And(_, _))));
 }
 
 #[test]
 fn WHERE_NOT() {
-    let q = parse_tql(
-        r#"MATCH (a) WHERE NOT a.deleted == true RETURN a"#
-    ).unwrap();
+    let q = parse_tql(r#"MATCH (a) WHERE NOT a.deleted == true RETURN a"#).unwrap();
     assert!(matches!(q.predicate, Some(Predicate::Not(_))));
 }
 
 #[test]
 fn WHERE_文档过滤() {
-    let q = parse_tql(
-        r#"FIND {type: "event"} WHERE {heat: {$gte: 0.7}} RETURN *"#
-    ).unwrap();
+    let q = parse_tql(r#"FIND {type: "event"} WHERE {heat: {$gte: 0.7}} RETURN *"#).unwrap();
     if let Some(Predicate::DocFilter { var, .. }) = &q.predicate {
         assert!(var.is_none()); // FIND 场景下 var 为 None
     } else {
@@ -286,7 +279,12 @@ fn WHERE_混合Cypher和MATCHES() {
 #[test]
 fn SEARCH_基础向量检索() {
     let q = parse_tql(r#"SEARCH VECTOR [0.1, 0.2, 0.3] TOP 10 RETURN *"#).unwrap();
-    if let QueryEntry::Search { vector, top_k, expand } = &q.entry {
+    if let QueryEntry::Search {
+        vector,
+        top_k,
+        expand,
+    } = &q.entry
+    {
         assert_eq!(vector.len(), 3);
         assert!((vector[0] - 0.1).abs() < 1e-10);
         assert_eq!(*top_k, 10);
@@ -298,9 +296,8 @@ fn SEARCH_基础向量检索() {
 
 #[test]
 fn SEARCH_带EXPAND() {
-    let q = parse_tql(
-        r#"SEARCH VECTOR [0.1, -0.2] TOP 20 EXPAND [:related*1..2] RETURN *"#
-    ).unwrap();
+    let q =
+        parse_tql(r#"SEARCH VECTOR [0.1, -0.2] TOP 20 EXPAND [:related*1..2] RETURN *"#).unwrap();
     if let QueryEntry::Search { expand, .. } = &q.entry {
         let ex = expand.as_ref().unwrap();
         assert_eq!(ex.labels, vec!["related"]);
@@ -324,9 +321,7 @@ fn SEARCH_负数向量() {
 
 #[test]
 fn SEARCH_带WHERE过滤() {
-    let q = parse_tql(
-        r#"SEARCH VECTOR [0.1, 0.2] TOP 50 WHERE {type: "event"} RETURN *"#
-    ).unwrap();
+    let q = parse_tql(r#"SEARCH VECTOR [0.1, 0.2] TOP 50 WHERE {type: "event"} RETURN *"#).unwrap();
     assert!(q.predicate.is_some());
 }
 
@@ -368,9 +363,7 @@ fn RETURN_多变量() {
 
 #[test]
 fn 行注释被跳过() {
-    let q = parse_tql(
-        "FIND {type: \"event\"} -- 查找所有事件\nRETURN *"
-    ).unwrap();
+    let q = parse_tql("FIND {type: \"event\"} -- 查找所有事件\nRETURN *").unwrap();
     assert!(matches!(q.entry, QueryEntry::Find { .. }));
 }
 

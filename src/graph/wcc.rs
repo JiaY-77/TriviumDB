@@ -60,9 +60,7 @@ impl UnionFind {
 /// 弱连通分量：将图视为无向图，返回每个连通分量的节点集合
 ///
 /// 返回值按分量大小降序排列（最大分量在前）。
-pub fn weakly_connected_components<T: VectorType>(
-    mt: &MemTable<T>,
-) -> Vec<Vec<NodeId>> {
+pub fn weakly_connected_components<T: VectorType>(mt: &MemTable<T>) -> Vec<Vec<NodeId>> {
     let all_ids = mt.all_node_ids();
     if all_ids.is_empty() {
         return Vec::new();

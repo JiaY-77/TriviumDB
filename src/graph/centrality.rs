@@ -31,9 +31,7 @@ pub struct DegreeCentrality {
 ///
 /// - 返回值按 total_degree 降序排列
 /// - 用途：快速识别图谱中的核心枢纽实体
-pub fn degree_centrality<T: VectorType>(
-    mt: &MemTable<T>,
-) -> Vec<DegreeCentrality> {
+pub fn degree_centrality<T: VectorType>(mt: &MemTable<T>) -> Vec<DegreeCentrality> {
     let all_ids = mt.all_node_ids();
     let n = all_ids.len();
     if n == 0 {

@@ -36,9 +36,13 @@ fn cleanup(path: &str) {
 #[allow(unreachable_code)]
 fn hw_crash_ud2() -> ! {
     #[cfg(target_arch = "x86_64")]
-    unsafe { std::arch::asm!("ud2", options(noreturn)); }
+    unsafe {
+        std::arch::asm!("ud2", options(noreturn));
+    }
     #[cfg(target_arch = "aarch64")]
-    unsafe { std::arch::asm!("udf #0", options(noreturn)); }
+    unsafe {
+        std::arch::asm!("udf #0", options(noreturn));
+    }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     std::process::abort();
 }
@@ -47,9 +51,13 @@ fn hw_crash_ud2() -> ! {
 #[allow(unreachable_code)]
 fn hw_crash_int3() -> ! {
     #[cfg(target_arch = "x86_64")]
-    unsafe { std::arch::asm!("int3", options(noreturn)); }
+    unsafe {
+        std::arch::asm!("int3", options(noreturn));
+    }
     #[cfg(target_arch = "aarch64")]
-    unsafe { std::arch::asm!("brk #0", options(noreturn)); }
+    unsafe {
+        std::arch::asm!("brk #0", options(noreturn));
+    }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     std::process::abort();
 }
@@ -71,7 +79,9 @@ fn hw_crash_div_zero() -> ! {
     }
     #[cfg(target_arch = "aarch64")]
     // ARM 的 UDIV 除零不触发异常（返回0），回退到 udf
-    unsafe { std::arch::asm!("udf #1", options(noreturn)); }
+    unsafe {
+        std::arch::asm!("udf #1", options(noreturn));
+    }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     std::process::abort();
 }
@@ -83,8 +93,8 @@ fn hw_crash_null_deref() -> ! {
     #[cfg(target_arch = "x86_64")]
     unsafe {
         std::arch::asm!(
-            "xor rax, rax",       // rax = 0 (NULL)
-            "mov qword ptr [rax], rax",  // 写入 NULL → Access Violation
+            "xor rax, rax",             // rax = 0 (NULL)
+            "mov qword ptr [rax], rax", // 写入 NULL → Access Violation
             options(noreturn)
         );
     }
@@ -92,7 +102,7 @@ fn hw_crash_null_deref() -> ! {
     unsafe {
         std::arch::asm!(
             "mov x0, #0",
-            "str x0, [x0]",      // 写入 NULL → Bus Error
+            "str x0, [x0]", // 写入 NULL → Bus Error
             options(noreturn)
         );
     }
@@ -153,8 +163,8 @@ fn hw_crash_mfence_ud2() -> ! {
     #[cfg(target_arch = "x86_64")]
     unsafe {
         std::arch::asm!(
-            "mfence",     // 全序内存屏障 — 排空 store buffer
-            "sfence",     // store fence — 确保所有写操作对其他核可见
+            "mfence", // 全序内存屏障 — 排空 store buffer
+            "sfence", // store fence — 确保所有写操作对其他核可见
             "ud2",
             options(noreturn)
         );
@@ -162,8 +172,8 @@ fn hw_crash_mfence_ud2() -> ! {
     #[cfg(target_arch = "aarch64")]
     unsafe {
         std::arch::asm!(
-            "dmb sy",     // Data Memory Barrier (full system)
-            "dsb sy",     // Data Synchronization Barrier
+            "dmb sy", // Data Memory Barrier (full system)
+            "dsb sy", // Data Synchronization Barrier
             "udf #3",
             options(noreturn)
         );
@@ -188,14 +198,16 @@ fn child_main() {
             db.insert(
                 &[i as f32, 0.0, 0.0, 0.0],
                 serde_json::json!({"phase": "flushed", "seq": i}),
-            ).unwrap();
+            )
+            .unwrap();
         }
         db.flush().unwrap();
         for i in 5..8u32 {
             db.insert(
                 &[i as f32, 0.0, 0.0, 0.0],
                 serde_json::json!({"phase": "wal_only", "seq": i}),
-            ).unwrap();
+            )
+            .unwrap();
         }
     };
 
@@ -229,7 +241,8 @@ fn child_main() {
                 db.insert(
                     &[i as f32, 1.0, 0.0, 0.0],
                     serde_json::json!({"phase": "unflushed", "seq": i}),
-                ).unwrap();
+                )
+                .unwrap();
             }
             std::mem::forget(db);
             hw_crash_ud2();
@@ -241,14 +254,16 @@ fn child_main() {
                 db.insert(
                     &[i as f32, 2.0, 0.0, 0.0],
                     serde_json::json!({"fat": fat_value, "seq": i}),
-                ).unwrap();
+                )
+                .unwrap();
             }
             db.flush().unwrap();
             for i in 5..8u32 {
                 db.insert(
                     &[i as f32, 2.0, 0.0, 0.0],
                     serde_json::json!({"fat": fat_value, "seq": i}),
-                ).unwrap();
+                )
+                .unwrap();
             }
             hw_crash_ud2();
         }
@@ -256,13 +271,15 @@ fn child_main() {
             // 多轮崩溃的单轮：插入 3 个节点到 WAL，不 flush，崩溃
             let round: u32 = std::env::var("HW_CRASH_ROUND")
                 .unwrap_or_else(|_| "0".to_string())
-                .parse().unwrap();
+                .parse()
+                .unwrap();
             let base = round * 3;
             for i in base..base + 3 {
                 db.insert(
                     &[i as f32, 3.0, 0.0, 0.0],
                     serde_json::json!({"round": round, "seq": i}),
-                ).unwrap();
+                )
+                .unwrap();
             }
             // 不 flush，让 WAL 累积
             hw_crash_ud2();
@@ -275,16 +292,20 @@ fn run_crash_child(db_path: &str, mode: &str) -> std::process::ExitStatus {
     run_crash_child_env(db_path, mode, &[])
 }
 
-fn run_crash_child_env(db_path: &str, mode: &str, extra_env: &[(&str, &str)]) -> std::process::ExitStatus {
+fn run_crash_child_env(
+    db_path: &str,
+    mode: &str,
+    extra_env: &[(&str, &str)],
+) -> std::process::ExitStatus {
     let exe = std::env::current_exe().expect("无法获取当前可执行文件路径");
     let mut cmd = Command::new(exe);
     cmd.env("HW_CRASH_DB_PATH", db_path)
-       .env("HW_CRASH_MODE", mode)
-       .env("HW_CRASH_CHILD", "1")
-       .arg("--test-threads=1")
-       .arg("__hw_crash_child_entry")
-       .arg("--exact")
-       .arg("--nocapture");
+        .env("HW_CRASH_MODE", mode)
+        .env("HW_CRASH_CHILD", "1")
+        .arg("--test-threads=1")
+        .arg("__hw_crash_child_entry")
+        .arg("--exact")
+        .arg("--nocapture");
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
@@ -293,7 +314,9 @@ fn run_crash_child_env(db_path: &str, mode: &str, extra_env: &[(&str, &str)]) ->
 
 #[test]
 fn __hw_crash_child_entry() {
-    if std::env::var("HW_CRASH_CHILD").is_err() { return; }
+    if std::env::var("HW_CRASH_CHILD").is_err() {
+        return;
+    }
     child_main();
 }
 
@@ -303,7 +326,11 @@ fn __hw_crash_child_entry() {
 
 fn assert_crash_and_recover(path: &str, mode: &str, label: &str) {
     let status = run_crash_child(path, mode);
-    assert!(!status.success(), "{}: 子进程应因硬件异常而非正常退出", label);
+    assert!(
+        !status.success(),
+        "{}: 子进程应因硬件异常而非正常退出",
+        label
+    );
 
     let db = triviumdb::Database::<f32>::open(path, DIM)
         .unwrap_or_else(|e| panic!("{}: 崩溃后重新打开数据库失败: {}", label, e));
@@ -311,7 +338,8 @@ fn assert_crash_and_recover(path: &str, mode: &str, label: &str) {
     assert!(
         db.node_count() >= 5,
         "{}: 至少应恢复 5 个已 flush 节点，实际 {}",
-        label, db.node_count()
+        label,
+        db.node_count()
     );
 
     // 验证 flushed 阶段节点的 payload 语义完整性
@@ -325,8 +353,12 @@ fn assert_crash_and_recover(path: &str, mode: &str, label: &str) {
     }
     assert_eq!(flushed, 5, "{}: 5 个 flushed 节点 payload 应完整", label);
 
-    eprintln!("  ✅ {}: {} 个节点存活（5 flush + {} WAL）",
-        label, db.node_count(), db.node_count().saturating_sub(5));
+    eprintln!(
+        "  ✅ {}: {} 个节点存活（5 flush + {} WAL）",
+        label,
+        db.node_count(),
+        db.node_count().saturating_sub(5)
+    );
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -432,21 +464,31 @@ fn HW08_大Payload_8KB_WAL缓冲压力崩溃恢复() {
     let status = run_crash_child(&path, "big_payload_crash");
     assert!(!status.success(), "子进程应异常退出");
 
-    let db = triviumdb::Database::<f32>::open(&path, DIM)
-        .expect("大 Payload 崩溃后打开失败");
+    let db = triviumdb::Database::<f32>::open(&path, DIM).expect("大 Payload 崩溃后打开失败");
 
-    assert!(db.node_count() >= 5, "至少 5 个已 flush 的大 payload 节点应存活");
+    assert!(
+        db.node_count() >= 5,
+        "至少 5 个已 flush 的大 payload 节点应存活"
+    );
 
     // 验证大 payload 的数据完整性（不是被截断的 JSON）
     for &id in &db.all_node_ids() {
         if let Some(p) = db.get_payload(id) {
             if let Some(fat) = p.get("fat").and_then(|v| v.as_str()) {
-                assert_eq!(fat.len(), 8000,
-                    "节点 {} 的 fat 字段应为 8000 字节，实际 {}", id, fat.len());
+                assert_eq!(
+                    fat.len(),
+                    8000,
+                    "节点 {} 的 fat 字段应为 8000 字节，实际 {}",
+                    id,
+                    fat.len()
+                );
             }
         }
     }
-    eprintln!("  ✅ 大 Payload 崩溃恢复：{} 个节点，数据完整", db.node_count());
+    eprintln!(
+        "  ✅ 大 Payload 崩溃恢复：{} 个节点，数据完整",
+        db.node_count()
+    );
     cleanup(&path);
 }
 
@@ -463,7 +505,8 @@ fn HW09_连续三次崩溃_累积WAL回放恢复() {
 
     for round in 0..3u32 {
         let status = run_crash_child_env(
-            &path, "multi_crash_round",
+            &path,
+            "multi_crash_round",
             &[("HW_CRASH_ROUND", &round.to_string())],
         );
         assert!(!status.success(), "轮次 {} 子进程应异常退出", round);
@@ -491,12 +534,12 @@ fn HW10_全异常向量交叉轰炸_同一DB连续恢复() {
     cleanup(&path);
 
     let modes = [
-        ("ud2_after_flush",        "#UD"),
-        ("div_zero_after_flush",   "#DE"),
+        ("ud2_after_flush", "#UD"),
+        ("div_zero_after_flush", "#DE"),
         ("null_deref_after_flush", "#GP"),
-        ("int3_after_flush",       "#BP"),
-        ("regpoison_after_flush",  "RegPoison"),
-        ("mfence_after_flush",     "MFENCE"),
+        ("int3_after_flush", "#BP"),
+        ("regpoison_after_flush", "RegPoison"),
+        ("mfence_after_flush", "MFENCE"),
     ];
 
     for (i, (mode, label)) in modes.iter().enumerate() {
@@ -504,15 +547,30 @@ fn HW10_全异常向量交叉轰炸_同一DB连续恢复() {
         cleanup(&path);
 
         let status = run_crash_child(&path, mode);
-        assert!(!status.success(), "轮次 {} ({}): 子进程应异常退出", i, label);
+        assert!(
+            !status.success(),
+            "轮次 {} ({}): 子进程应异常退出",
+            i,
+            label
+        );
 
         let db = triviumdb::Database::<f32>::open(&path, DIM)
             .unwrap_or_else(|e| panic!("轮次 {} ({}) 崩溃后打开失败: {}", i, label, e));
 
-        assert!(db.node_count() >= 5,
-            "轮次 {} ({}): 至少 5 节点存活，实际 {}", i, label, db.node_count());
+        assert!(
+            db.node_count() >= 5,
+            "轮次 {} ({}): 至少 5 节点存活，实际 {}",
+            i,
+            label,
+            db.node_count()
+        );
 
-        eprintln!("  ✅ 轮次 {} [{}]: {} 个节点恢复", i, label, db.node_count());
+        eprintln!(
+            "  ✅ 轮次 {} [{}]: {} 个节点恢复",
+            i,
+            label,
+            db.node_count()
+        );
     }
 
     cleanup(&path);

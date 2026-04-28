@@ -163,11 +163,7 @@ pub trait SearchHook: Send + Sync {
     /// - 业务逻辑过滤（去除已读内容、黑名单等）
     /// - 向 `SearchHit.payload` 注入额外字段
     /// - 合并来自外部数据源的额外候选
-    fn on_post_recall(
-        &self,
-        _hits: &mut Vec<SearchHit>,
-        _ctx: &mut HookContext,
-    ) {
+    fn on_post_recall(&self, _hits: &mut Vec<SearchHit>, _ctx: &mut HookContext) {
         // 默认空实现
     }
 
@@ -179,11 +175,7 @@ pub trait SearchHook: Send + Sync {
     /// - 修改种子集（添加/移除特定节点）
     /// - 注入来自外部知识图谱的额外种子
     /// - 根据业务逻辑动态调整扩散参数
-    fn on_pre_graph_expand(
-        &self,
-        _seeds: &mut Vec<SearchHit>,
-        _ctx: &mut HookContext,
-    ) {
+    fn on_pre_graph_expand(&self, _seeds: &mut Vec<SearchHit>, _ctx: &mut HookContext) {
         // 默认空实现
     }
 
@@ -214,11 +206,7 @@ pub trait SearchHook: Send + Sync {
     /// - 回传统计数据到 `ctx.custom_data`
     /// - 日志/埋点记录
     /// - 最终截断或格式化
-    fn on_post_search(
-        &self,
-        _results: &mut Vec<SearchHit>,
-        _ctx: &mut HookContext,
-    ) {
+    fn on_post_search(&self, _results: &mut Vec<SearchHit>, _ctx: &mut HookContext) {
         // 默认空实现
     }
 }
@@ -301,21 +289,13 @@ impl SearchHook for CompositeHook {
         None
     }
 
-    fn on_post_recall(
-        &self,
-        hits: &mut Vec<SearchHit>,
-        ctx: &mut HookContext,
-    ) {
+    fn on_post_recall(&self, hits: &mut Vec<SearchHit>, ctx: &mut HookContext) {
         for hook in &self.hooks {
             hook.on_post_recall(hits, ctx);
         }
     }
 
-    fn on_pre_graph_expand(
-        &self,
-        seeds: &mut Vec<SearchHit>,
-        ctx: &mut HookContext,
-    ) {
+    fn on_pre_graph_expand(&self, seeds: &mut Vec<SearchHit>, ctx: &mut HookContext) {
         for hook in &self.hooks {
             hook.on_pre_graph_expand(seeds, ctx);
         }
@@ -334,11 +314,7 @@ impl SearchHook for CompositeHook {
         None
     }
 
-    fn on_post_search(
-        &self,
-        results: &mut Vec<SearchHit>,
-        ctx: &mut HookContext,
-    ) {
+    fn on_post_search(&self, results: &mut Vec<SearchHit>, ctx: &mut HookContext) {
         for hook in &self.hooks {
             hook.on_post_search(results, ctx);
         }
@@ -382,10 +358,7 @@ pub type FfiRecallFn = unsafe extern "C" fn(
 /// ```c
 /// int trivium_rerank(FfiSearchHit* hits, size_t count);
 /// ```
-pub type FfiRerankFn = unsafe extern "C" fn(
-    hits_ptr: *mut FfiSearchHit,
-    hits_count: usize,
-) -> i32;
+pub type FfiRerankFn = unsafe extern "C" fn(hits_ptr: *mut FfiSearchHit, hits_count: usize) -> i32;
 
 /// FFI Hook：通过动态库加载 C/C++ 扩展模块
 ///
@@ -439,14 +412,8 @@ impl FfiHook {
                 ))
             })?;
 
-            let recall_fn = lib
-                .get::<FfiRecallFn>(b"trivium_recall")
-                .ok()
-                .map(|f| *f);
-            let rerank_fn = lib
-                .get::<FfiRerankFn>(b"trivium_rerank")
-                .ok()
-                .map(|f| *f);
+            let recall_fn = lib.get::<FfiRecallFn>(b"trivium_recall").ok().map(|f| *f);
+            let rerank_fn = lib.get::<FfiRerankFn>(b"trivium_rerank").ok().map(|f| *f);
 
             tracing::info!(
                 "已加载外置 Hook 模块: {} (recall={}, rerank={})",
@@ -475,13 +442,7 @@ impl SearchHook for FfiHook {
 
         // 预分配输出缓冲区（最多 top_k * 2 个候选）
         let buf_size = config.top_k * 2;
-        let mut buf = vec![
-            FfiSearchHit {
-                id: 0,
-                score: 0.0
-            };
-            buf_size
-        ];
+        let mut buf = vec![FfiSearchHit { id: 0, score: 0.0 }; buf_size];
         let mut count: usize = 0;
 
         // SAFETY: 调用 C 侧函数，指针有效性由 buf 的生命周期保证

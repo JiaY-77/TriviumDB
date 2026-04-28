@@ -16,7 +16,11 @@ pub struct TqlParser {
 
 impl TqlParser {
     pub fn new(tokens: Vec<TqlToken>) -> Self {
-        Self { tokens, pos: 0, depth: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            depth: 0,
+        }
     }
 
     fn peek(&self) -> &TqlToken {
@@ -57,11 +61,16 @@ impl TqlParser {
 
         // 1. 查询入口
         let entry = match self.peek() {
-            TqlToken::Match  => self.parse_match_entry()?,
+            TqlToken::Match => self.parse_match_entry()?,
             TqlToken::Optional => self.parse_optional_match_entry()?,
-            TqlToken::Find   => self.parse_find_entry()?,
+            TqlToken::Find => self.parse_find_entry()?,
             TqlToken::Search => self.parse_search_entry()?,
-            other => return Err(format!("Expected MATCH, OPTIONAL MATCH, FIND, or SEARCH, got {:?}", other)),
+            other => {
+                return Err(format!(
+                    "Expected MATCH, OPTIONAL MATCH, FIND, or SEARCH, got {:?}",
+                    other
+                ));
+            }
         };
 
         // 2. WHERE (可选)
@@ -246,10 +255,17 @@ impl TqlParser {
             self.advance();
             EdgeDirection::Both
         } else {
-            return Err(format!("Expected '->' or '-' after edge pattern, got {:?}", self.peek()));
+            return Err(format!(
+                "Expected '->' or '-' after edge pattern, got {:?}",
+                self.peek()
+            ));
         };
 
-        Ok(TqlEdgePattern { labels, hop_range, direction })
+        Ok(TqlEdgePattern {
+            labels,
+            hop_range,
+            direction,
+        })
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -301,7 +317,11 @@ impl TqlParser {
             None
         };
 
-        Ok(QueryEntry::Search { vector, top_k, expand })
+        Ok(QueryEntry::Search {
+            vector,
+            top_k,
+            expand,
+        })
     }
 
     /// EXPAND [:label*min..max]
@@ -326,7 +346,11 @@ impl TqlParser {
 
         self.expect(&TqlToken::RBracket)?;
 
-        Ok(ExpandClause { labels, min_depth, max_depth })
+        Ok(ExpandClause {
+            labels,
+            min_depth,
+            max_depth,
+        })
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -374,7 +398,9 @@ impl TqlParser {
                         while !self.at(&TqlToken::RBrace) {
                             let op = match self.advance() {
                                 TqlToken::DollarOp(s) => s,
-                                other => return Err(format!("Expected $operator, got {:?}", other)),
+                                other => {
+                                    return Err(format!("Expected $operator, got {:?}", other));
+                                }
                             };
                             self.expect(&TqlToken::Colon)?;
 
@@ -413,13 +439,13 @@ impl TqlParser {
     /// 解析操作符值: $gt → Filter::Gt, $in → Filter::In, etc.
     fn parse_filter_op_value(&mut self, field: &str, op: &str) -> Result<Filter, String> {
         match op {
-            "$eq"  => Ok(Filter::Eq(field.into(), self.parse_json_value()?)),
-            "$ne"  => Ok(Filter::Ne(field.into(), self.parse_json_value()?)),
-            "$gt"  => Ok(Filter::Gt(field.into(), self.parse_json_number()?)),
+            "$eq" => Ok(Filter::Eq(field.into(), self.parse_json_value()?)),
+            "$ne" => Ok(Filter::Ne(field.into(), self.parse_json_value()?)),
+            "$gt" => Ok(Filter::Gt(field.into(), self.parse_json_number()?)),
             "$gte" => Ok(Filter::Gte(field.into(), self.parse_json_number()?)),
-            "$lt"  => Ok(Filter::Lt(field.into(), self.parse_json_number()?)),
+            "$lt" => Ok(Filter::Lt(field.into(), self.parse_json_number()?)),
             "$lte" => Ok(Filter::Lte(field.into(), self.parse_json_number()?)),
-            "$in"  => Ok(Filter::In(field.into(), self.parse_json_array()?)),
+            "$in" => Ok(Filter::In(field.into(), self.parse_json_array()?)),
             "$nin" => Ok(Filter::Nin(field.into(), self.parse_json_array()?)),
             "$exists" => {
                 let b = match self.advance() {
@@ -516,7 +542,10 @@ impl TqlParser {
             if self.at(&TqlToken::Matches) {
                 self.advance();
                 let filter = self.parse_doc_filter()?;
-                return Ok(Predicate::DocFilter { var: Some(ident), filter });
+                return Ok(Predicate::DocFilter {
+                    var: Some(ident),
+                    filter,
+                });
             }
 
             // a.field op value (Cypher 比较)
@@ -529,7 +558,11 @@ impl TqlParser {
                 return Ok(Predicate::Compare { left, op, right });
             }
 
-            return Err(format!("Unexpected token after identifier '{}': {:?}", ident, self.peek()));
+            return Err(format!(
+                "Unexpected token after identifier '{}': {:?}",
+                ident,
+                self.peek()
+            ));
         }
 
         Err(format!("Unexpected token in predicate: {:?}", self.peek()))
@@ -554,17 +587,18 @@ impl TqlParser {
         }
 
         // 如果所有项都是纯变量引用（无聚合、无 DISTINCT、无属性访问、无 alias），降级为 Variables
-        let all_simple = exprs.iter().all(|e| {
-            matches!(&e.kind, ReturnExprKind::Var(_))
-                && e.alias.is_none()
-                && !e.distinct
-        });
+        let all_simple = exprs
+            .iter()
+            .all(|e| matches!(&e.kind, ReturnExprKind::Var(_)) && e.alias.is_none() && !e.distinct);
 
         if all_simple {
-            let vars = exprs.into_iter().map(|e| match e.kind {
-                ReturnExprKind::Var(v) => v,
-                _ => unreachable!(),
-            }).collect();
+            let vars = exprs
+                .into_iter()
+                .map(|e| match e.kind {
+                    ReturnExprKind::Var(v) => v,
+                    _ => unreachable!(),
+                })
+                .collect();
             Ok(ReturnClause::Variables(vars))
         } else {
             Ok(ReturnClause::Expressions(exprs))
@@ -606,7 +640,11 @@ impl TqlParser {
             None
         };
 
-        Ok(ReturnExpr { kind, alias, distinct })
+        Ok(ReturnExpr {
+            kind,
+            alias,
+            distinct,
+        })
     }
 
     /// 解析 RETURN 表达式内部类型（变量或属性访问）
@@ -625,12 +663,30 @@ impl TqlParser {
     /// 尝试解析聚合函数关键字，不消耗 token（使用探测）
     fn try_parse_agg_func(&mut self) -> Option<AggFunc> {
         match self.peek() {
-            TqlToken::Count   => { self.advance(); Some(AggFunc::Count) }
-            TqlToken::Sum     => { self.advance(); Some(AggFunc::Sum) }
-            TqlToken::Avg     => { self.advance(); Some(AggFunc::Avg) }
-            TqlToken::Min     => { self.advance(); Some(AggFunc::Min) }
-            TqlToken::Max     => { self.advance(); Some(AggFunc::Max) }
-            TqlToken::Collect => { self.advance(); Some(AggFunc::Collect) }
+            TqlToken::Count => {
+                self.advance();
+                Some(AggFunc::Count)
+            }
+            TqlToken::Sum => {
+                self.advance();
+                Some(AggFunc::Sum)
+            }
+            TqlToken::Avg => {
+                self.advance();
+                Some(AggFunc::Avg)
+            }
+            TqlToken::Min => {
+                self.advance();
+                Some(AggFunc::Min)
+            }
+            TqlToken::Max => {
+                self.advance();
+                Some(AggFunc::Max)
+            }
+            TqlToken::Collect => {
+                self.advance();
+                Some(AggFunc::Collect)
+            }
             _ => None,
         }
     }
@@ -679,8 +735,11 @@ impl TqlParser {
                     Ok(TqlExpr::Literal(TqlLiteral::Str(ident)))
                 }
             }
-            TqlToken::IntLit(_) | TqlToken::FloatLit(_) | TqlToken::StringLit(_)
-            | TqlToken::BoolLit(_) | TqlToken::Null => {
+            TqlToken::IntLit(_)
+            | TqlToken::FloatLit(_)
+            | TqlToken::StringLit(_)
+            | TqlToken::BoolLit(_)
+            | TqlToken::Null => {
                 let lit = self.parse_tql_literal()?;
                 Ok(TqlExpr::Literal(lit))
             }
@@ -690,11 +749,11 @@ impl TqlParser {
 
     fn parse_comp_op(&mut self) -> Result<TqlCompOp, String> {
         match self.advance() {
-            TqlToken::Eq  => Ok(TqlCompOp::Eq),
-            TqlToken::Ne  => Ok(TqlCompOp::Ne),
-            TqlToken::Gt  => Ok(TqlCompOp::Gt),
+            TqlToken::Eq => Ok(TqlCompOp::Eq),
+            TqlToken::Ne => Ok(TqlCompOp::Ne),
+            TqlToken::Gt => Ok(TqlCompOp::Gt),
             TqlToken::Gte => Ok(TqlCompOp::Gte),
-            TqlToken::Lt  => Ok(TqlCompOp::Lt),
+            TqlToken::Lt => Ok(TqlCompOp::Lt),
             TqlToken::Lte => Ok(TqlCompOp::Lte),
             other => Err(format!("Expected comparison operator, got {:?}", other)),
         }
@@ -739,22 +798,30 @@ impl TqlParser {
             TqlToken::IntLit(_) => {
                 if let TqlToken::IntLit(n) = self.advance() {
                     Ok(serde_json::json!(n))
-                } else { unreachable!() }
+                } else {
+                    unreachable!()
+                }
             }
             TqlToken::FloatLit(_) => {
                 if let TqlToken::FloatLit(f) = self.advance() {
                     Ok(serde_json::json!(f))
-                } else { unreachable!() }
+                } else {
+                    unreachable!()
+                }
             }
             TqlToken::StringLit(_) => {
                 if let TqlToken::StringLit(s) = self.advance() {
                     Ok(serde_json::json!(s))
-                } else { unreachable!() }
+                } else {
+                    unreachable!()
+                }
             }
             TqlToken::BoolLit(_) => {
                 if let TqlToken::BoolLit(b) = self.advance() {
                     Ok(serde_json::json!(b))
-                } else { unreachable!() }
+                } else {
+                    unreachable!()
+                }
             }
             TqlToken::Null => {
                 self.advance();
@@ -863,7 +930,9 @@ impl TqlParser {
             let var = if let TqlToken::Ident(_) = self.peek() {
                 if let TqlToken::Ident(name) = self.advance() {
                     Some(name)
-                } else { None }
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -876,7 +945,10 @@ impl TqlParser {
 
             self.expect(&TqlToken::RParen)?;
 
-            nodes.push(CreateNode { var: var.clone(), payload });
+            nodes.push(CreateNode {
+                var: var.clone(),
+                payload,
+            });
 
             // 检查是否有边: )-[:label]->(
             if self.at(&TqlToken::Dash) {
@@ -900,7 +972,9 @@ impl TqlParser {
                     self.advance();
                     // 简单解析 weight 字段
                     loop {
-                        if self.at(&TqlToken::RBrace) { break; }
+                        if self.at(&TqlToken::RBrace) {
+                            break;
+                        }
                         let key = self.parse_field_name()?;
                         self.expect(&TqlToken::Colon)?;
                         if key == "weight" {
@@ -908,7 +982,9 @@ impl TqlParser {
                         } else {
                             let _ = self.parse_json_value()?;
                         }
-                        if self.at(&TqlToken::Comma) { self.advance(); }
+                        if self.at(&TqlToken::Comma) {
+                            self.advance();
+                        }
                     }
                     self.expect(&TqlToken::RBrace)?;
                 }
@@ -918,8 +994,11 @@ impl TqlParser {
                 // 目标节点
                 self.expect(&TqlToken::LParen)?;
                 let dst_var = if let TqlToken::Ident(_) = self.peek() {
-                    if let TqlToken::Ident(name) = self.advance() { name }
-                    else { format!("_auto_{}", nodes.len()) }
+                    if let TqlToken::Ident(name) = self.advance() {
+                        name
+                    } else {
+                        format!("_auto_{}", nodes.len())
+                    }
                 } else {
                     format!("_auto_{}", nodes.len())
                 };
@@ -933,10 +1012,18 @@ impl TqlParser {
                 // 如果目标节点有 payload，添加为新节点
                 let needs_create_dst = !dst_payload.as_object().map_or(true, |m| m.is_empty());
                 if needs_create_dst {
-                    nodes.push(CreateNode { var: Some(dst_var.clone()), payload: dst_payload });
+                    nodes.push(CreateNode {
+                        var: Some(dst_var.clone()),
+                        payload: dst_payload,
+                    });
                 }
 
-                edges.push(CreateEdge { src_var, dst_var, label, weight });
+                edges.push(CreateEdge {
+                    src_var,
+                    dst_var,
+                    label,
+                    weight,
+                });
             }
 
             // 逗号分隔的多节点创建
@@ -959,7 +1046,9 @@ impl TqlParser {
             self.expect(&TqlToken::Colon)?;
             let val = self.parse_json_value()?;
             map.insert(key, val);
-            if self.at(&TqlToken::Comma) { self.advance(); }
+            if self.at(&TqlToken::Comma) {
+                self.advance();
+            }
         }
         self.expect(&TqlToken::RBrace)?;
         Ok(serde_json::Value::Object(map))
@@ -988,7 +1077,10 @@ impl TqlParser {
             TqlToken::Delete => {
                 self.advance();
                 let vars = self.parse_delete_vars()?;
-                MutationAction::Delete { vars, detach: false }
+                MutationAction::Delete {
+                    vars,
+                    detach: false,
+                }
             }
             TqlToken::Detach => {
                 self.advance();
@@ -1002,7 +1094,12 @@ impl TqlParser {
                 let create_action = self.parse_create_action()?;
                 MutationAction::Create(create_action)
             }
-            other => return Err(format!("Expected SET, DELETE, DETACH DELETE, or CREATE after MATCH, got {:?}", other)),
+            other => {
+                return Err(format!(
+                    "Expected SET, DELETE, DETACH DELETE, or CREATE after MATCH, got {:?}",
+                    other
+                ));
+            }
         };
 
         Ok(TqlMutation { source, action })
@@ -1019,7 +1116,10 @@ impl TqlParser {
             if self.peek() == &TqlToken::Eq {
                 self.advance(); // ==
             } else {
-                return Err(format!("Expected '==' in SET assignment, got {:?}", self.peek()));
+                return Err(format!(
+                    "Expected '==' in SET assignment, got {:?}",
+                    self.peek()
+                ));
             }
             let value = self.parse_json_value()?;
             assignments.push(SetAssignment { var, field, value });

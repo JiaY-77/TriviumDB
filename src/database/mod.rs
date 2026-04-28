@@ -54,7 +54,6 @@ pub struct Database<T: VectorType> {
 }
 
 impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T> {
-
     // ════════════════════════════════════════════════════════
     //  打开 / 创建
     // ════════════════════════════════════════════════════════
@@ -83,9 +82,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         let dim = config.dim;
         // ═══ 自动递归创建上层目录 ═══
         if let Some(parent_dir) = std::path::Path::new(path).parent()
-            && !parent_dir.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent_dir)?;
-            }
+            && !parent_dir.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent_dir)?;
+        }
 
         // ═══ 文件锁：防止多进程并发写同一个数据库 ═══
         let lock_path = format!("{}.lock", path);
@@ -117,12 +117,19 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             wal_file.sync_all()?;
 
             if !entries.is_empty() {
-                tracing::info!("Recovering {} entries from WAL, safely truncated at offset {}...", entries.len(), valid_offset);
+                tracing::info!(
+                    "Recovering {} entries from WAL, safely truncated at offset {}...",
+                    entries.len(),
+                    valid_offset
+                );
                 for entry in entries {
                     transaction::replay_entry(&mut memtable, entry);
                 }
             } else {
-                tracing::info!("Cleared purely corrupt/uncommitted WAL data, truncated back to {}.", valid_offset);
+                tracing::info!(
+                    "Cleared purely corrupt/uncommitted WAL data, truncated back to {}.",
+                    valid_offset
+                );
             }
         }
 
@@ -271,7 +278,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn insert(&mut self, vector: &[T], payload: serde_json::Value) -> Result<NodeId> {
         let payload_str = payload.to_string();
         if payload_str.len() > 8 * 1024 * 1024 {
-            return Err(crate::error::TriviumError::PayloadTooLarge { size_bytes: payload_str.len(), max_bytes: 8 * 1024 * 1024 });
+            return Err(crate::error::TriviumError::PayloadTooLarge {
+                size_bytes: payload_str.len(),
+                max_bytes: 8 * 1024 * 1024,
+            });
         }
 
         let id = {
@@ -298,7 +308,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     ) -> Result<()> {
         let payload_str = payload.to_string();
         if payload_str.len() > 8 * 1024 * 1024 {
-            return Err(crate::error::TriviumError::PayloadTooLarge { size_bytes: payload_str.len(), max_bytes: 8 * 1024 * 1024 });
+            return Err(crate::error::TriviumError::PayloadTooLarge {
+                size_bytes: payload_str.len(),
+                max_bytes: 8 * 1024 * 1024,
+            });
         }
 
         {
@@ -362,7 +375,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn update_payload(&mut self, id: NodeId, payload: serde_json::Value) -> Result<()> {
         let payload_str = payload.to_string();
         if payload_str.len() > 8 * 1024 * 1024 {
-            return Err(crate::error::TriviumError::PayloadTooLarge { size_bytes: payload_str.len(), max_bytes: 8 * 1024 * 1024 });
+            return Err(crate::error::TriviumError::PayloadTooLarge {
+                size_bytes: payload_str.len(),
+                max_bytes: 8 * 1024 * 1024,
+            });
         }
 
         {
@@ -418,7 +434,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             let mut edges = std::collections::HashMap::new();
             for &id in &node_ids {
                 if let Some(e) = mt.get_edges(id) {
-                    edges.insert(id, e.iter().map(|edge| (edge.target_id, edge.weight)).collect());
+                    edges.insert(
+                        id,
+                        e.iter().map(|edge| (edge.target_id, edge.weight)).collect(),
+                    );
                 }
             }
             (
@@ -597,7 +616,6 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         visited.into_iter().collect()
     }
 
-
     // ════════════════════════════════════════════════════════
     //  属性二级索引管理
     // ════════════════════════════════════════════════════════
@@ -634,8 +652,8 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// let results = db.tql("FIND {type: \"event\", heat: {$gte: 0.7}} RETURN * LIMIT 10")?;
     /// ```
     pub fn tql(&self, input: &str) -> Result<crate::query::tql_executor::TqlResult<T>> {
-        let query = crate::query::tql_parser::parse_tql(input)
-            .map_err(|e| TriviumError::QueryParse(e))?;
+        let query =
+            crate::query::tql_parser::parse_tql(input).map_err(|e| TriviumError::QueryParse(e))?;
         let mt = lock_or_recover(&self.memtable);
         crate::query::tql_executor::execute_tql(&query, &mt)
     }
@@ -665,7 +683,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         match stmt {
             TqlStatement::Query(_) => {
                 // 读查询降级：执行但不返回数据
-                Ok(TqlMutResult { affected: 0, created_ids: Vec::new() })
+                Ok(TqlMutResult {
+                    affected: 0,
+                    created_ids: Vec::new(),
+                })
             }
             TqlStatement::Mutation(mutation) => {
                 // 1. 在只读快照上生成 MutationOps
@@ -678,17 +699,27 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 let mut affected = 0usize;
                 let mut created_ids = Vec::new();
                 // 变量名 → 新创建的 ID（用于 LinkEdge 回填）
-                let mut var_id_map: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+                let mut var_id_map: std::collections::HashMap<String, u64> =
+                    std::collections::HashMap::new();
 
                 for op in ops {
                     match op {
-                        MutationOp::InsertNode { var, vector, payload } => {
+                        MutationOp::InsertNode {
+                            var,
+                            vector,
+                            payload,
+                        } => {
                             let id = self.insert(&vector, payload)?;
                             var_id_map.insert(var, id);
                             created_ids.push(id);
                             affected += 1;
                         }
-                        MutationOp::LinkEdge { mut src_id, mut dst_id, label, weight } => {
+                        MutationOp::LinkEdge {
+                            mut src_id,
+                            mut dst_id,
+                            label,
+                            weight,
+                        } => {
                             // 回填 CREATE 变量的 ID（ID=0 表示待回填）
                             if src_id == 0 {
                                 // 尝试从 var_id_map 查找（通过 CreateEdge.src_var）
@@ -699,9 +730,13 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                                 // 同上
                             }
                             // 优化：从 mutation AST 中提取变量名
-                            if let TqlStatement::Mutation(ref m) = crate::query::tql_parser::parse_tql_statement(input)
-                                .map_err(|e| TriviumError::QueryParse(e))? {
-                                if let crate::query::tql_ast::MutationAction::Create(ref create) = m.action {
+                            if let TqlStatement::Mutation(ref m) =
+                                crate::query::tql_parser::parse_tql_statement(input)
+                                    .map_err(|e| TriviumError::QueryParse(e))?
+                            {
+                                if let crate::query::tql_ast::MutationAction::Create(ref create) =
+                                    m.action
+                                {
                                     for edge in &create.edges {
                                         if edge.label == label && edge.weight == weight {
                                             if src_id == 0 {
@@ -762,7 +797,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     }
                 }
 
-                Ok(TqlMutResult { affected, created_ids })
+                Ok(TqlMutResult {
+                    affected,
+                    created_ids,
+                })
             }
         }
     }
@@ -865,8 +903,6 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             committed: false,
         }
     }
-
-
 }
 
 /// 安全析构：确保 WAL BufWriter 的缓冲数据在 Database 被 drop 时显式落盘。
