@@ -8,11 +8,61 @@ on:
 
 jobs:
   # ═══════════════════════════════════════════════════════════
+  #  阶段 0: 版本预检（PyPI / NPM 是否已存在相同或更新版本）
+  # ═══════════════════════════════════════════════════════════
+  version-gate:
+    name: Version Gate
+    runs-on: ubuntu-latest
+    outputs:
+      pypi_should_publish: ${{ steps.check_pypi.outputs.should_publish }}
+      npm_should_publish: ${{ steps.check_npm.outputs.should_publish }}
+      version: ${{ steps.extract.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 提取版本号
+        id: extract
+        run: |
+          # 从 tag 名提取版本：v0.6.0 → 0.6.0
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "📦 当前发布版本: $VERSION"
+
+      - name: 检查 PyPI 是否已发布
+        id: check_pypi
+        run: |
+          VERSION="${{ steps.extract.outputs.version }}"
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/triviumdb/${VERSION}/json")
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "⏭️  PyPI 已存在 triviumdb==${VERSION}，跳过发布"
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "✅ PyPI 未找到 triviumdb==${VERSION}，准备发布"
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 检查 NPM 是否已发布
+        id: check_npm
+        run: |
+          VERSION="${{ steps.extract.outputs.version }}"
+          # npm view 返回版本号或空
+          EXISTING=$(npm view triviumdb@${VERSION} version 2>/dev/null || echo "")
+          if [ "$EXISTING" = "$VERSION" ]; then
+            echo "⏭️  NPM 已存在 triviumdb@${VERSION}，跳过发布"
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "✅ NPM 未找到 triviumdb@${VERSION}，准备发布"
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ═══════════════════════════════════════════════════════════
   #  阶段 1: 编译 Python Wheels（含 ARM64）
   # ═══════════════════════════════════════════════════════════
   build-wheels:
     name: Build wheels (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
+    needs: version-gate
+    if: needs.version-gate.outputs.pypi_should_publish == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -30,7 +80,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             sdist: false
           - name: macOS x86_64
-            runner: macos-13
+            runner: macos-latest  # Apple Silicon 交叉编译 x86_64
             target: x86_64-apple-darwin
             sdist: false
           - name: macOS ARM64
@@ -70,7 +120,8 @@ jobs:
   release:
     name: Release to PyPI
     runs-on: ubuntu-latest
-    needs: build-wheels
+    needs: [version-gate, build-wheels]
+    if: needs.version-gate.outputs.pypi_should_publish == 'true'
     steps:
       - name: Download all wheels
         uses: actions/download-artifact@v4
@@ -90,6 +141,8 @@ jobs:
   build-node:
     name: Build Node addon (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
+    needs: version-gate
+    if: needs.version-gate.outputs.npm_should_publish == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -104,7 +157,7 @@ jobs:
             runner: windows-latest
             target: x86_64-pc-windows-msvc
           - name: macOS x86_64
-            runner: macos-13
+            runner: macos-latest  # Apple Silicon 交叉编译 x86_64
             target: x86_64-apple-darwin
           - name: macOS ARM64
             runner: macos-latest
@@ -149,7 +202,8 @@ jobs:
   release-npm:
     name: Release to NPM
     runs-on: ubuntu-latest
-    needs: build-node
+    needs: [version-gate, build-node]
+    if: needs.version-gate.outputs.npm_should_publish == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -191,3 +245,27 @@ jobs:
           npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ═══════════════════════════════════════════════════════════
+  #  阶段 5: 发布摘要（无论跳过还是发布都输出结果）
+  # ═══════════════════════════════════════════════════════════
+  summary:
+    name: Release Summary
+    runs-on: ubuntu-latest
+    needs: [version-gate, release, release-npm]
+    if: always()
+    steps:
+      - name: 输出发布摘要
+        run: |
+          echo "## 📦 Release Summary: v${{ needs.version-gate.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.version-gate.outputs.pypi_should_publish }}" = "true" ]; then
+            echo "- **PyPI**: ✅ 已发布 triviumdb==${{ needs.version-gate.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **PyPI**: ⏭️ 跳过（版本已存在）" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ "${{ needs.version-gate.outputs.npm_should_publish }}" = "true" ]; then
+            echo "- **NPM**: ✅ 已发布 triviumdb@${{ needs.version-gate.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **NPM**: ⏭️ 跳过（版本已存在）" >> $GITHUB_STEP_SUMMARY
+          fi

@@ -58,7 +58,7 @@ jobs:
           - name: Windows x86_64
             runner: windows-latest
           - name: macOS x86_64
-            runner: macos-13
+            runner: macos-latest  # Apple Silicon 交叉编译 x86_64
           - name: macOS ARM64 (M-series)
             runner: macos-latest    # macos-latest = Apple Silicon (M1+)
 
