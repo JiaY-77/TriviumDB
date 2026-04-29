@@ -640,4 +640,186 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, 1);
     }
+
+    #[test]
+    fn test_hook_context_default() {
+        let ctx = HookContext::default();
+        assert!(ctx.custom_data.is_null());
+        assert!(!ctx.abort);
+    }
+
+    #[test]
+    fn test_composite_hook_default() {
+        let c = CompositeHook::default();
+        assert!(c.hooks.is_empty());
+    }
+
+    #[test]
+    fn test_composite_on_pre_search_abort() {
+        struct AbortHook;
+        impl SearchHook for AbortHook {
+            fn on_pre_search(
+                &self,
+                _qv: &mut Vec<f32>,
+                _cfg: &mut SearchConfig,
+                ctx: &mut HookContext,
+            ) {
+                ctx.abort = true;
+            }
+        }
+
+        struct NeverReachedHook;
+        impl SearchHook for NeverReachedHook {
+            fn on_pre_search(
+                &self,
+                qv: &mut Vec<f32>,
+                _cfg: &mut SearchConfig,
+                _ctx: &mut HookContext,
+            ) {
+                qv[0] = 999.0; // 不应被执行
+            }
+        }
+
+        let mut composite = CompositeHook::new();
+        composite.add(AbortHook);
+        composite.add(NeverReachedHook);
+
+        let mut ctx = HookContext::new();
+        let mut vec = vec![1.0, 2.0];
+        let mut config = SearchConfig::default();
+        composite.on_pre_search(&mut vec, &mut config, &mut ctx);
+
+        assert!(ctx.abort);
+        assert_eq!(vec[0], 1.0, "abort 后第二个 hook 不应执行");
+    }
+
+    #[test]
+    fn test_composite_on_custom_recall_first_wins() {
+        struct RecallA;
+        impl SearchHook for RecallA {
+            fn on_custom_recall(
+                &self,
+                _qv: &[f32],
+                _cfg: &SearchConfig,
+                _ctx: &mut HookContext,
+            ) -> Option<Vec<SearchHit>> {
+                Some(vec![SearchHit { id: 42, score: 1.0, payload: serde_json::Value::Null }])
+            }
+        }
+
+        struct RecallB;
+        impl SearchHook for RecallB {
+            fn on_custom_recall(
+                &self,
+                _qv: &[f32],
+                _cfg: &SearchConfig,
+                _ctx: &mut HookContext,
+            ) -> Option<Vec<SearchHit>> {
+                Some(vec![SearchHit { id: 99, score: 0.5, payload: serde_json::Value::Null }])
+            }
+        }
+
+        let mut composite = CompositeHook::new();
+        composite.add(RecallA);
+        composite.add(RecallB);
+
+        let mut ctx = HookContext::new();
+        let config = SearchConfig::default();
+        let result = composite.on_custom_recall(&[1.0], &config, &mut ctx);
+
+        assert!(result.is_some());
+        assert_eq!(result.unwrap()[0].id, 42, "第一个返回 Some 的 hook 应生效");
+    }
+
+    #[test]
+    fn test_composite_on_custom_recall_all_none() {
+        let composite = CompositeHook::new();
+        let mut ctx = HookContext::new();
+        let config = SearchConfig::default();
+        assert!(composite.on_custom_recall(&[1.0], &config, &mut ctx).is_none());
+    }
+
+    #[test]
+    fn test_composite_on_rerank_first_wins() {
+        struct RerankHook;
+        impl SearchHook for RerankHook {
+            fn on_rerank(
+                &self,
+                hits: &mut Vec<SearchHit>,
+                _ctx: &mut HookContext,
+            ) -> Option<Vec<SearchHit>> {
+                let mut reranked = hits.clone();
+                reranked.reverse();
+                Some(reranked)
+            }
+        }
+
+        let mut composite = CompositeHook::new();
+        composite.add(RerankHook);
+
+        let mut ctx = HookContext::new();
+        let mut hits = vec![
+            SearchHit { id: 1, score: 1.0, payload: serde_json::Value::Null },
+            SearchHit { id: 2, score: 0.5, payload: serde_json::Value::Null },
+        ];
+        let result = composite.on_rerank(&mut hits, &mut ctx);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap()[0].id, 2);
+    }
+
+    #[test]
+    fn test_composite_on_pre_graph_expand() {
+        struct SeedBoostHook;
+        impl SearchHook for SeedBoostHook {
+            fn on_pre_graph_expand(&self, seeds: &mut Vec<SearchHit>, _ctx: &mut HookContext) {
+                seeds.push(SearchHit { id: 100, score: 0.9, payload: serde_json::Value::Null });
+            }
+        }
+
+        let mut composite = CompositeHook::new();
+        composite.add(SeedBoostHook);
+
+        let mut ctx = HookContext::new();
+        let mut seeds = vec![SearchHit { id: 1, score: 1.0, payload: serde_json::Value::Null }];
+        composite.on_pre_graph_expand(&mut seeds, &mut ctx);
+        assert_eq!(seeds.len(), 2);
+        assert_eq!(seeds[1].id, 100);
+    }
+
+    #[test]
+    fn test_composite_on_post_search() {
+        struct TruncateHook;
+        impl SearchHook for TruncateHook {
+            fn on_post_search(&self, results: &mut Vec<SearchHit>, _ctx: &mut HookContext) {
+                results.truncate(1);
+            }
+        }
+
+        let mut composite = CompositeHook::new();
+        composite.add(TruncateHook);
+
+        let mut ctx = HookContext::new();
+        let mut results = vec![
+            SearchHit { id: 1, score: 1.0, payload: serde_json::Value::Null },
+            SearchHit { id: 2, score: 0.5, payload: serde_json::Value::Null },
+        ];
+        composite.on_post_search(&mut results, &mut ctx);
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_ffi_search_hit_repr() {
+        let h = FfiSearchHit { id: 42, score: 0.95 };
+        assert_eq!(h.id, 42);
+        assert_eq!(h.score, 0.95);
+        // 验证 Copy/Clone/Debug
+        let h2 = h;
+        assert_eq!(format!("{:?}", h2), format!("{:?}", h));
+    }
+
+    #[test]
+    fn test_ffi_hook_load_nonexistent() {
+        let result = FfiHook::load("nonexistent_library.dll");
+        assert!(result.is_err());
+    }
 }

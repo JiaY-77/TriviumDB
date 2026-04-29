@@ -257,19 +257,24 @@ TriviumDB/
 │   ├── graph/
 │   │   ├── traversal.rs    # PPR 图扩散 (Spreading Activation)
 │   │   └── leiden.rs       # Leiden 社区发现算法
-│   ├── python.rs           # PyO3 绑定（含 Hook 管理接口）
-│   └── nodejs.rs           # napi-rs 绑定（含 Hook 管理接口）
+│   └── bindings/           # FFI 绑定层（公共逻辑已提取至核心模块）
+│       ├── mod.rs          # 统一入口（feature-gated）
+│       ├── python.rs       # PyO3 绑定（含 Hook 管理接口）
+│       └── nodejs.rs       # napi-rs 绑定（含 Hook 管理接口）
 ├── benches/
 │   └── benchmark.rs        # Criterion 性能基准测试套件
 ├── tests/
-│   ├── workflow.rs         # 业务全链路集成测试
-│   ├── search.rs           # 向量检索正确性测试
-│   └── ...                 # 其他集成测试
+│   ├── unit/               # 单元测试（集中管理，~268 用例）
+│   ├── proptest_core.rs    # 属性测试（~2450 随机用例）
+│   ├── proptest_query.rs   # TQL 模糊测试
+│   └── ...                 # 集成测试（并发/恢复/安全/压力等）
 ├── docs/
 │   ├── api-reference.md    # 完整 API 参考文档
 │   ├── features.md         # 支持特性详解
 │   ├── best-practices.md   # 最佳实践指南
 │   ├── hook-guide.md       # Hook 开发指南（C++ FFI / Rust Hook）
+│   ├── tql-reference.md    # TQL 查询语言参考
+│   ├── testing.md          # 测试实践说明
 │   └── security.md         # 安全设计说明
 ├── Cargo.toml
 ├── pyproject.toml          # Maturin 构建配置
@@ -348,13 +353,15 @@ TriviumDB/
 
 ## 📖 文档
 
-| 文档                                      | 说明                                             |
-| ----------------------------------------- | ------------------------------------------------ |
-| **[API 完整参考](docs/api-reference.md)** | 全部 Python / Node.js / Rust API、参数说明、返回值类型 |
-| **[支持特性详解](docs/features.md)**      | 架构设计、存储引擎、索引策略、崩溃恢复等技术细节 |
-| **[最佳实践](docs/best-practices.md)**    | 数据建模范式、性能调优、Hook 使用指南、避坑指南   |
-| **[Hook 开发指南](docs/hook-guide.md)**   | C/C++ FFI 插件编写、Rust Hook 实现、管线诊断实战 |
-| **[安全设计说明](docs/security.md)**      | 并发安全、数据完整性、unsafe 审计、FFI 安全边界   |
+| 文档                                        | 说明                                                   |
+| ------------------------------------------- | ------------------------------------------------------ |
+| **[API 完整参考](docs/api-reference.md)**   | 全部 Python / Node.js / Rust API、参数说明、返回值类型 |
+| **[支持特性详解](docs/features.md)**        | 架构设计、存储引擎、索引策略、崩溃恢复等技术细节       |
+| **[最佳实践](docs/best-practices.md)**      | 数据建模范式、性能调优、Hook 使用指南、避坑指南         |
+| **[TQL 查询语言参考](docs/tql-reference.md)** | MATCH / FIND / SEARCH 语法、DML 写操作、属性索引      |
+| **[Hook 开发指南](docs/hook-guide.md)**     | C/C++ FFI 插件编写、Rust Hook 实现、管线诊断实战       |
+| **[测试实践](docs/testing.md)**             | 四层测试体系、属性测试、变异测试、覆盖率度量与 CI 建议 |
+| **[安全设计说明](docs/security.md)**        | 并发安全、数据完整性、unsafe 审计、FFI 安全边界         |
 
 ---
 

@@ -11,14 +11,13 @@ pub mod graph;
 pub mod hook;
 pub mod index;
 pub mod node;
-#[cfg(feature = "nodejs")]
-pub mod nodejs;
-#[cfg(feature = "python")]
-pub mod python;
 pub mod query;
 pub mod storage;
 
 pub mod cognitive;
+
+/// FFI 绑定层（Python / Node.js）
+pub mod bindings;
 
 pub use database::Database;
 pub use error::{Result, TriviumError};
@@ -30,4 +29,5 @@ pub use vector::VectorType;
 
 // PyO3 模块入口：当 maturin 构建 cdylib 时，Python import 会调用此处
 #[cfg(feature = "python")]
-pub use python::python::triviumdb;
+pub use bindings::python::python::triviumdb;
+

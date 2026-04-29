@@ -12,15 +12,8 @@ use crate::node::NodeId;
 use crate::storage::memtable::MemTable;
 use crate::storage::wal::WalEntry;
 
-use std::sync::MutexGuard;
+use super::lock_or_recover;
 
-/// 安全获取 Mutex 锁
-fn lock_or_recover<T>(mutex: &std::sync::Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| {
-        tracing::warn!("Mutex was poisoned (transaction), recovering...");
-        poisoned.into_inner()
-    })
-}
 
 /// WAL 崩溃恢复：回放单条 WAL 记录到 MemTable
 ///

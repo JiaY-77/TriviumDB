@@ -62,6 +62,23 @@ pub enum SyncMode {
     Off,
 }
 
+impl SyncMode {
+    /// 从字符串解析同步模式（"full" / "normal" / "off"）
+    ///
+    /// 供 Python/Node.js 绑定层统一调用，避免各绑定各自维护一份解析逻辑。
+    pub fn parse(s: &str) -> std::result::Result<Self, String> {
+        match s {
+            "full" => Ok(SyncMode::Full),
+            "normal" => Ok(SyncMode::Normal),
+            "off" => Ok(SyncMode::Off),
+            other => Err(format!(
+                "Unsupported sync_mode: '{}'. Use 'full', 'normal', or 'off'",
+                other
+            )),
+        }
+    }
+}
+
 /// Write-Ahead Logger
 /// 每次变更先追加写入 .wal 文件，保证崩溃时可恢复。
 ///

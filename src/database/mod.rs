@@ -791,15 +791,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                                             edges.push((id, edge.target_id));
                                         }
                                     }
-                                    // 入边：遍历所有节点找指向 id 的边
-                                    for src_id in mt.all_node_ids() {
-                                        if let Some(src_edges) = mt.get_edges(src_id) {
-                                            for edge in src_edges {
-                                                if edge.target_id == id {
-                                                    edges.push((src_id, id));
-                                                }
-                                            }
-                                        }
+                                    // 入边：利用已有的反向索引 O(1) 查找
+                                    for &src_id in mt.get_incoming_sources(id) {
+                                        edges.push((src_id, id));
                                     }
                                     edges
                                 };

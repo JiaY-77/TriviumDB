@@ -20,15 +20,10 @@ use crate::hook::{HookContext, SearchHook};
 use crate::index::brute_force;
 use crate::node::{NodeId, SearchHit};
 use crate::storage::memtable::MemTable;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
-/// 安全获取 Mutex 锁（与 mod.rs 中的相同实现）
-fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| {
-        tracing::warn!("Mutex was poisoned (pipeline), recovering...");
-        poisoned.into_inner()
-    })
-}
+use super::lock_or_recover;
+
 
 /// 执行完整的混合检索管线
 ///

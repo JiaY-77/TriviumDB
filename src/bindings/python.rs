@@ -197,152 +197,17 @@ pub mod python {
     use crate::filter::Filter;
 
     fn dict_to_filter(py: Python<'_>, dict: &Bound<'_, PyDict>) -> PyResult<Filter> {
-        let mut filters = Vec::new();
-        for (k, v) in dict.iter() {
-            let key = k.extract::<String>()?;
-
-            if key == "$and" {
-                if let Ok(list) = v.downcast::<PyList>() {
-                    let sub_filters = list
-                        .iter()
-                        .map(|item| {
-                            let sub_dict = item.downcast::<PyDict>()?;
-                            dict_to_filter(py, sub_dict)
-                        })
-                        .collect::<PyResult<Vec<_>>>()?;
-                    filters.push(Filter::And(sub_filters));
-                }
-                continue;
-            }
-            if key == "$or" {
-                if let Ok(list) = v.downcast::<PyList>() {
-                    let sub_filters = list
-                        .iter()
-                        .map(|item| {
-                            let sub_dict = item.downcast::<PyDict>()?;
-                            dict_to_filter(py, sub_dict)
-                        })
-                        .collect::<PyResult<Vec<_>>>()?;
-                    filters.push(Filter::Or(sub_filters));
-                }
-                continue;
-            }
-
-            if let Ok(op_dict) = v.downcast::<PyDict>() {
-                for (op_k, op_v) in op_dict.iter() {
-                    let op_str = op_k.extract::<String>()?;
-                    let val = pyobject_to_json(py, &op_v);
-
-                    let filter_op = match op_str.as_str() {
-                        "$eq" => Filter::Eq(key.clone(), val),
-                        "$ne" => Filter::Ne(key.clone(), val),
-                        "$gt" => {
-                            let n = val.as_f64().ok_or_else(|| {
-                                pyo3::exceptions::PyValueError::new_err("$gt requires a number")
-                            })?;
-                            Filter::Gt(key.clone(), n)
-                        }
-                        "$gte" => {
-                            let n = val.as_f64().ok_or_else(|| {
-                                pyo3::exceptions::PyValueError::new_err("$gte requires a number")
-                            })?;
-                            Filter::Gte(key.clone(), n)
-                        }
-                        "$lt" => {
-                            let n = val.as_f64().ok_or_else(|| {
-                                pyo3::exceptions::PyValueError::new_err("$lt requires a number")
-                            })?;
-                            Filter::Lt(key.clone(), n)
-                        }
-                        "$lte" => {
-                            let n = val.as_f64().ok_or_else(|| {
-                                pyo3::exceptions::PyValueError::new_err("$lte requires a number")
-                            })?;
-                            Filter::Lte(key.clone(), n)
-                        }
-                        "$in" => {
-                            if let serde_json::Value::Array(arr) = val {
-                                Filter::In(key.clone(), arr)
-                            } else {
-                                return Err(pyo3::exceptions::PyValueError::new_err(
-                                    "$in requires a list",
-                                ));
-                            }
-                        }
-                        "$exists" => {
-                            if let serde_json::Value::Bool(b) = val {
-                                Filter::Exists(key.clone(), b)
-                            } else {
-                                return Err(pyo3::exceptions::PyValueError::new_err(
-                                    "$exists requires a boolean",
-                                ));
-                            }
-                        }
-                        "$nin" => {
-                            if let serde_json::Value::Array(arr) = val {
-                                Filter::Nin(key.clone(), arr)
-                            } else {
-                                return Err(pyo3::exceptions::PyValueError::new_err(
-                                    "$nin requires a list",
-                                ));
-                            }
-                        }
-                        "$size" => {
-                            let s = val.as_u64().ok_or_else(|| {
-                                pyo3::exceptions::PyValueError::new_err(
-                                    "$size requires a non-negative integer",
-                                )
-                            })?;
-                            Filter::Size(key.clone(), s as usize)
-                        }
-                        "$all" => {
-                            if let serde_json::Value::Array(arr) = val {
-                                Filter::All(key.clone(), arr)
-                            } else {
-                                return Err(pyo3::exceptions::PyValueError::new_err(
-                                    "$all requires a list",
-                                ));
-                            }
-                        }
-                        "$type" => {
-                            let t = val.as_str().ok_or_else(|| {
-                                pyo3::exceptions::PyValueError::new_err("$type requires a string")
-                            })?;
-                            Filter::TypeMatch(key.clone(), t.to_string())
-                        }
-                        _ => {
-                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                                "Unsupported operator: {}",
-                                op_str
-                            )));
-                        }
-                    };
-                    filters.push(filter_op);
-                }
-            } else {
-                let val = pyobject_to_json(py, &v);
-                filters.push(Filter::Eq(key, val));
-            }
-        }
-
-        if filters.is_empty() {
-            Ok(Filter::Eq("none".into(), serde_json::Value::Null))
-        } else if filters.len() == 1 {
-            Ok(filters.pop().unwrap())
-        } else {
-            Ok(Filter::And(filters))
-        }
+        // 将 PyDict 转为 serde_json::Value，再统一调用 Filter::from_json
+        let json_val = pyobject_to_json(py, &dict.clone().into_any());
+        Filter::from_json(&json_val).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(e)
+        })
     }
 
     fn parse_sync_mode(s: &str) -> PyResult<crate::storage::wal::SyncMode> {
-        match s {
-            "full" => Ok(crate::storage::wal::SyncMode::Full),
-            "normal" => Ok(crate::storage::wal::SyncMode::Normal),
-            "off" => Ok(crate::storage::wal::SyncMode::Off),
-            _ => Err(pyo3::exceptions::PyValueError::new_err(
-                "Unsupported sync_mode. Use 'full', 'normal', or 'off'",
-            )),
-        }
+        crate::storage::wal::SyncMode::parse(s).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(e)
+        })
     }
 
     #[pymethods]
