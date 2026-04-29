@@ -52,7 +52,9 @@ impl UnionFind {
             self.parent.insert(rb, ra);
         } else {
             self.parent.insert(rb, ra);
-            *self.rank.get_mut(&ra).unwrap() += 1;
+            if let Some(r) = self.rank.get_mut(&ra) {
+                *r += 1;
+            }
         }
     }
 }

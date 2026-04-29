@@ -13,8 +13,9 @@ use triviumdb::filter::Filter;
 const DIM: usize = 3;
 
 fn tmp_db(name: &str) -> String {
-    std::fs::create_dir_all("test_data").ok();
-    format!("test_data/workflow_{}", name)
+    let dir = std::env::temp_dir().join("triviumdb_test");
+    std::fs::create_dir_all(&dir).ok();
+    dir.join(format!("workflow_{}", name)).to_string_lossy().to_string()
 }
 
 fn cleanup(path: &str) {

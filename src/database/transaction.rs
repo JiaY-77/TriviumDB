@@ -324,7 +324,7 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
         for (i, op) in ops.iter().enumerate() {
             match op {
                 TxOp::Insert { vector, payload } => {
-                    let id = pre_assigned_ids[i].unwrap();
+                    let id = pre_assigned_ids[i].expect("BUG: Insert op must have pre-assigned ID");
                     let payload_str = payload.to_string();
                     if payload_str.len() > 8 * 1024 * 1024 {
                         return Err(crate::error::TriviumError::PayloadTooLarge {
@@ -407,7 +407,7 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
             let mut w = lock_or_recover(&self.db.wal);
             let tx_id = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_nanos() as u64;
             w.append_batch(tx_id, &wal_entries)?;
         }

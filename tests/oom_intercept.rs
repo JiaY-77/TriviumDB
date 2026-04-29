@@ -8,8 +8,9 @@ use triviumdb::Database;
 const DIM: usize = 4; // 修复：在真实 OS 上多线程跑测试时，降低到 4 维以防止物理机真实 OOM 和引发死机蓝屏！测试配额是测逻辑截断的，无需占用超大真实内存
 
 fn tmp_db(name: &str) -> String {
-    std::fs::create_dir_all("test_data").ok();
-    format!("test_data/oom_{}", name)
+    let dir = std::env::temp_dir().join("triviumdb_test");
+    std::fs::create_dir_all(&dir).ok();
+    dir.join(format!("oom_{}", name)).to_string_lossy().to_string()
 }
 
 fn cleanup(path: &str) {

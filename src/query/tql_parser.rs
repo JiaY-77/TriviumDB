@@ -431,7 +431,7 @@ impl TqlParser {
 
         match filters.len() {
             0 => Err("文档过滤不能为空".into()),
-            1 => Ok(filters.into_iter().next().unwrap()),
+            1 => Ok(filters.into_iter().next().expect("BUG: len==1 but next() returned None")),
             _ => Ok(Filter::And(filters)),
         }
     }
@@ -535,7 +535,7 @@ impl TqlParser {
             // 先记录位置，探测是 MATCHES 还是比较
             let ident = match self.advance() {
                 TqlToken::Ident(s) => s,
-                _ => unreachable!(),
+                _ => return Err("BUG: peek() was Ident but advance() returned different token".into()),
             };
 
             // var MATCHES {doc_filter}
@@ -592,13 +592,13 @@ impl TqlParser {
             .all(|e| matches!(&e.kind, ReturnExprKind::Var(_)) && e.alias.is_none() && !e.distinct);
 
         if all_simple {
-            let vars = exprs
-                .into_iter()
-                .map(|e| match e.kind {
-                    ReturnExprKind::Var(v) => v,
-                    _ => unreachable!(),
-                })
-                .collect();
+            let mut vars = Vec::with_capacity(exprs.len());
+            for e in exprs {
+                match e.kind {
+                    ReturnExprKind::Var(v) => vars.push(v),
+                    _ => return Err("BUG: expected Var in all_simple path".into()),
+                }
+            }
             Ok(ReturnClause::Variables(vars))
         } else {
             Ok(ReturnClause::Expressions(exprs))
@@ -724,7 +724,7 @@ impl TqlParser {
             TqlToken::Ident(_) => {
                 let ident = match self.advance() {
                     TqlToken::Ident(s) => s,
-                    _ => unreachable!(),
+                    _ => return Err("BUG: peek() was Ident but advance() returned different token".into()),
                 };
                 if self.at(&TqlToken::Dot) {
                     self.advance();
@@ -799,28 +799,28 @@ impl TqlParser {
                 if let TqlToken::IntLit(n) = self.advance() {
                     Ok(serde_json::json!(n))
                 } else {
-                    unreachable!()
+                    return Err("BUG: peek() was IntLit but advance() returned different token".into())
                 }
             }
             TqlToken::FloatLit(_) => {
                 if let TqlToken::FloatLit(f) = self.advance() {
                     Ok(serde_json::json!(f))
                 } else {
-                    unreachable!()
+                    return Err("BUG: peek() was FloatLit but advance() returned different token".into())
                 }
             }
             TqlToken::StringLit(_) => {
                 if let TqlToken::StringLit(s) = self.advance() {
                     Ok(serde_json::json!(s))
                 } else {
-                    unreachable!()
+                    return Err("BUG: peek() was StringLit but advance() returned different token".into())
                 }
             }
             TqlToken::BoolLit(_) => {
                 if let TqlToken::BoolLit(b) = self.advance() {
                     Ok(serde_json::json!(b))
                 } else {
-                    unreachable!()
+                    return Err("BUG: peek() was BoolLit but advance() returned different token".into())
                 }
             }
             TqlToken::Null => {

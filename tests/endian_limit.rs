@@ -11,8 +11,9 @@ use triviumdb::database::Config;
 const DIM: usize = 4;
 
 fn tmp_db(name: &str) -> String {
-    std::fs::create_dir_all("test_data").ok();
-    format!("test_data/endian_{}", name)
+    let dir = std::env::temp_dir().join("triviumdb_test");
+    std::fs::create_dir_all(&dir).ok();
+    dir.join(format!("endian_{}", name)).to_string_lossy().to_string()
 }
 
 fn cleanup(path: &str) {

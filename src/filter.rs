@@ -272,7 +272,7 @@ impl Filter {
 
         match filters.len() {
             0 => Err("过滤条件不能为空".to_string()),
-            1 => Ok(filters.into_iter().next().unwrap()),
+            1 => Ok(filters.into_iter().next().expect("BUG: len==1 but next() returned None")),
             _ => Ok(Filter::And(filters)),
         }
     }

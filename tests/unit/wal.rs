@@ -8,8 +8,9 @@ use std::io::Cursor;
 use triviumdb::storage::wal::{Wal, WalEntry, SyncMode};
 
 fn tmp_db(name: &str) -> String {
-    std::fs::create_dir_all("test_data").ok();
-    format!("test_data/unit_wal_{}", name)
+    let dir = std::env::temp_dir().join("triviumdb_test");
+    std::fs::create_dir_all(&dir).ok();
+    dir.join(format!("unit_wal_{}", name)).to_string_lossy().to_string()
 }
 
 fn cleanup(path: &str) {

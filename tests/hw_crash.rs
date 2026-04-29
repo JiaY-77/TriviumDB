@@ -18,8 +18,9 @@ use std::process::Command;
 const DIM: usize = 4;
 
 fn tmp_db(name: &str) -> String {
-    std::fs::create_dir_all("test_data").ok();
-    format!("test_data/hwcrash_{}", name)
+    let dir = std::env::temp_dir().join("triviumdb_test");
+    std::fs::create_dir_all(&dir).ok();
+    dir.join(format!("hwcrash_{}", name)).to_string_lossy().to_string()
 }
 
 fn cleanup(path: &str) {
