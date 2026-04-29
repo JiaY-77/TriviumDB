@@ -42,7 +42,7 @@ jobs:
       - name: 运行 WAL 与文件撕裂恢复测试
         run: |
           cargo test --test wal_midwrite -- --test-threads=1
-          cargo test --test sector_tearing -- --test-threads=1
+          cargo test --test sector_tearing -- --test-threads=1 --ignored
           cargo test --test power_cycle -- --test-threads=1
           cargo test --test io_fault -- --test-threads=1
           cargo test --test recovery -- --test-threads=1 P0_2_WAL恢复后_新插入不复用已有ID
@@ -123,7 +123,7 @@ jobs:
           cargo test --test io_fault -- --test-threads=1
           cargo test --test compaction_core -- --test-threads=1
           cargo test --test power_cycle -- --test-threads=1
-          cargo test --test sector_tearing -- --test-threads=1
+          cargo test --test sector_tearing -- --test-threads=1 --ignored
           cargo test --test emi_bitflip -- --test-threads=1
           cargo test --test unsafe_audit -- --test-threads=1
           cargo test --test engine_deep -- --test-threads=1 COV7_19_wal_truncated_recovery

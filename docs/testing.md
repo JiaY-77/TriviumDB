@@ -23,12 +23,12 @@
 
 TriviumDB 采用 **四层防御式测试体系**，从函数级正确性到系统级崩溃恢复逐层保障：
 
-| 层级 | 类型 | 用例数 | 覆盖目标 |
-|------|------|--------|----------|
-| L1 | 单元测试 | ~268 | 每个公开函数/方法的正确性与错误路径 |
-| L2 | 集成测试 | ~220 | 跨模块协作、WAL 恢复、并发安全、TQL 全链路 |
-| L3 | 属性测试 | ~2450（随机生成） | 数据结构不变量、数学契约、事务原子性 |
-| L4 | 变异测试 | 按需 | 测试用例的"杀伤力"验证 |
+| 层级 | 类型     | 用例数            | 覆盖目标                                   |
+| ---- | -------- | ----------------- | ------------------------------------------ |
+| L1   | 单元测试 | ~268              | 每个公开函数/方法的正确性与错误路径        |
+| L2   | 集成测试 | ~220              | 跨模块协作、WAL 恢复、并发安全、TQL 全链路 |
+| L3   | 属性测试 | ~2450（随机生成） | 数据结构不变量、数学契约、事务原子性       |
+| L4   | 变异测试 | 按需              | 测试用例的"杀伤力"验证                     |
 
 **总计约 550+ 确定性测试 + 2450+ 随机测试用例，全部通过。**
 
@@ -120,17 +120,17 @@ tests/
 
 ### 覆盖范围
 
-| 模块 | 测试文件 | 覆盖要点 |
-|------|----------|----------|
-| `MemTable` | `unit/memtable.rs` | CRUD、graph link/unlink、属性索引、label 索引、in_degree 追踪 |
-| `Database` | `unit/database.rs` | open/close、CRUD、search、TQL、事务（全 7 种 TxOp）、Hook 管理 |
-| `Filter` | `unit/filter.rs` | 14 种变体 matches、from_json 全操作符、错误路径、bloom mask |
-| `Vector` | `unit/vector.rs` | 余弦相似度、SIMD 尾部处理、标量回退、多 dtype |
-| `WAL` | `unit/wal.rs` | 序列化往返、CRC 校验、SyncMode 切换、崩溃恢复 |
-| `Traversal` | `unit/traversal.rs` | PPR 扩散、侧向抑制、不应期疲劳、参数边界 |
-| `TQL AST` | `unit/tql_ast.rs` | 语法树节点构造、枚举完整性 |
-| `Cognitive` | `unit/cognitive.rs` | FISTA 稀疏残差、DPP 多样性采样 |
-| `Index` | `unit/index.rs` | BQ 二值化、BruteForce 精确搜索 |
+| 模块        | 测试文件            | 覆盖要点                                                       |
+| ----------- | ------------------- | -------------------------------------------------------------- |
+| `MemTable`  | `unit/memtable.rs`  | CRUD、graph link/unlink、属性索引、label 索引、in_degree 追踪  |
+| `Database`  | `unit/database.rs`  | open/close、CRUD、search、TQL、事务（全 7 种 TxOp）、Hook 管理 |
+| `Filter`    | `unit/filter.rs`    | 14 种变体 matches、from_json 全操作符、错误路径、bloom mask    |
+| `Vector`    | `unit/vector.rs`    | 余弦相似度、SIMD 尾部处理、标量回退、多 dtype                  |
+| `WAL`       | `unit/wal.rs`       | 序列化往返、CRC 校验、SyncMode 切换、崩溃恢复                  |
+| `Traversal` | `unit/traversal.rs` | PPR 扩散、侧向抑制、不应期疲劳、参数边界                       |
+| `TQL AST`   | `unit/tql_ast.rs`   | 语法树节点构造、枚举完整性                                     |
+| `Cognitive` | `unit/cognitive.rs` | FISTA 稀疏残差、DPP 多样性采样                                 |
+| `Index`     | `unit/index.rs`     | BQ 二值化、BruteForce 精确搜索                                 |
 
 ### 事务测试示例
 
@@ -202,17 +202,17 @@ fn from_json_嵌套and_or() {
 
 ### 关键集成测试矩阵
 
-| 测试文件 | 验证目标 | 核心场景 |
-|----------|----------|----------|
-| `transaction.rs` | 事务原子性 | 多操作原子提交、NaN/维度拦截、跨事务依赖 |
-| `concurrent.rs` | 线程安全 | 多线程并发读写、无数据竞争 |
-| `recovery.rs` | 崩溃恢复 | WAL 回放、重启后数据一致性 |
-| `wal_midwrite.rs` | 断写安全 | WAL 写入中途中断、CRC 校验拦截损坏记录 |
-| `hw_crash.rs` | 硬件故障 | 模拟 OS 崩溃、掉电后数据完整性 |
-| `security.rs` | 安全防御 | NaN 注入、超大 payload、越界 ID |
-| `stress.rs` | 压力极限 | 高频写入、大批量操作、内存限制 |
-| `tql_executor.rs` | TQL 全链路 | MATCH/FIND/SEARCH 三种入口的完整执行 |
-| `tql_dml.rs` | TQL 写操作 | CREATE/SET/DELETE/DETACH DELETE |
+| 测试文件          | 验证目标   | 核心场景                                 |
+| ----------------- | ---------- | ---------------------------------------- |
+| `transaction.rs`  | 事务原子性 | 多操作原子提交、NaN/维度拦截、跨事务依赖 |
+| `concurrent.rs`   | 线程安全   | 多线程并发读写、无数据竞争               |
+| `recovery.rs`     | 崩溃恢复   | WAL 回放、重启后数据一致性               |
+| `wal_midwrite.rs` | 断写安全   | WAL 写入中途中断、CRC 校验拦截损坏记录   |
+| `hw_crash.rs`     | 硬件故障   | 模拟 OS 崩溃、掉电后数据完整性           |
+| `security.rs`     | 安全防御   | NaN 注入、超大 payload、越界 ID          |
+| `stress.rs`       | 压力极限   | 高频写入、大批量操作、内存限制           |
+| `tql_executor.rs` | TQL 全链路 | MATCH/FIND/SEARCH 三种入口的完整执行     |
+| `tql_dml.rs`      | TQL 写操作 | CREATE/SET/DELETE/DETACH DELETE          |
 
 ### WAL 断写安全测试示例
 
@@ -238,17 +238,17 @@ fn wal_半写条目被安全跳过() {
 
 TriviumDB 定义了以下 6 类核心不变量，由 `tests/proptest_core.rs` 持续验证：
 
-| # | 不变量 | 随机用例数 | 描述 |
-|---|--------|-----------|------|
-| 1 | MemTable CRUD node_count 一致性 | 200 | 任意 insert/delete 序列后，`node_count` == 实际存活节点数 |
-| 2 | MemTable insert/get/delete 可见性 | ~200 | 插入后 `contains` 为 true，删除后为 false |
-| 3 | Filter matches 绝不 panic | 500 | `from_json` 成功解析的 Filter 对任意 payload 调用 `matches` 绝不 panic |
-| 4 | 余弦相似度 self-similarity = 1.0 | 500 | 非零向量与自身的相似度恒为 1.0 |
-| 5 | 余弦相似度对称性 | 500 | `similarity(a, b) == similarity(b, a)` |
-| 6 | 余弦相似度绝对范围 | 500 | 结果恒在 `[-1.0, 1.0]` 范围内 |
-| 7 | Transaction 原子性 | 50 | commit 成功则全部可见，失败则数据库状态完全不变 |
-| 8 | link/unlink in_degree 一致性 | 100 | `link` 后 in_degree +1，`unlink` 后 -1 |
-| 9 | WAL 序列化往返 | 100 | `append` → `read_entries` 数据完全一致 |
+| #   | 不变量                            | 随机用例数 | 描述                                                                   |
+| --- | --------------------------------- | ---------- | ---------------------------------------------------------------------- |
+| 1   | MemTable CRUD node_count 一致性   | 200        | 任意 insert/delete 序列后，`node_count` == 实际存活节点数              |
+| 2   | MemTable insert/get/delete 可见性 | ~200       | 插入后 `contains` 为 true，删除后为 false                              |
+| 3   | Filter matches 绝不 panic         | 500        | `from_json` 成功解析的 Filter 对任意 payload 调用 `matches` 绝不 panic |
+| 4   | 余弦相似度 self-similarity = 1.0  | 500        | 非零向量与自身的相似度恒为 1.0                                         |
+| 5   | 余弦相似度对称性                  | 500        | `similarity(a, b) == similarity(b, a)`                                 |
+| 6   | 余弦相似度绝对范围                | 500        | 结果恒在 `[-1.0, 1.0]` 范围内                                          |
+| 7   | Transaction 原子性                | 50         | commit 成功则全部可见，失败则数据库状态完全不变                        |
+| 8   | link/unlink in_degree 一致性      | 100        | `link` 后 in_degree +1，`unlink` 后 -1                                 |
+| 9   | WAL 序列化往返                    | 100        | `append` → `read_entries` 数据完全一致                                 |
 
 ### TQL 模糊测试
 
@@ -323,12 +323,12 @@ cargo mutants --list --file src/filter.rs
 
 ### 解读结果
 
-| 结果 | 含义 | 行动 |
-|------|------|------|
-| `killed` | ✅ 测试成功杀死了这个变异体 | 无需行动 |
-| `survived` | ⚠️ 测试未能检测到这个代码变更 | 需要补充测试 |
-| `timeout` | 变异导致死循环/性能退化 | 通常算作"killed" |
-| `build error` | 变异导致编译失败 | 无需行动 |
+| 结果          | 含义                          | 行动             |
+| ------------- | ----------------------------- | ---------------- |
+| `killed`      | ✅ 测试成功杀死了这个变异体   | 无需行动         |
+| `survived`    | ⚠️ 测试未能检测到这个代码变更 | 需要补充测试     |
+| `timeout`     | 变异导致死循环/性能退化       | 通常算作"killed" |
+| `build error` | 变异导致编译失败              | 无需行动         |
 
 > ⚠️ 变异测试非常耗时（每个变异体需要独立编译整个项目）。建议仅对高风险、高覆盖率的模块按需运行，不适合放入 CI 常规流程。
 
@@ -358,22 +358,22 @@ cargo llvm-cov --json --output-path coverage.json
 
 ### 当前覆盖率基线
 
-| 指标 | 覆盖率 |
-|------|--------|
-| **总行覆盖率** | 81.29% |
-| **总函数覆盖率** | 88.68% |
-| **总分支覆盖率** | 83.52% |
+| 指标             | 覆盖率 |
+| ---------------- | ------ |
+| **总行覆盖率**   | 93.29% |
+| **总函数覆盖率** | 91.68% |
+| **总分支覆盖率** | 90.52% |
 
 #### 关键模块覆盖率
 
-| 模块 | 行覆盖 | 函数覆盖 | 说明 |
-|------|--------|---------|------|
-| `filter.rs` | 99.48% | 100% | 核心过滤逻辑，全路径覆盖 |
-| `transaction.rs` | 84.82% | 92.86% | 事务原子性，全 7 种 TxOp 覆盖 |
-| `hook.rs` | 77.65% | — | CompositeHook + FfiHook 逻辑 |
-| `database/mod.rs` | 71.20% | 86.54% | Database 公开 API |
-| `vector.rs` | ~73% | — | 含 ARM NEON 等平台特定代码（x86 上物理不可达） |
-| `compaction.rs` | ~0% | — | 后台 IO 线程，需专用集成测试 |
+| 模块              | 行覆盖 | 函数覆盖 | 说明                                           |
+| ----------------- | ------ | -------- | ---------------------------------------------- |
+| `filter.rs`       | 99.48% | 100%     | 核心过滤逻辑，全路径覆盖                       |
+| `transaction.rs`  | 84.82% | 92.86%   | 事务原子性，全 7 种 TxOp 覆盖                  |
+| `hook.rs`         | 77.65% | —        | CompositeHook + FfiHook 逻辑                   |
+| `database/mod.rs` | 71.20% | 86.54%   | Database 公开 API                              |
+| `vector.rs`       | ~73%   | —        | 含 ARM NEON 等平台特定代码（x86 上物理不可达） |
+| `compaction.rs`   | ~0%    | —        | 后台 IO 线程，需专用集成测试                   |
 
 > 💡 覆盖率 ≠ 质量。100% 行覆盖率不代表所有逻辑分支都被验证。属性测试和变异测试是覆盖率的重要补充。
 
@@ -475,10 +475,10 @@ jobs:
 
 ### 覆盖率门禁阈值建议
 
-| 指标 | 建议最低阈值 | 当前值 |
-|------|-------------|--------|
-| 行覆盖率 | 80% | 81.29% |
-| 函数覆盖率 | 85% | 88.68% |
+| 指标       | 建议最低阈值 | 当前值 |
+| ---------- | ------------ | ------ |
+| 行覆盖率   | 80%          | 81.29% |
+| 函数覆盖率 | 85%          | 88.68% |
 
 > ⚠️ 变异测试不建议放入 CI 常规流程（单次运行可能超过 30 分钟）。建议作为版本发布前的手动审计步骤。
 
@@ -486,8 +486,8 @@ jobs:
 
 ## 附录：依赖工具版本
 
-| 工具 | 用途 | 安装方式 |
-|------|------|----------|
-| `proptest 1.11` | 属性测试 | `Cargo.toml` dev-dependencies（已内置） |
-| `cargo-llvm-cov` | 覆盖率度量 | `cargo install cargo-llvm-cov` |
-| `cargo-mutants` | 变异测试 | `cargo install cargo-mutants` |
+| 工具             | 用途       | 安装方式                                |
+| ---------------- | ---------- | --------------------------------------- |
+| `proptest 1.11`  | 属性测试   | `Cargo.toml` dev-dependencies（已内置） |
+| `cargo-llvm-cov` | 覆盖率度量 | `cargo install cargo-llvm-cov`          |
+| `cargo-mutants`  | 变异测试   | `cargo install cargo-mutants`           |

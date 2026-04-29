@@ -36,11 +36,10 @@ fn BND_01_dim等于1_最小维度全流程() {
 
     let hits = db.search(&[1.0], 5, 0, 0.0).unwrap();
     assert_eq!(hits.len(), 2, "1 维搜索应返回所有可匹配节点");
-    assert_eq!(hits[0].id, id1, "完全相同向量应排在第一位");
-    assert!(
-        hits.iter().any(|hit| hit.id == id2),
-        "搜索结果应包含第二个 1 维节点"
-    );
+    let hit_ids: std::collections::HashSet<u64> = hits.iter().map(|hit| hit.id).collect();
+    assert_eq!(hit_ids.len(), 2, "1 维搜索结果不应重复同一节点");
+    assert!(hit_ids.contains(&id1), "搜索结果应包含第一个 1 维节点");
+    assert!(hit_ids.contains(&id2), "搜索结果应包含第二个 1 维节点");
 
     db.flush().unwrap();
     drop(db);

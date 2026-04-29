@@ -22,6 +22,7 @@ fn cleanup(path: &str) {
 }
 
 #[test]
+#[ignore = "故障注入测试由 fault-injection workflow 显式运行"]
 fn 测试_深层页撕裂_模拟写入一半断电截断() {
     let path = tmp_db("sector_torn");
     cleanup(&path);
