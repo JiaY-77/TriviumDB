@@ -22,7 +22,16 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for ext in &["", ".wal", ".vec", ".lock", ".flush_ok", ".tmp", ".vec.tmp"] {
+    for ext in &[
+        "",
+        ".wal",
+        ".vec",
+        ".lock",
+        ".flush_ok",
+        ".tmp",
+        ".vec.tmp",
+        ".flush_ok.tmp",
+    ] {
         std::fs::remove_file(format!("{}{}", path, ext)).ok();
     }
 }
@@ -206,7 +215,8 @@ fn seed_social_graph(path: &str) -> Database<f32> {
     }
 
     // 建立关系链: 1→2→3→4→5
-    let ids = db.all_node_ids();
+    let mut ids = db.all_node_ids();
+    ids.sort_unstable();
     for i in 0..ids.len() - 1 {
         db.link(ids[i], ids[i + 1], "knows", 0.9).unwrap();
     }
