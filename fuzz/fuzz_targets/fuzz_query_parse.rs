@@ -15,6 +15,6 @@ fuzz_target!(|data: &[u8]| {
     // 仅对合法 UTF-8 字符串进行解析（非 UTF-8 直接跳过）
     if let Ok(input) = std::str::from_utf8(data) {
         // 不关心返回值，只关心不 panic
-        let _ = triviumdb::query::parser::parse(input);
+        let _ = triviumdb::query::tql_parser::parse_tql_statement(input);
     }
 });
