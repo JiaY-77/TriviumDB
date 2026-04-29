@@ -35,7 +35,12 @@ fn BND_01_dim等于1_最小维度全流程() {
     db.link(id1, id2, "rel", 1.0).unwrap();
 
     let hits = db.search(&[1.0], 5, 0, 0.0).unwrap();
-    assert!(!hits.is_empty(), "1 维搜索应有结果");
+    assert_eq!(hits.len(), 2, "1 维搜索应返回所有可匹配节点");
+    assert_eq!(hits[0].id, id1, "完全相同向量应排在第一位");
+    assert!(
+        hits.iter().any(|hit| hit.id == id2),
+        "搜索结果应包含第二个 1 维节点"
+    );
 
     db.flush().unwrap();
     drop(db);
@@ -111,7 +116,8 @@ fn BND_04_单节点数据库_所有操作() {
         ..Default::default()
     };
     let expanded = db.search_advanced(&[1.0, 0.0, 0.0, 0.0], &cfg).unwrap();
-    assert!(!expanded.is_empty());
+    assert_eq!(expanded.len(), 1, "单节点图扩散只能返回自身");
+    assert_eq!(expanded[0].id, id, "扩散结果必须是唯一单节点");
 
     cleanup(&path);
 }
@@ -126,7 +132,9 @@ fn BND_05_payload为空JSON对象() {
     cleanup(&path);
 
     let mut db = Database::<f32>::open(&path, 4).unwrap();
-    let id = db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({})).unwrap();
+    let id = db
+        .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}))
+        .unwrap();
 
     let p = db.get_payload(id).unwrap();
     assert_eq!(p, serde_json::json!({}));
@@ -146,7 +154,7 @@ fn BND_06_payload含Unicode和特殊字符() {
     let path = tmp_db("unicode_payload");
     cleanup(&path);
 
-    let special_payloads = vec![
+    let special_payloads = [
         serde_json::json!({"text": "你好世界 🌍🚢"}),
         serde_json::json!({"text": "零宽字符\u{200B}测试"}),
         serde_json::json!({"text": "换行\n制表\t回车\r"}),
@@ -190,8 +198,12 @@ fn BND_07_边标签为空字符串() {
     cleanup(&path);
 
     let mut db = Database::<f32>::open(&path, 4).unwrap();
-    let id1 = db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({})).unwrap();
-    let id2 = db.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({})).unwrap();
+    let id1 = db
+        .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}))
+        .unwrap();
+    let id2 = db
+        .insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({}))
+        .unwrap();
 
     // 空标签 link
     db.link(id1, id2, "", 1.0).unwrap();
@@ -211,8 +223,12 @@ fn BND_08_边权重极端值() {
     cleanup(&path);
 
     let mut db = Database::<f32>::open(&path, 4).unwrap();
-    let id1 = db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({})).unwrap();
-    let id2 = db.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({})).unwrap();
+    let id1 = db
+        .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}))
+        .unwrap();
+    let id2 = db
+        .insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({}))
+        .unwrap();
 
     // 各种极端权重
     db.link(id1, id2, "zero", 0.0).unwrap();
@@ -230,6 +246,12 @@ fn BND_08_边权重极端值() {
         db.search_advanced(&[1.0, 0.0, 0.0, 0.0], &cfg)
     }));
     assert!(result.is_ok(), "极端权重不应导致 panic");
+    let hits = result.unwrap().unwrap();
+    assert!(hits.len() <= 2, "极端权重扩散结果不能超过图节点数");
+    assert!(
+        hits.iter().all(|hit| hit.id == id1 || hit.id == id2),
+        "扩散结果不能包含未知节点"
+    );
 
     cleanup(&path);
 }
@@ -262,8 +284,12 @@ fn BND_10_expand_depth极大值_小图不栈溢出() {
     cleanup(&path);
 
     let mut db = Database::<f32>::open(&path, 4).unwrap();
-    let id1 = db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({})).unwrap();
-    let id2 = db.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({})).unwrap();
+    let id1 = db
+        .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}))
+        .unwrap();
+    let id2 = db
+        .insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({}))
+        .unwrap();
     db.link(id1, id2, "link", 1.0).unwrap();
     db.link(id2, id1, "link", 1.0).unwrap();
 
@@ -277,6 +303,12 @@ fn BND_10_expand_depth极大值_小图不栈溢出() {
         db.search_advanced(&[1.0, 0.0, 0.0, 0.0], &cfg)
     }));
     assert!(result.is_ok(), "expand_depth=100 在小图上不应栈溢出");
+    let hits = result.unwrap().unwrap();
+    assert!(hits.len() <= 2, "极深扩散结果不能超过图节点数");
+    assert!(
+        hits.iter().all(|hit| hit.id == id1 || hit.id == id2),
+        "极深扩散不能产生脏节点"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -291,22 +323,34 @@ fn FMT_01_未来版本号文件_优雅拒绝() {
     // 先创建一个合法文件
     {
         let mut db = Database::<f32>::open(&path, 4).unwrap();
-        db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({})).unwrap();
+        db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}))
+            .unwrap();
         db.flush().unwrap();
     }
 
     // 篡改版本号为 99
-    if let Ok(mut data) = std::fs::read(&path) {
-        if data.len() >= 6 {
-            data[4..6].copy_from_slice(&99u16.to_le_bytes());
-            std::fs::write(&path, &data).unwrap();
-            std::fs::remove_file(format!("{}.flush_ok", path)).ok();
-        }
+    if let Ok(mut data) = std::fs::read(&path)
+        && data.len() >= 6
+    {
+        data[4..6].copy_from_slice(&99u16.to_le_bytes());
+        std::fs::write(&path, &data).unwrap();
+        std::fs::remove_file(format!("{}.flush_ok", path)).ok();
     }
 
     let result = std::panic::catch_unwind(|| Database::<f32>::open(&path, 4));
     assert!(result.is_ok(), "未来版本号不应 panic");
-    // 注：当前引擎可能接受高版本（forward compat），也可能拒绝，两种都可以接受
+    match result.unwrap() {
+        Ok(db) => {
+            assert!(db.node_count() <= 1, "接受未来版本时不能产生额外脏节点");
+            for id in db.all_node_ids() {
+                assert!(
+                    db.get_payload(id).is_some(),
+                    "接受未来版本时恢复节点必须可读"
+                );
+            }
+        }
+        Err(e) => assert!(!e.to_string().is_empty(), "拒绝未来版本必须返回可诊断错误"),
+    }
 
     cleanup(&path);
 }

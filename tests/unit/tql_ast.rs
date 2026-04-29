@@ -2,16 +2,22 @@
 //!
 //! 覆盖: 所有枚举变体的构造 + Clone + Debug
 
-use triviumdb::query::tql_ast::*;
 use triviumdb::Filter;
+use triviumdb::query::tql_ast::*;
 
 #[test]
 fn query_entry_所有变体() {
     let _match = QueryEntry::Match {
-        pattern: TqlPattern { nodes: vec![], edges: vec![] },
+        pattern: TqlPattern {
+            nodes: vec![],
+            edges: vec![],
+        },
     };
     let _opt = QueryEntry::OptionalMatch {
-        pattern: TqlPattern { nodes: vec![], edges: vec![] },
+        pattern: TqlPattern {
+            nodes: vec![],
+            edges: vec![],
+        },
     };
     let _find = QueryEntry::Find {
         filter: Filter::eq("a", serde_json::json!(1)),
@@ -34,13 +40,23 @@ fn edge_direction_eq() {
 fn agg_func_eq() {
     assert_eq!(AggFunc::Count, AggFunc::Count);
     assert_ne!(AggFunc::Sum, AggFunc::Avg);
-    let _all = [AggFunc::Count, AggFunc::Sum, AggFunc::Avg, AggFunc::Min, AggFunc::Max, AggFunc::Collect];
+    let _all = [
+        AggFunc::Count,
+        AggFunc::Sum,
+        AggFunc::Avg,
+        AggFunc::Min,
+        AggFunc::Max,
+        AggFunc::Collect,
+    ];
 }
 
 #[test]
 fn predicate_构造() {
     let cmp = Predicate::Compare {
-        left: TqlExpr::Property { var: "a".into(), field: "name".into() },
+        left: TqlExpr::Property {
+            var: "a".into(),
+            field: "name".into(),
+        },
         op: TqlCompOp::Eq,
         right: TqlExpr::Literal(TqlLiteral::Str("Alice".into())),
     };
@@ -49,7 +65,10 @@ fn predicate_构造() {
         filter: Filter::gt("age", 18.0),
     };
     let _and = Predicate::And(Box::new(cmp.clone()), Box::new(doc));
-    let _or = Predicate::Or(Box::new(cmp.clone()), Box::new(Predicate::Not(Box::new(cmp))));
+    let _or = Predicate::Or(
+        Box::new(cmp.clone()),
+        Box::new(Predicate::Not(Box::new(cmp))),
+    );
 }
 
 #[test]
@@ -68,7 +87,10 @@ fn return_clause_变体() {
             distinct: true,
         },
         ReturnExpr {
-            kind: ReturnExprKind::Aggregate(AggFunc::Count, Box::new(ReturnExprKind::Var("b".into()))),
+            kind: ReturnExprKind::Aggregate(
+                AggFunc::Count,
+                Box::new(ReturnExprKind::Var("b".into())),
+            ),
             alias: Some("cnt".into()),
             distinct: false,
         },
@@ -78,7 +100,7 @@ fn return_clause_变体() {
 #[test]
 fn literal_所有变体() {
     let _int = TqlLiteral::Int(42);
-    let _float = TqlLiteral::Float(3.14);
+    let _float = TqlLiteral::Float(1.25);
     let _str = TqlLiteral::Str("hello".into());
     let _bool = TqlLiteral::Bool(true);
     let _null = TqlLiteral::Null;
@@ -86,24 +108,48 @@ fn literal_所有变体() {
 
 #[test]
 fn comp_op_所有变体() {
-    let _ops = [TqlCompOp::Eq, TqlCompOp::Ne, TqlCompOp::Gt, TqlCompOp::Gte, TqlCompOp::Lt, TqlCompOp::Lte];
+    let _ops = [
+        TqlCompOp::Eq,
+        TqlCompOp::Ne,
+        TqlCompOp::Gt,
+        TqlCompOp::Gte,
+        TqlCompOp::Lt,
+        TqlCompOp::Lte,
+    ];
 }
 
 #[test]
 fn mutation_action_变体() {
     let _create = MutationAction::Create(CreateAction {
-        nodes: vec![CreateNode { var: Some("a".into()), payload: serde_json::json!({"name": "x"}) }],
-        edges: vec![CreateEdge { src_var: "a".into(), dst_var: "b".into(), label: "knows".into(), weight: 1.0 }],
+        nodes: vec![CreateNode {
+            var: Some("a".into()),
+            payload: serde_json::json!({"name": "x"}),
+        }],
+        edges: vec![CreateEdge {
+            src_var: "a".into(),
+            dst_var: "b".into(),
+            label: "knows".into(),
+            weight: 1.0,
+        }],
     });
-    let _set = MutationAction::Set(vec![SetAssignment { var: "a".into(), field: "age".into(), value: serde_json::json!(30) }]);
-    let _del = MutationAction::Delete { vars: vec!["a".into()], detach: true };
+    let _set = MutationAction::Set(vec![SetAssignment {
+        var: "a".into(),
+        field: "age".into(),
+        value: serde_json::json!(30),
+    }]);
+    let _del = MutationAction::Delete {
+        vars: vec!["a".into()],
+        detach: true,
+    };
 }
 
 #[test]
 fn tql_statement_变体() {
     let query = TqlQuery {
         explain: false,
-        entry: QueryEntry::Find { filter: Filter::eq("x", serde_json::json!(1)) },
+        entry: QueryEntry::Find {
+            filter: Filter::eq("x", serde_json::json!(1)),
+        },
         predicate: None,
         returns: ReturnClause::All,
         order_by: vec![],
@@ -114,7 +160,10 @@ fn tql_statement_变体() {
 
     let mutation = TqlMutation {
         source: None,
-        action: MutationAction::Delete { vars: vec!["a".into()], detach: false },
+        action: MutationAction::Delete {
+            vars: vec!["a".into()],
+            detach: false,
+        },
     };
     let _stmt2 = TqlStatement::Mutation(mutation);
 }
@@ -137,7 +186,10 @@ fn hop_range() {
 
 #[test]
 fn node_pattern_和_edge_pattern() {
-    let _np = TqlNodePattern { var: Some("a".into()), filter: None };
+    let _np = TqlNodePattern {
+        var: Some("a".into()),
+        filter: None,
+    };
     let _ep = TqlEdgePattern {
         labels: vec!["knows".into()],
         hop_range: Some(HopRange { min: 1, max: 3 }),

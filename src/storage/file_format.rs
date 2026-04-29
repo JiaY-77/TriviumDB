@@ -50,7 +50,7 @@ fn robust_rename(from: &Path, to: &Path) -> std::io::Result<()> {
             }
         }
         // 逻辑上不可达：循环必定 return。防御性返回避免审查标记。
-        Err(std::io::Error::new(std::io::ErrorKind::Other, "robust_rename exhausted retries"))
+        Err(std::io::Error::other("robust_rename exhausted retries"))
     }
 }
 
@@ -65,7 +65,8 @@ const HEADER_SIZE: u64 = 58;
 /// 不得触发 panic 导致进程终止。
 #[inline]
 fn read_u16_le(bytes: &[u8], offset: usize, field: &str) -> Result<u16> {
-    bytes.get(offset..offset + 2)
+    bytes
+        .get(offset..offset + 2)
         .and_then(|s| s.try_into().ok())
         .map(u16::from_le_bytes)
         .ok_or_else(|| TriviumError::CorruptedFile(format!("{} at offset {}", field, offset)))
@@ -73,7 +74,8 @@ fn read_u16_le(bytes: &[u8], offset: usize, field: &str) -> Result<u16> {
 
 #[inline]
 fn read_u32_le(bytes: &[u8], offset: usize, field: &str) -> Result<u32> {
-    bytes.get(offset..offset + 4)
+    bytes
+        .get(offset..offset + 4)
         .and_then(|s| s.try_into().ok())
         .map(u32::from_le_bytes)
         .ok_or_else(|| TriviumError::CorruptedFile(format!("{} at offset {}", field, offset)))
@@ -81,7 +83,8 @@ fn read_u32_le(bytes: &[u8], offset: usize, field: &str) -> Result<u32> {
 
 #[inline]
 fn read_u64_le(bytes: &[u8], offset: usize, field: &str) -> Result<u64> {
-    bytes.get(offset..offset + 8)
+    bytes
+        .get(offset..offset + 8)
         .and_then(|s| s.try_into().ok())
         .map(u64::from_le_bytes)
         .ok_or_else(|| TriviumError::CorruptedFile(format!("{} at offset {}", field, offset)))
@@ -89,7 +92,8 @@ fn read_u64_le(bytes: &[u8], offset: usize, field: &str) -> Result<u64> {
 
 #[inline]
 fn read_f32_le(bytes: &[u8], offset: usize, field: &str) -> Result<f32> {
-    bytes.get(offset..offset + 4)
+    bytes
+        .get(offset..offset + 4)
         .and_then(|s| s.try_into().ok())
         .map(f32::from_le_bytes)
         .ok_or_else(|| TriviumError::CorruptedFile(format!("{} at offset {}", field, offset)))
@@ -397,19 +401,38 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
         } else {
             tracing::warn!(
                 "检测到 .tdb/.vec 跨文件撕裂（.flush_ok 标记缺失或不匹配），\
-                 降级为忽略 .vec 的安全模式加载，增量数据将由 WAL 回放恢复"
+                 将尝试按当前文件恢复，失败后再降级为仅加载 .tdb 元数据"
             );
-            load_v1_rom(
+            match load_v2(
                 bytes,
                 dim,
                 next_id,
                 node_count,
                 payload_offset,
-                vector_offset,
                 edge_offset,
                 edge_limit_offset,
+                &vec_file_path,
                 &mmap,
-            )
+            ) {
+                Ok(mut mt) => {
+                    load_bq_block(&mut mt, bytes, bq_offset, mmap.len());
+                    Ok(mt)
+                }
+                Err(e) => {
+                    tracing::warn!("当前 .tdb/.vec 组合不可用，进入安全降级恢复: {}", e);
+                    let mut mt = load_v2_metadata_only(
+                        bytes,
+                        dim,
+                        next_id,
+                        node_count,
+                        payload_offset,
+                        edge_offset,
+                        edge_limit_offset,
+                    )?;
+                    load_bq_block(&mut mt, bytes, bq_offset, mmap.len());
+                    Ok(mt)
+                }
+            }
         }
     } else {
         let mut mt = load_v1_rom(
@@ -450,6 +473,36 @@ fn load_v2<T: VectorType>(
         payload_offset,
         edge_offset,
     )?;
+    load_edges(&mut memtable, bytes, edge_offset, edge_limit_offset)?;
+    Ok(memtable)
+}
+
+/// 分离向量模式的安全降级加载：只读取 .tdb 元数据，向量由 WAL 回放补齐
+fn load_v2_metadata_only<T: VectorType>(
+    bytes: &[u8],
+    dim: usize,
+    next_id: u64,
+    node_count: usize,
+    payload_offset: usize,
+    edge_offset: usize,
+    edge_limit_offset: usize,
+) -> Result<MemTable<T>> {
+    let mut memtable = MemTable::new_with_next_id(dim, next_id);
+    load_payloads(
+        &mut memtable,
+        bytes,
+        node_count,
+        payload_offset,
+        edge_offset,
+    )?;
+    let zero = vec![T::zero(); dim];
+    for id in memtable.internal_indices().to_vec() {
+        if id != 0
+            && let Some(payload) = memtable.get_payload(id).cloned()
+        {
+            memtable.raw_insert(id, &zero, payload)?;
+        }
+    }
     load_edges(&mut memtable, bytes, edge_offset, edge_limit_offset)?;
     Ok(memtable)
 }

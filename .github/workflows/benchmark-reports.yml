@@ -1,0 +1,125 @@
+# TriviumDB Benchmark 报告管线
+#
+# 这个 workflow 不接入常规 push / pull_request 门禁，只通过手动触发或定时任务运行。
+# 所有 benchmark job 都只产出报告 artifact，不作为合并门禁。
+
+name: Benchmark Reports
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_heavy:
+        description: '是否运行重型精度/大规模 benchmark'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+  schedule:
+    # 每周六 UTC 05:00（北京时间 13:00）生成一次报告
+    - cron: '0 5 * * 6'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  entry-coverage-report:
+    name: Main Entry Coverage Report
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench-entry-coverage
+
+      - name: 生成主入口性能/资源/正确率报告
+        run: cargo bench --bench ci_report
+
+      - name: 上传主入口 benchmark 报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-entry-benchmark-report
+          path: target/bench-report/
+
+  criterion-query-report:
+    name: Query Criterion Report
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench-query-criterion
+
+      - name: 运行查询与写入 Criterion benchmark
+        run: cargo bench --bench benchmark --bench bench_queries
+
+      - name: 上传 Criterion HTML 报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-query-report
+          path: target/criterion/
+
+  vector-accuracy-report:
+    name: Vector Accuracy Report
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_heavy == 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench-vector-accuracy
+
+      - name: 运行 BQ / BruteForce 精度与速度报告
+        run: cargo bench --bench bq_vs_brute
+
+      - name: 上传向量精度 benchmark 报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vector-accuracy-report
+          path: |
+            target/criterion/
+            benches/bench_report.md
+
+  large-scale-report:
+    name: Large Scale Report
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_heavy == 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench-large-scale
+
+      - name: 运行大规模 benchmark 报告
+        run: cargo bench --bench bench_500k
+
+      - name: 上传大规模 benchmark 报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: large-scale-benchmark-report
+          path: target/criterion/

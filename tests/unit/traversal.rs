@@ -12,7 +12,8 @@ const DIM: usize = 2;
 fn build_graph() -> MemTable<f32> {
     let mut mt = MemTable::new(DIM);
     for i in 1..=5 {
-        mt.insert_with_id(i, &[i as f32, 0.0], json!({"id": i})).unwrap();
+        mt.insert_with_id(i, &[i as f32, 0.0], json!({"id": i}))
+            .unwrap();
     }
     // 1->2->3, 1->4->5
     mt.link(1, 2, "knows".into(), 0.8).unwrap();
@@ -23,7 +24,11 @@ fn build_graph() -> MemTable<f32> {
 }
 
 fn seed(id: u64, score: f32) -> SearchHit {
-    SearchHit { id, score, payload: serde_json::Value::Null }
+    SearchHit {
+        id,
+        score,
+        payload: serde_json::Value::Null,
+    }
 }
 
 #[test]
@@ -69,7 +74,8 @@ fn expand_PPR阻尼因子() {
 fn expand_反向抑制() {
     let mut mt = MemTable::new(DIM);
     for i in 1..=4 {
-        mt.insert_with_id(i, &[i as f32, 0.0], json!({"id": i})).unwrap();
+        mt.insert_with_id(i, &[i as f32, 0.0], json!({"id": i}))
+            .unwrap();
     }
     // 1->3, 2->3（3 有高入度），1->4（4 低入度）
     mt.link(1, 3, "a".into(), 1.0).unwrap();
@@ -79,9 +85,22 @@ fn expand_反向抑制() {
     let seeds = vec![seed(1, 1.0)];
     let result = expand_graph(&mt, seeds, 1, 0.0, true, 0, false);
 
-    let score3 = result.iter().find(|h| h.id == 3).map(|h| h.score).unwrap_or(0.0);
-    let score4 = result.iter().find(|h| h.id == 4).map(|h| h.score).unwrap_or(0.0);
-    assert!(score4 > score3, "低入度节点(4)应得分高于高入度节点(3): {} vs {}", score4, score3);
+    let score3 = result
+        .iter()
+        .find(|h| h.id == 3)
+        .map(|h| h.score)
+        .unwrap_or(0.0);
+    let score4 = result
+        .iter()
+        .find(|h| h.id == 4)
+        .map(|h| h.score)
+        .unwrap_or(0.0);
+    assert!(
+        score4 > score3,
+        "低入度节点(4)应得分高于高入度节点(3): {} vs {}",
+        score4,
+        score3
+    );
 }
 
 #[test]
@@ -103,22 +122,40 @@ fn expand_不应期疲劳() {
     let r_fatigue = expand_graph(&mt, seeds.clone(), 1, 0.0, false, 0, true);
     let r_normal = expand_graph(&mt, seeds, 1, 0.0, false, 0, false);
 
-    let score_f = r_fatigue.iter().find(|h| h.id == 2).map(|h| h.score).unwrap_or(0.0);
-    let score_n = r_normal.iter().find(|h| h.id == 2).map(|h| h.score).unwrap_or(0.0);
-    assert!(score_f < score_n, "疲劳节点应受到 85% 能量衰减: {} vs {}", score_f, score_n);
+    let score_f = r_fatigue
+        .iter()
+        .find(|h| h.id == 2)
+        .map(|h| h.score)
+        .unwrap_or(0.0);
+    let score_n = r_normal
+        .iter()
+        .find(|h| h.id == 2)
+        .map(|h| h.score)
+        .unwrap_or(0.0);
+    assert!(
+        score_f < score_n,
+        "疲劳节点应受到 85% 能量衰减: {} vs {}",
+        score_f,
+        score_n
+    );
 }
 
 #[test]
 fn expand_inhibition边_负能量() {
     let mut mt = MemTable::new(DIM);
     for i in 1..=2 {
-        mt.insert_with_id(i, &[i as f32, 0.0], json!({"id": i})).unwrap();
+        mt.insert_with_id(i, &[i as f32, 0.0], json!({"id": i}))
+            .unwrap();
     }
     mt.link(1, 2, "inhibition".into(), 1.0).unwrap();
 
     let seeds = vec![seed(1, 1.0)];
     let result = expand_graph(&mt, seeds, 1, 0.0, false, 0, false);
-    let score2 = result.iter().find(|h| h.id == 2).map(|h| h.score).unwrap_or(0.0);
+    let score2 = result
+        .iter()
+        .find(|h| h.id == 2)
+        .map(|h| h.score)
+        .unwrap_or(0.0);
     assert!(score2 < 0.0, "inhibition 边应产生负能量: {}", score2);
 }
 

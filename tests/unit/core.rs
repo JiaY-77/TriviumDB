@@ -1,11 +1,10 @@
-
 //! 补齐 error.rs / node.rs / database/config.rs 的单元测试
 //!
 //! 这些模块此前完全没有任何测试覆盖
 
+use triviumdb::database::config::{Config, SearchConfig, StorageMode};
 use triviumdb::error::TriviumError;
 use triviumdb::node::{Edge, NodeView, SearchHit};
-use triviumdb::database::config::{Config, SearchConfig, StorageMode};
 use triviumdb::storage::wal::SyncMode;
 
 // ════════════════════════════════════════════════════════════════
@@ -153,7 +152,7 @@ fn nodeview_创建() {
 
 #[test]
 fn searchhit_创建和排序() {
-    let mut hits = vec![
+    let mut hits = [
         SearchHit {
             id: 1,
             score: 0.5,

@@ -132,9 +132,9 @@ pub fn betweenness_centrality<T: VectorType>(
                     }
                     if dist[&w] == d_v + 1 {
                         let sigma_v = sigma[&v];
-                    if let Some(s) = sigma.get_mut(&w) {
-                        *s += sigma_v;
-                    }
+                        if let Some(s) = sigma.get_mut(&w) {
+                            *s += sigma_v;
+                        }
                         predecessors.entry(w).or_default().push(v);
                     }
                 }
@@ -155,10 +155,10 @@ pub fn betweenness_centrality<T: VectorType>(
                     }
                 }
             }
-            if w != s {
-                if let Some(c) = centrality.get_mut(&w) {
-                    *c += delta[&w];
-                }
+            if w != s
+                && let Some(c) = centrality.get_mut(&w)
+            {
+                *c += delta[&w];
             }
         }
     }

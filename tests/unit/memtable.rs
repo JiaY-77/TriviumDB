@@ -52,28 +52,42 @@ fn insert_自增ID() {
 #[test]
 fn insert_维度不匹配() {
     let mut mt = make_mt();
+    let before_next = mt.next_id_value();
     let err = mt.insert(&[1.0, 2.0], json!({}));
-    assert!(err.is_err());
+    assert!(err.is_err(), "维度不匹配插入应被拒绝");
+    assert_eq!(mt.node_count(), 0, "失败插入不能产生节点");
+    assert_eq!(mt.next_id_value(), before_next, "失败插入不能消耗自增 ID");
 }
 
 #[test]
 fn insert_NaN拒绝() {
     let mut mt = make_mt();
+    let before_next = mt.next_id_value();
     let err = mt.insert(&[f32::NAN, 0.0, 0.0], json!({}));
-    assert!(err.is_err());
+    assert!(err.is_err(), "NaN 向量插入应被拒绝");
+    assert_eq!(mt.node_count(), 0, "NaN 插入不能产生节点");
+    assert_eq!(mt.next_id_value(), before_next, "NaN 插入不能消耗自增 ID");
 }
 
 #[test]
 fn insert_Infinity拒绝() {
     let mut mt = make_mt();
+    let before_next = mt.next_id_value();
     let err = mt.insert(&[f32::INFINITY, 0.0, 0.0], json!({}));
-    assert!(err.is_err());
+    assert!(err.is_err(), "Infinity 向量插入应被拒绝");
+    assert_eq!(mt.node_count(), 0, "Infinity 插入不能产生节点");
+    assert_eq!(
+        mt.next_id_value(),
+        before_next,
+        "Infinity 插入不能消耗自增 ID"
+    );
 }
 
 #[test]
 fn insert_with_id_基础() {
     let mut mt = make_mt();
-    mt.insert_with_id(42, &[1.0, 2.0, 3.0], json!({"x": 1})).unwrap();
+    mt.insert_with_id(42, &[1.0, 2.0, 3.0], json!({"x": 1}))
+        .unwrap();
     assert!(mt.contains(42));
     assert_eq!(mt.node_count(), 1);
     assert!(mt.next_id_value() > 42);
@@ -83,16 +97,31 @@ fn insert_with_id_基础() {
 fn insert_with_id_重复ID报错() {
     let mut mt = make_mt();
     mt.insert_with_id(1, &[1.0, 2.0, 3.0], json!({})).unwrap();
+    let before_count = mt.node_count();
+    let before_next = mt.next_id_value();
     let err = mt.insert_with_id(1, &[4.0, 5.0, 6.0], json!({}));
-    assert!(err.is_err());
+    assert!(err.is_err(), "重复 ID 应被拒绝");
+    assert_eq!(mt.node_count(), before_count, "重复 ID 失败不能改变节点数");
+    assert_eq!(
+        mt.next_id_value(),
+        before_next,
+        "重复 ID 失败不能推进 next_id"
+    );
+    assert_eq!(
+        mt.get_vector(1).unwrap(),
+        &[1.0, 2.0, 3.0],
+        "重复 ID 不能覆盖原向量"
+    );
 }
 
 #[test]
 fn raw_insert_跳过NaN检查() {
     let mut mt = make_mt();
     // raw_insert 用于 WAL 恢复，不检查 NaN
-    let result = mt.raw_insert(1, &[f32::NAN, 0.0, 0.0], json!({}));
-    assert!(result.is_ok());
+    let result = mt.raw_insert(1, &[f32::NAN, 0.0, 0.0], json!({"raw": true}));
+    assert!(result.is_ok(), "raw_insert 应允许 WAL 恢复路径写入 NaN");
+    assert_eq!(mt.node_count(), 1, "raw_insert 成功后必须产生一个节点");
+    assert_eq!(mt.get_payload(1).unwrap().get("raw"), Some(&json!(true)));
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -117,7 +146,8 @@ fn get_vector_不存在() {
 #[test]
 fn get_payload_往返() {
     let mut mt = make_mt();
-    mt.insert_with_id(1, &[1.0, 2.0, 3.0], json!({"name": "test"})).unwrap();
+    mt.insert_with_id(1, &[1.0, 2.0, 3.0], json!({"name": "test"}))
+        .unwrap();
     let p = mt.get_payload(1).unwrap();
     assert_eq!(p["name"], "test");
 }
@@ -217,7 +247,8 @@ fn unlink_基础() {
 fn get_in_degree_和_incoming_sources() {
     let mut mt = make_mt();
     for i in 1..=3 {
-        mt.insert_with_id(i, &[i as f32, 0.0, 0.0], json!({})).unwrap();
+        mt.insert_with_id(i, &[i as f32, 0.0, 0.0], json!({}))
+            .unwrap();
     }
     mt.link(1, 3, "a".into(), 1.0).unwrap();
     mt.link(2, 3, "b".into(), 1.0).unwrap();
@@ -231,7 +262,8 @@ fn get_in_degree_和_incoming_sources() {
 fn get_edges_by_label() {
     let mut mt = make_mt();
     for i in 1..=3 {
-        mt.insert_with_id(i, &[i as f32, 0.0, 0.0], json!({})).unwrap();
+        mt.insert_with_id(i, &[i as f32, 0.0, 0.0], json!({}))
+            .unwrap();
     }
     mt.link(1, 2, "knows".into(), 1.0).unwrap();
     mt.link(1, 3, "works_at".into(), 1.0).unwrap();
@@ -251,7 +283,8 @@ fn get_edges_by_label() {
 #[test]
 fn update_payload_基础() {
     let mut mt = make_mt();
-    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"v": 1})).unwrap();
+    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"v": 1}))
+        .unwrap();
     mt.update_payload(1, json!({"v": 2})).unwrap();
     assert_eq!(mt.get_payload(1).unwrap()["v"], 2);
 }
@@ -292,9 +325,12 @@ fn update_vector_NaN拒绝() {
 #[test]
 fn find_nodes_by_field_基础() {
     let mut mt = make_mt();
-    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"type": "person"})).unwrap();
-    mt.insert_with_id(2, &[0.0, 1.0, 0.0], json!({"type": "event"})).unwrap();
-    mt.insert_with_id(3, &[0.0, 0.0, 1.0], json!({"type": "person"})).unwrap();
+    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"type": "person"}))
+        .unwrap();
+    mt.insert_with_id(2, &[0.0, 1.0, 0.0], json!({"type": "event"}))
+        .unwrap();
+    mt.insert_with_id(3, &[0.0, 0.0, 1.0], json!({"type": "person"}))
+        .unwrap();
 
     let persons = mt.find_nodes_by_field("type", &json!("person"));
     assert_eq!(persons.len(), 2);
@@ -307,8 +343,10 @@ fn find_nodes_by_field_基础() {
 #[test]
 fn property_index_注册和查询() {
     let mut mt = make_mt();
-    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"role": "admin"})).unwrap();
-    mt.insert_with_id(2, &[0.0, 1.0, 0.0], json!({"role": "user"})).unwrap();
+    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"role": "admin"}))
+        .unwrap();
+    mt.insert_with_id(2, &[0.0, 1.0, 0.0], json!({"role": "user"}))
+        .unwrap();
 
     assert!(!mt.has_property_index("role"));
     mt.register_property_index("role");
@@ -323,7 +361,8 @@ fn property_index_注册和查询() {
 fn property_index_插入后自动维护() {
     let mut mt = make_mt();
     mt.register_property_index("color");
-    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"color": "red"})).unwrap();
+    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"color": "red"}))
+        .unwrap();
 
     let reds = mt.find_by_property_index("color", &json!("red")).unwrap();
     assert_eq!(reds.len(), 1);
@@ -333,7 +372,8 @@ fn property_index_插入后自动维护() {
 fn property_index_删除后清理() {
     let mut mt = make_mt();
     mt.register_property_index("color");
-    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"color": "red"})).unwrap();
+    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"color": "red"}))
+        .unwrap();
     mt.delete(1).unwrap();
 
     let reds = mt.find_by_property_index("color", &json!("red")).unwrap();
@@ -344,12 +384,17 @@ fn property_index_删除后清理() {
 fn property_index_update后更新() {
     let mut mt = make_mt();
     mt.register_property_index("status");
-    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"status": "active"})).unwrap();
+    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"status": "active"}))
+        .unwrap();
     mt.update_payload(1, json!({"status": "inactive"})).unwrap();
 
-    let active = mt.find_by_property_index("status", &json!("active")).unwrap();
+    let active = mt
+        .find_by_property_index("status", &json!("active"))
+        .unwrap();
     assert!(active.is_empty());
-    let inactive = mt.find_by_property_index("status", &json!("inactive")).unwrap();
+    let inactive = mt
+        .find_by_property_index("status", &json!("inactive"))
+        .unwrap();
     assert_eq!(inactive.len(), 1);
 }
 
@@ -395,7 +440,8 @@ fn fatigue_消耗() {
 fn fatigue_批量消耗() {
     let mut mt = make_mt();
     for i in 1..=3 {
-        mt.insert_with_id(i, &[i as f32, 0.0, 0.0], json!({})).unwrap();
+        mt.insert_with_id(i, &[i as f32, 0.0, 0.0], json!({}))
+            .unwrap();
     }
     mt.mark_fatigued(&[1, 2, 3]);
     mt.consume_fatigue_batch(&[1, 3]);
@@ -428,8 +474,10 @@ fn text_index_keyword_和_bm25() {
 #[test]
 fn rebuild_text_index_from_payloads() {
     let mut mt = make_mt();
-    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"desc": "hello world"})).unwrap();
-    mt.insert_with_id(2, &[0.0, 1.0, 0.0], json!({"desc": "rust database"})).unwrap();
+    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"desc": "hello world"}))
+        .unwrap();
+    mt.insert_with_id(2, &[0.0, 1.0, 0.0], json!({"desc": "rust database"}))
+        .unwrap();
     mt.rebuild_text_index_from_payloads();
 
     let results = mt.text_engine().search_bm25("rust", 1.5, 0.75);
@@ -465,7 +513,8 @@ fn register_node_和_register_tombstone() {
 #[test]
 fn estimated_memory_bytes_非零() {
     let mut mt = make_mt();
-    mt.insert_with_id(1, &[1.0, 2.0, 3.0], json!({"big": "payload"})).unwrap();
+    mt.insert_with_id(1, &[1.0, 2.0, 3.0], json!({"big": "payload"}))
+        .unwrap();
     assert!(mt.estimated_memory_bytes() > 0);
 }
 
@@ -512,7 +561,8 @@ fn int8_pool_重建() {
 #[test]
 fn fast_tags_非空() {
     let mut mt = make_mt();
-    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"role": "admin"})).unwrap();
+    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"role": "admin"}))
+        .unwrap();
     let tags = mt.fast_tags_slice();
     assert_eq!(tags.len(), 1);
     assert_ne!(tags[0], 0, "有 payload 的节点应有非零 bloom 签名");

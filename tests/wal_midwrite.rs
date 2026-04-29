@@ -11,15 +11,17 @@
 //!   wal_midwrite — 在"WAL 帧写到一半"时模拟断电，验证解析器的截断容错
 
 use std::io::Cursor;
-use triviumdb::storage::wal::{Wal, WalEntry};
 use triviumdb::Database;
+use triviumdb::storage::wal::{Wal, WalEntry};
 
 const DIM: usize = 4;
 
 fn tmp_db(name: &str) -> String {
     let dir = std::env::temp_dir().join("triviumdb_test");
     std::fs::create_dir_all(&dir).ok();
-    dir.join(format!("midwrite_{}", name)).to_string_lossy().to_string()
+    dir.join(format!("midwrite_{}", name))
+        .to_string_lossy()
+        .to_string()
 }
 
 fn cleanup(path: &str) {
@@ -88,8 +90,7 @@ fn WAL_逐字节截断_覆盖每个断电时间点() {
     let full_len = full_wal.len();
 
     // 完整 WAL 应该能解析出 5 条记录
-    let (full_entries, _) =
-        Wal::read_entries_from_reader::<f32>(Cursor::new(&full_wal)).unwrap();
+    let (full_entries, _) = Wal::read_entries_from_reader::<f32>(Cursor::new(&full_wal)).unwrap();
     assert_eq!(
         full_entries.len(),
         5,
@@ -100,22 +101,24 @@ fn WAL_逐字节截断_覆盖每个断电时间点() {
     // 在每个字节偏移处截断
     for cut_at in 0..full_len {
         let truncated = &full_wal[..cut_at];
-        let result =
-            std::panic::catch_unwind(|| {
-                Wal::read_entries_from_reader::<f32>(Cursor::new(truncated))
-            });
+        let result = std::panic::catch_unwind(|| {
+            Wal::read_entries_from_reader::<f32>(Cursor::new(truncated))
+        });
 
         assert!(
             result.is_ok(),
             "WAL 在偏移 {}/{} 处截断后 read_entries_from_reader panic 了！",
-            cut_at, full_len
+            cut_at,
+            full_len
         );
 
         let (entries, _) = result.unwrap().unwrap();
         assert!(
             entries.len() <= 5,
             "截断在 {}/{} 处，条目数 {} 超过了原始 5 条",
-            cut_at, full_len, entries.len()
+            cut_at,
+            full_len,
+            entries.len()
         );
 
         // 核心断言：截断后恢复的条目数必须单调递增
@@ -127,7 +130,10 @@ fn WAL_逐字节截断_覆盖每个断电时间点() {
             assert!(
                 entries.len() >= prev_entries.len(),
                 "单调性违反：截断在 {} 处恢复 {} 条，但在 {} 处恢复了 {} 条",
-                cut_at, entries.len(), cut_at - 1, prev_entries.len()
+                cut_at,
+                entries.len(),
+                cut_at - 1,
+                prev_entries.len()
             );
         }
     }
@@ -204,8 +210,7 @@ fn WAL_事务边界截断_未提交事务必须被丢弃() {
     // 在事务区域的每个字节处截断（跳过 TxCommit）
     for cut_at in (committed_boundary + 1)..full_len {
         let truncated = &buf[..cut_at];
-        let (entries, _) =
-            Wal::read_entries_from_reader::<f32>(Cursor::new(truncated)).unwrap();
+        let (entries, _) = Wal::read_entries_from_reader::<f32>(Cursor::new(truncated)).unwrap();
 
         // 核心断言：未提交事务中的条目绝不能出现在恢复结果中
         // 只有前 2 条独立 Insert 应被恢复，或者如果 TxCommit 恰好完整则恢复 5 条
@@ -213,7 +218,9 @@ fn WAL_事务边界截断_未提交事务必须被丢弃() {
             entries.len() == 2 || entries.len() == 5,
             "截断在 {}/{} 处（事务区域内），恢复了 {} 条记录。\
              应该只有 2（丢弃未提交事务）或 5（事务完整提交）",
-            cut_at, full_len, entries.len()
+            cut_at,
+            full_len,
+            entries.len()
         );
     }
 
@@ -259,8 +266,7 @@ fn WAL_单帧字段边界截断_len_data_crc各字段() {
     // 在 len 字段内部截断 (偏移 1, 2, 3)
     for cut in 1..4 {
         let truncated = &frame[..cut];
-        let (entries, _) =
-            Wal::read_entries_from_reader::<f32>(Cursor::new(truncated)).unwrap();
+        let (entries, _) = Wal::read_entries_from_reader::<f32>(Cursor::new(truncated)).unwrap();
         assert_eq!(
             entries.len(),
             0,
@@ -272,8 +278,7 @@ fn WAL_单帧字段边界截断_len_data_crc各字段() {
     // 在 data 字段内部截断
     for cut in (data_start + 1)..crc_start {
         let truncated = &frame[..cut];
-        let (entries, _) =
-            Wal::read_entries_from_reader::<f32>(Cursor::new(truncated)).unwrap();
+        let (entries, _) = Wal::read_entries_from_reader::<f32>(Cursor::new(truncated)).unwrap();
         assert_eq!(
             entries.len(),
             0,
@@ -285,8 +290,7 @@ fn WAL_单帧字段边界截断_len_data_crc各字段() {
     // 在 CRC 字段内部截断
     for cut in (crc_start + 1)..total {
         let truncated = &frame[..cut];
-        let (entries, _) =
-            Wal::read_entries_from_reader::<f32>(Cursor::new(truncated)).unwrap();
+        let (entries, _) = Wal::read_entries_from_reader::<f32>(Cursor::new(truncated)).unwrap();
         assert_eq!(
             entries.len(),
             0,
@@ -296,8 +300,7 @@ fn WAL_单帧字段边界截断_len_data_crc各字段() {
     }
 
     // 完整帧应恢复 1 条
-    let (entries, _) =
-        Wal::read_entries_from_reader::<f32>(Cursor::new(&frame)).unwrap();
+    let (entries, _) = Wal::read_entries_from_reader::<f32>(Cursor::new(&frame)).unwrap();
     assert_eq!(entries.len(), 1, "完整帧应恢复 1 条记录");
 
     eprintln!(
@@ -371,15 +374,14 @@ fn WAL_解析器_10000轮随机字节绝不panic() {
 #[test]
 fn WAL_有效前缀加垃圾尾部_前缀条目必须完整恢复() {
     let valid_wal = build_valid_wal_bytes();
-    let (baseline, _) =
-        Wal::read_entries_from_reader::<f32>(Cursor::new(&valid_wal)).unwrap();
+    let (baseline, _) = Wal::read_entries_from_reader::<f32>(Cursor::new(&valid_wal)).unwrap();
     let baseline_count = baseline.len();
 
     // 各种垃圾尾部 pattern
     let garbage_patterns: Vec<Vec<u8>> = vec![
-        vec![0xFF; 64],                                   // 全 FF
-        vec![0x00; 64],                                   // 全零
-        vec![0xDE, 0xAD, 0xBE, 0xEF],                   // 4 字节（恰好是一个 len 字段）
+        vec![0xFF; 64],                                     // 全 FF
+        vec![0x00; 64],                                     // 全零
+        vec![0xDE, 0xAD, 0xBE, 0xEF],                       // 4 字节（恰好是一个 len 字段）
         b"INVALID WAL ENTRY GARBAGE DATA HERE!!!".to_vec(), // ASCII 垃圾
         {
             // 一个 len 字段指向超大值
@@ -419,11 +421,7 @@ fn WAL_有效前缀加垃圾尾部_前缀条目必须完整恢复() {
             Wal::read_entries_from_reader::<f32>(Cursor::new(&corrupted))
         });
 
-        assert!(
-            result.is_ok(),
-            "垃圾 pattern #{} 导致解析器 panic",
-            i
-        );
+        assert!(result.is_ok(), "垃圾 pattern #{} 导致解析器 panic", i);
 
         let (entries, _) = result.unwrap().unwrap();
         assert_eq!(
@@ -495,7 +493,17 @@ fn WAL_端到端_文件物理截断后Database重新加载() {
     // 采样截断点：每 10 字节取一个 + 关键位置
     let mut cut_points: Vec<usize> = (0..wal_len).step_by(10).collect();
     // 补充关键位置
-    for offset in [1, 2, 3, 4, 5, wal_len / 4, wal_len / 2, wal_len * 3 / 4, wal_len - 1] {
+    for offset in [
+        1,
+        2,
+        3,
+        4,
+        5,
+        wal_len / 4,
+        wal_len / 2,
+        wal_len * 3 / 4,
+        wal_len - 1,
+    ] {
         if offset < wal_len && !cut_points.contains(&offset) {
             cut_points.push(offset);
         }
@@ -517,7 +525,8 @@ fn WAL_端到端_文件物理截断后Database重新加载() {
         assert!(
             result.is_ok(),
             "WAL 截断到 {}/{} 字节后 Database::open panic 了！",
-            cut_at, wal_len
+            cut_at,
+            wal_len
         );
 
         match result.unwrap() {
@@ -526,12 +535,16 @@ fn WAL_端到端_文件物理截断后Database重新加载() {
                 assert!(
                     db.node_count() >= 5,
                     "WAL 截断到 {}/{} 后节点数 {} < 5（已 flush 的节点丢失了）",
-                    cut_at, wal_len, db.node_count()
+                    cut_at,
+                    wal_len,
+                    db.node_count()
                 );
                 assert!(
                     db.node_count() <= 8,
                     "WAL 截断到 {}/{} 后节点数 {} > 8（凭空多出节点）",
-                    cut_at, wal_len, db.node_count()
+                    cut_at,
+                    wal_len,
+                    db.node_count()
                 );
             }
             Err(e) => {

@@ -1,4 +1,3 @@
-
 //! 补齐 src/index/ 下 3 个模块的单元测试
 //!
 //! 覆盖:
@@ -6,7 +5,6 @@
 //!   - int8.rs: Int8Pool 量化 + dot_score + 边界条件
 //!   - text.rs: TextIndex BM25 + AC 自动机
 //!   - brute_force.rs: 暴力搜索
-
 
 // ════════════════════════════════════════════════════════════════
 //  BQ 二进制量化
@@ -31,8 +29,8 @@ fn bq_全负向量_所有位为0() {
 fn bq_混合向量_交替位() {
     let mut vec = vec![0.0f32; 128];
     // 偶数索引为正，奇数为负
-    for i in 0..128 {
-        vec[i] = if i % 2 == 0 { 1.0 } else { -1.0 };
+    for (i, item) in vec.iter_mut().enumerate().take(128) {
+        *item = if i % 2 == 0 { 1.0 } else { -1.0 };
     }
     let sig = BqSignature::from_vector(&vec);
     // 每个 u64 块中，偶数位为 1，奇数位为 0
@@ -90,15 +88,17 @@ fn int8_基本量化_和反向对齐() {
     assert_eq!(pool.dim, 2);
     assert_eq!(pool.data.len(), 6);
 
-    // 量化后的值应在 [-127, 127] 范围内
+    // 量化后的值不应溢出到 i8 最小值
     for &val in &pool.data {
-        assert!(val >= -127 && val <= 127);
+        assert_ne!(val, i8::MIN);
     }
 }
 
 #[test]
 fn int8_dot_score_自身最高() {
-    let flat = vec![1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    let flat = vec![
+        1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+    ];
     let pool = Int8Pool::from_f32_vectors(&flat, 4);
 
     let query_i8 = pool.quantize_query(&[1.0f32, 0.0, 0.0, 0.0]);
@@ -236,9 +236,12 @@ fn brute_force_基础搜索() {
     let query = [1.0f32, 0.0, 0.0];
 
     let results = brute_force::search::<f32>(&query, &flat, 3, 2, 0.0, |i| i as u64);
-    assert!(!results.is_empty());
-    // 第一个结果应该是 id=0（最相似）
+    assert_eq!(results.len(), 2, "top_k=2 应返回两个最近候选");
     assert_eq!(results[0].id, 0, "最相似的向量应是 id 0");
+    assert!(
+        results[0].score >= results[1].score,
+        "暴力搜索结果应按分数降序排列"
+    );
 }
 
 #[test]

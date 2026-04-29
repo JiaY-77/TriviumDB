@@ -13,7 +13,9 @@ const DIM: usize = 4;
 fn tmp_db(name: &str) -> String {
     let dir = std::env::temp_dir().join("triviumdb_test");
     std::fs::create_dir_all(&dir).ok();
-    dir.join(format!("endian_{}", name)).to_string_lossy().to_string()
+    dir.join(format!("endian_{}", name))
+        .to_string_lossy()
+        .to_string()
 }
 
 fn cleanup(path: &str) {
@@ -100,7 +102,10 @@ fn 测试_超大维数模拟拦截_防平台指针溢出() {
                 "错误信息应明确指出维度越界，实际: {}",
                 err_msg
             );
-            eprintln!("  ✅ 超大维度: 引擎正确拒绝 {} 维向量: {}", huge_dim, err_msg);
+            eprintln!(
+                "  ✅ 超大维度: 引擎正确拒绝 {} 维向量: {}",
+                huge_dim, err_msg
+            );
         }
     }
 

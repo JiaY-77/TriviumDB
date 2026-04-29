@@ -1,4 +1,3 @@
-
 //! 从 src/vector.rs 分离 + 补齐向量类型系统的单元测试
 //!
 //! 覆盖: VectorType trait 的 3 种实现 (f32/f16/u64)
@@ -51,7 +50,11 @@ fn f32_similarity_长向量_超过8元素触发SIMD() {
 
     let sim = f32::similarity(&a, &b);
     // 不检查精确值，但确认范围合法且不 panic
-    assert!(sim >= -1.0 && sim <= 1.0, "SIMD 路径结果范围异常: {}", sim);
+    assert!(
+        (-1.0..=1.0).contains(&sim),
+        "SIMD 路径结果范围异常: {}",
+        sim
+    );
 }
 
 #[test]
@@ -65,7 +68,7 @@ fn f32_similarity_大维度不panic() {
 #[test]
 fn f32_zero_和_to_f32_和_from_f32() {
     assert_eq!(f32::zero(), 0.0f32);
-    assert_eq!((3.14f32).to_f32(), 3.14);
+    assert_eq!((1.25f32).to_f32(), 1.25);
     assert_eq!(f32::from_f32(2.71), 2.71f32);
 }
 
@@ -92,7 +95,7 @@ fn f16_similarity_正交() {
 #[test]
 fn f16_zero_和_to_f32_和_from_f32() {
     assert_eq!(f16::zero(), f16::from_f32(0.0));
-    assert!((f16::from_f32(3.14).to_f32() - 3.14).abs() < 0.01);
+    assert!((f16::from_f32(1.25).to_f32() - 1.25).abs() < 0.01);
     assert_eq!(f16::from_f32(0.0), f16::ZERO);
 }
 
@@ -199,7 +202,12 @@ fn f16_similarity_大维度() {
 #[test]
 fn f16_similarity_零向量() {
     let a = [f16::from_f32(0.0); 4];
-    let b = [f16::from_f32(1.0), f16::from_f32(0.0), f16::from_f32(0.0), f16::from_f32(0.0)];
+    let b = [
+        f16::from_f32(1.0),
+        f16::from_f32(0.0),
+        f16::from_f32(0.0),
+        f16::from_f32(0.0),
+    ];
     let sim = f16::similarity(&a, &b);
     assert_eq!(sim, 0.0, "f16 零向量应为 0.0");
 }
@@ -220,4 +228,3 @@ fn u64_similarity_空向量() {
     let sim = u64::similarity(&a, &b);
     assert_eq!(sim, 0.0);
 }
-

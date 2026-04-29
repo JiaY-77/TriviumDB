@@ -11,7 +11,9 @@ const DIM: usize = 4;
 fn tmp_db(name: &str) -> String {
     let dir = std::env::temp_dir().join("triviumdb_test");
     std::fs::create_dir_all(&dir).ok();
-    dir.join(format!("soak_{}", name)).to_string_lossy().to_string()
+    dir.join(format!("soak_{}", name))
+        .to_string_lossy()
+        .to_string()
 }
 
 fn cleanup(path: &str) {
@@ -99,7 +101,7 @@ fn SOAK_01_连续运行5分钟_内存不泄漏() {
         }
 
         // 每 10 轮 compact + flush
-        if round % 10 == 0 {
+        if round.is_multiple_of(10) {
             db.compact().unwrap();
             db.flush().unwrap();
         }
@@ -150,11 +152,8 @@ fn SOAK_02_连续flush_500轮_文件大小不膨胀() {
 
     // 先建立基准大小
     for i in 0..100u32 {
-        db.insert(
-            &[i as f32, 0.0, 0.0, 0.0],
-            serde_json::json!({"idx": i}),
-        )
-        .unwrap();
+        db.insert(&[i as f32, 0.0, 0.0, 0.0], serde_json::json!({"idx": i}))
+            .unwrap();
     }
     db.flush().unwrap();
 

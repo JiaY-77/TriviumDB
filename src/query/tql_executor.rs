@@ -106,7 +106,11 @@ pub fn execute_tql<T: VectorType>(
     }
 
     // 聚合函数 + DISTINCT 后处理
-    results = apply_aggregation_and_distinct(&query.returns, results, memtable)?;
+    results = apply_aggregation_and_distinct(
+        &query.returns,
+        results,
+        matches!(&query.entry, QueryEntry::Find { .. }),
+    )?;
 
     // 投影裁剪：对仅属性引用的变量，剥离 vector + edges 节省内存
     apply_projection_pruning(&query.returns, &mut results);
@@ -1061,7 +1065,7 @@ fn first_var_from_kind(kind: &ReturnExprKind) -> Option<String> {
 fn apply_aggregation_and_distinct<T: VectorType>(
     returns: &ReturnClause,
     results: TqlResult<T>,
-    _mt: &MemTable<T>,
+    is_find_entry: bool,
 ) -> Result<TqlResult<T>, TriviumError> {
     let exprs = match returns {
         ReturnClause::Expressions(exprs) => exprs,
@@ -1078,7 +1082,7 @@ fn apply_aggregation_and_distinct<T: VectorType>(
 
     // 纯 DISTINCT，无聚合
     if !has_agg && has_distinct {
-        return Ok(apply_distinct(results, exprs));
+        return Ok(apply_distinct(results, exprs, is_find_entry));
     }
 
     // 有聚合函数 → 分组计算
@@ -1091,12 +1095,22 @@ fn is_aggregate(kind: &ReturnExprKind) -> bool {
 }
 
 /// 纯 DISTINCT 去重
-fn apply_distinct<T: VectorType>(results: TqlResult<T>, _exprs: &[ReturnExpr]) -> TqlResult<T> {
-    // 使用 payload 指纹去重：对每行生成签名
+fn apply_distinct<T: VectorType>(
+    results: TqlResult<T>,
+    exprs: &[ReturnExpr],
+    is_find_entry: bool,
+) -> TqlResult<T> {
+    let distinct_exprs: Vec<&ReturnExpr> = exprs.iter().filter(|e| e.distinct).collect();
+    let key_exprs = if distinct_exprs.is_empty() {
+        exprs.iter().collect()
+    } else {
+        distinct_exprs
+    };
+
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
     for row in results {
-        let sig = row_signature(&row);
+        let sig = distinct_signature(&row, &key_exprs, is_find_entry);
         if seen.insert(sig) {
             out.push(row);
         }
@@ -1104,11 +1118,50 @@ fn apply_distinct<T: VectorType>(results: TqlResult<T>, _exprs: &[ReturnExpr]) -
     out
 }
 
-/// 行签名：基于所有绑定变量的 (var, id) 拼接
-fn row_signature<T: VectorType>(row: &HashMap<String, Node<T>>) -> String {
-    let mut parts: Vec<_> = row.iter().map(|(k, v)| format!("{}:{}", k, v.id)).collect();
-    parts.sort();
-    parts.join("|")
+/// DISTINCT 签名：基于返回表达式的实际值拼接
+fn distinct_signature<T: VectorType>(
+    row: &HashMap<String, Node<T>>,
+    exprs: &[&ReturnExpr],
+    is_find_entry: bool,
+) -> String {
+    exprs
+        .iter()
+        .map(|expr| {
+            format!(
+                "{}={}",
+                format_return_expr(expr),
+                distinct_expr_value(row, expr, is_find_entry)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+/// DISTINCT 表达式值：变量按节点身份去重，属性按 payload 值去重
+fn distinct_expr_value<T: VectorType>(
+    row: &HashMap<String, Node<T>>,
+    expr: &ReturnExpr,
+    is_find_entry: bool,
+) -> serde_json::Value {
+    match &expr.kind {
+        ReturnExprKind::Var(v) => {
+            if is_find_entry
+                && let Some(node) = row.get(v)
+                && let Some(value) = node.payload.get(v)
+            {
+                value.clone()
+            } else {
+                row.get(v)
+                    .map(|node| serde_json::json!(node.id))
+                    .unwrap_or(serde_json::Value::Null)
+            }
+        }
+        ReturnExprKind::Property(v, field) => row
+            .get(v)
+            .and_then(|node| node.payload.get(field).cloned())
+            .unwrap_or(serde_json::Value::Null),
+        ReturnExprKind::Aggregate(_, _) => serde_json::Value::Null,
+    }
 }
 
 /// 聚合计算

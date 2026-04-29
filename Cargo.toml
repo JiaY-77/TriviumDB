@@ -73,6 +73,10 @@ harness = false
 name = "bench_queries"
 harness = false
 
+[[bench]]
+name = "ci_report"
+harness = false
+
 [profile.release]
 lto = true
 codegen-units = 1

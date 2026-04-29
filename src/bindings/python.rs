@@ -199,15 +199,12 @@ pub mod python {
     fn dict_to_filter(py: Python<'_>, dict: &Bound<'_, PyDict>) -> PyResult<Filter> {
         // 将 PyDict 转为 serde_json::Value，再统一调用 Filter::from_json
         let json_val = pyobject_to_json(py, &dict.clone().into_any());
-        Filter::from_json(&json_val).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(e)
-        })
+        Filter::from_json(&json_val).map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
     }
 
     fn parse_sync_mode(s: &str) -> PyResult<crate::storage::wal::SyncMode> {
-        crate::storage::wal::SyncMode::parse(s).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(e)
-        })
+        crate::storage::wal::SyncMode::parse(s)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
     }
 
     #[pymethods]

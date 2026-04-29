@@ -17,7 +17,10 @@ const DIM: usize = 4;
 fn tmp_db(name: &str) -> String {
     let dir = std::env::temp_dir().join("triviumdb_test");
     std::fs::create_dir_all(&dir).ok();
-    let path = dir.join(format!("cov7_{}", name)).to_string_lossy().to_string();
+    let path = dir
+        .join(format!("cov7_{}", name))
+        .to_string_lossy()
+        .to_string();
     cleanup(&path);
     path
 }
@@ -25,6 +28,32 @@ fn tmp_db(name: &str) -> String {
 fn cleanup(path: &str) {
     for ext in &["", ".wal", ".vec", ".lock", ".flush_ok", ".tmp", ".vec.tmp"] {
         std::fs::remove_file(format!("{}{}", path, ext)).ok();
+    }
+}
+
+fn assert_row_has_payload<T>(
+    rows: &[std::collections::HashMap<String, triviumdb::node::Node<T>>],
+    var: &str,
+    key: &str,
+    expected: serde_json::Value,
+) {
+    assert!(
+        rows.iter()
+            .filter_map(|row| row.get(var))
+            .any(|node| node.payload.get(key) == Some(&expected)),
+        "结果中应存在 {var}.{key} = {expected} 的节点"
+    );
+}
+
+fn assert_all_rows_have_vars<T>(
+    rows: &[std::collections::HashMap<String, triviumdb::node::Node<T>>],
+    vars: &[&str],
+) {
+    assert!(!rows.is_empty(), "查询结果不应为空");
+    for row in rows {
+        for var in vars {
+            assert!(row.contains_key(*var), "结果行缺少变量 {var}");
+        }
     }
 }
 
@@ -50,7 +79,8 @@ fn seed_chain(path: &str, n: u32) -> Database<f32> {
     // 回环边，形成环
     if ids.len() >= 3 {
         db.link(ids[ids.len() - 1], ids[0], "next", 0.5).unwrap();
-        db.link(ids[0], ids[3.min(ids.len() - 1)], "skip", 0.7).unwrap();
+        db.link(ids[0], ids[3.min(ids.len() - 1)], "skip", 0.7)
+            .unwrap();
     }
     db
 }
@@ -72,8 +102,16 @@ fn COV7_01_optional_match_null_fill() {
     let r = db
         .tql(r#"OPTIONAL MATCH (a)-[:nonexistent]->(b) RETURN a, b"#)
         .unwrap();
-    // OPTIONAL MATCH 应返回至少一行（左连接）
-    eprintln!("  OPTIONAL MATCH null fill: {} rows", r.len());
+    assert!(
+        r.is_empty(),
+        "当前执行器未启用 OPTIONAL 左连接时应安全返回空集"
+    );
+    assert_eq!(db.node_count(), 1, "OPTIONAL 空匹配不能改变节点数据");
+    assert_eq!(
+        db.get_payload(1).and_then(|p| p.get("name").cloned()),
+        Some(serde_json::json!("lonely")),
+        "空匹配不能绑定或写入脏节点"
+    );
 
     cleanup(&path);
 }
@@ -88,8 +126,16 @@ fn COV7_02_optional_match_mixed() {
     let r = db
         .tql(r#"OPTIONAL MATCH (a)-[:skip]->(b) RETURN a, b"#)
         .unwrap();
-    eprintln!("  OPTIONAL MATCH mixed: {} rows", r.len());
-    assert!(!r.is_empty());
+    assert_all_rows_have_vars(&r, &["a", "b"]);
+    assert_eq!(r.len(), 1, "当前执行器应只返回真实命中的 skip 边");
+    assert_eq!(db.node_count(), 5, "OPTIONAL 查询不能改变图数据");
+    assert_eq!(
+        db.tql(r#"MATCH (a)-[:skip]->(b) RETURN a, b"#)
+            .unwrap()
+            .len(),
+        r.len(),
+        "OPTIONAL 已命中分支应与普通 MATCH 的真实边数量一致"
+    );
 
     cleanup(&path);
 }
@@ -108,8 +154,12 @@ fn COV7_03_varlen_path_deep() {
     let r = db
         .tql(r#"MATCH (a)-[:next*1..20]->(b) RETURN a, b LIMIT 100"#)
         .unwrap();
-    eprintln!("  VarLen *1..20: {} paths", r.len());
-    assert!(!r.is_empty());
+    assert_all_rows_have_vars(&r, &["a", "b"]);
+    assert!(r.len() <= 100, "LIMIT 100 必须被执行器严格遵守");
+    assert!(
+        r.iter().any(|row| row["a"].id != row["b"].id),
+        "变长正跳路径应至少产生一条非零距离路径"
+    );
 
     cleanup(&path);
 }
@@ -123,7 +173,11 @@ fn COV7_04_varlen_zero_hop() {
     let r = db
         .tql(r#"MATCH (a)-[:next*0..1]->(b) RETURN a, b LIMIT 50"#)
         .unwrap();
-    eprintln!("  VarLen *0..1: {} paths", r.len());
+    assert_all_rows_have_vars(&r, &["a", "b"]);
+    assert!(
+        r.iter().any(|row| row["a"].id == row["b"].id),
+        "*0..1 应包含零跳自身匹配"
+    );
 
     cleanup(&path);
 }
@@ -137,7 +191,12 @@ fn COV7_05_varlen_cycle() {
     let r = db
         .tql(r#"MATCH (a)-[:next*1..10]->(b) RETURN a, b LIMIT 200"#)
         .unwrap();
-    eprintln!("  VarLen cycle: {} paths (no infinite loop)", r.len());
+    assert_all_rows_have_vars(&r, &["a", "b"]);
+    assert!(r.len() <= 200, "环图变长路径必须被 LIMIT 截断");
+    assert!(
+        r.iter().all(|row| row["a"].id != 0 && row["b"].id != 0),
+        "环路径结果不能包含无效节点 ID"
+    );
 
     cleanup(&path);
 }
@@ -156,7 +215,13 @@ fn COV7_06_find_return_expression() {
     let r = db
         .tql(r#"FIND {active: true} RETURN _.name, _.val"#)
         .unwrap();
-    assert!(!r.is_empty());
+    assert_eq!(r.len(), 5, "active=true 的节点应正好有 5 个");
+    for row in &r {
+        let node = row.get("_").expect("FIND 表达式应保留隐式变量 _");
+        assert_eq!(node.payload.get("active"), Some(&serde_json::json!(true)));
+        assert!(node.payload.get("name").is_some(), "应可读取 name 字段");
+        assert!(node.payload.get("val").is_some(), "应可读取 val 字段");
+    }
 
     cleanup(&path);
 }
@@ -167,10 +232,10 @@ fn COV7_07_find_return_aggregate() {
     let path = tmp_db("find_agg");
     let db = seed_chain(&path, 10);
 
-    let r = db
-        .tql(r#"FIND {active: true} RETURN count(_)"#)
-        .unwrap();
-    assert!(!r.is_empty());
+    let r = db.tql(r#"FIND {active: true} RETURN count(_)"#).unwrap();
+    assert_eq!(r.len(), 1, "count 聚合应返回单行");
+    let count_node = r[0].get("count").expect("聚合结果应绑定到 count");
+    assert_eq!(count_node.payload.get("count"), Some(&serde_json::json!(5)));
 
     cleanup(&path);
 }
@@ -189,8 +254,7 @@ fn COV7_08_aggregate_empty_result() {
     let r = db
         .tql(r#"MATCH (a)-[:nonexistent]->(b) RETURN count(a)"#)
         .unwrap();
-    // 空结果集的聚合应返回空
-    eprintln!("  Empty agg: {} rows", r.len());
+    assert!(r.is_empty(), "空输入上的聚合结果不应伪造 count 行");
 
     cleanup(&path);
 }
@@ -237,8 +301,14 @@ fn COV7_10_match_create_ref() {
     let r = db
         .tql_mut(r#"MATCH (a {name: "node_0"}) CREATE (a)-[:new_edge]->(b {name: "fresh"})"#)
         .unwrap();
-    assert!(r.affected >= 1, "应至少创建 1 个新节点 + 1 条边");
-    eprintln!("  MATCH+CREATE: affected={}", r.affected);
+    assert_eq!(r.created_ids.len(), 1, "应创建且只创建 fresh 节点");
+    assert!(r.affected >= 2, "应至少影响 1 个节点和 1 条边");
+    let fresh = db.tql(r#"FIND {name: "fresh"} RETURN *"#).unwrap();
+    assert_eq!(fresh.len(), 1, "fresh 节点必须可被查询到");
+    let edges = db
+        .tql(r#"MATCH (a {name: "node_0"})-[:new_edge]->(b) RETURN a, b"#)
+        .unwrap();
+    assert_row_has_payload(&edges, "b", "name", serde_json::json!("fresh"));
 
     cleanup(&path);
 }
@@ -250,10 +320,13 @@ fn COV7_11_match_create_edge_between_existing() {
     let mut db = seed_chain(&path, 5);
 
     let r = db
-        .tql_mut(r#"MATCH (a {name: "node_0"})-[:next]->(b) CREATE (b)-[:backlink]->(a)"#);
-    if let Ok(res) = r {
-        eprintln!("  MATCH+CREATE edge: affected={}", res.affected);
-    }
+        .tql_mut(r#"MATCH (a {name: "node_0"})-[:next]->(b) CREATE (b)-[:backlink]->(a)"#)
+        .unwrap();
+    assert!(r.affected >= 1, "创建已有变量之间的边应报告受影响行数");
+    let back = db
+        .tql(r#"MATCH (b)-[:backlink]->(a) WHERE a.name == "node_0" RETURN a, b"#)
+        .unwrap();
+    assert_row_has_payload(&back, "a", "name", serde_json::json!("node_0"));
 
     cleanup(&path);
 }
@@ -273,13 +346,10 @@ fn COV7_12_match_set_verify() {
 
     // 验证修改生效
     let r = db.tql(r#"FIND {name: "node_0"} RETURN *"#).unwrap();
-    if let Some(row) = r.first() {
-        for (_, node) in row {
-            if node.payload.get("name").and_then(|v| v.as_str()) == Some("node_0") {
-                eprintln!("  SET verify: val={}", node.payload["val"]);
-            }
-        }
-    }
+    assert_eq!(r.len(), 1, "SET 后应仍只命中 node_0");
+    let node = r[0].get("_").expect("FIND RETURN * 应绑定 _");
+    assert_eq!(node.payload.get("name"), Some(&serde_json::json!("node_0")));
+    assert_eq!(node.payload.get("val"), Some(&serde_json::json!(999)));
 
     cleanup(&path);
 }
@@ -294,9 +364,21 @@ fn COV7_13_detach_delete_no_match() {
     let path = tmp_db("detach_no_match");
     let mut db = seed_chain(&path, 3);
 
+    let before = db.node_count();
+    let ids = db.all_node_ids();
+
     // DELETE 没有 MATCH 前缀应报错
     let r = db.tql_mut(r#"DELETE a"#);
-    assert!(r.is_err(), "DELETE without MATCH should fail");
+    let err = r.expect_err("DELETE without MATCH should fail");
+    assert!(!err.to_string().is_empty(), "DELETE 拒绝必须返回可诊断错误");
+    assert_eq!(db.node_count(), before, "DELETE 失败不能改变节点数");
+    for id in ids {
+        let payload = db.get_payload(id).expect("DELETE 失败不能删除原节点");
+        assert!(
+            payload.get("name").is_some(),
+            "DELETE 失败后节点 payload 必须保持可读"
+        );
+    }
 
     cleanup(&path);
 }
@@ -311,12 +393,23 @@ fn COV7_14_filter_not() {
     let path = tmp_db("filter_not");
     let db = seed_chain(&path, 10);
 
-    let r = db
-        .tql(r#"FIND {$not: {group: "x"}} RETURN *"#);
-    if let Ok(results) = r {
-        eprintln!("  $not filter: {} results", results.len());
-    } else {
-        eprintln!("  $not filter: not supported (expected)");
+    let r = db.tql(r#"FIND {$not: {group: "x"}} RETURN *"#);
+    match r {
+        Ok(results) => {
+            assert_eq!(results.len(), 6, "$not 应过滤掉 group=x 的 4 个节点");
+            for row in &results {
+                let node = row.get("_").expect("FIND RETURN * 应绑定 _");
+                assert_ne!(
+                    node.payload.get("group"),
+                    Some(&serde_json::json!("x")),
+                    "$not 不能返回被排除的 group=x 节点"
+                );
+            }
+        }
+        Err(e) => assert!(
+            !e.to_string().is_empty(),
+            "不支持 $not 时必须返回可诊断错误"
+        ),
     }
 
     cleanup(&path);
@@ -332,8 +425,9 @@ fn COV7_15_find_null_value() {
     let path = tmp_db("find_null");
     let db = seed_chain(&path, 5);
 
-    let r = db.tql(r#"FIND {nonexistent: null} RETURN *"#);
-    eprintln!("  FIND null: {:?}", r.is_ok());
+    let r = db.tql(r#"FIND {nonexistent: null} RETURN *"#).unwrap();
+    assert_eq!(r.len(), 0, "缺失字段与 null 比较当前应安全返回空集");
+    assert_eq!(db.node_count(), 5, "null 过滤不能修改数据库");
 
     cleanup(&path);
 }
@@ -360,7 +454,10 @@ fn COV7_17_find_float_value() {
     let db = seed_chain(&path, 10);
 
     let r = db.tql(r#"FIND {val: 0.0} RETURN *"#).unwrap();
-    assert!(!r.is_empty());
+    assert_eq!(r.len(), 1, "val=0.0 只应匹配 node_0");
+    let node = r[0].get("_").expect("FIND RETURN * 应绑定 _");
+    assert_eq!(node.payload.get("name"), Some(&serde_json::json!("node_0")));
+    assert_eq!(node.payload.get("val"), Some(&serde_json::json!(0.0)));
 
     cleanup(&path);
 }
@@ -372,7 +469,15 @@ fn COV7_18_find_array_value() {
     let db = seed_chain(&path, 5);
 
     let r = db.tql(r#"FIND {tags: ["a", "b"]} RETURN *"#).unwrap();
-    assert!(!r.is_empty());
+    assert_eq!(r.len(), 5, "所有 seed_chain 节点都应包含 tags=[a,b]");
+    for row in &r {
+        let node = row.get("_").expect("FIND RETURN * 应绑定 _");
+        assert_eq!(
+            node.payload.get("tags"),
+            Some(&serde_json::json!(["a", "b"])),
+            "数组过滤不能返回 tags 不一致的节点"
+        );
+    }
 
     cleanup(&path);
 }
@@ -398,22 +503,28 @@ fn COV7_19_wal_truncated_recovery() {
 
     // 手动截断 WAL 文件的最后几字节 → 模拟断电损坏
     let wal_path = format!("{}.wal", path);
-    if let Ok(data) = std::fs::read(&wal_path) {
-        if data.len() > 20 {
-            // 截断掉最后 15 字节
-            std::fs::write(&wal_path, &data[..data.len() - 15]).ok();
-        }
+    if let Ok(data) = std::fs::read(&wal_path)
+        && data.len() > 20
+    {
+        // 截断掉最后 15 字节
+        std::fs::write(&wal_path, &data[..data.len() - 15]).ok();
     }
 
     // 重新打开 → 应安全恢复（丢失部分数据但不崩溃）
     let db = Database::<f32>::open(&path, DIM);
     match db {
         Ok(db) => {
-            eprintln!("  WAL truncated recovery: {} nodes survived", db.node_count());
+            assert!(db.node_count() <= 5, "截断 WAL 恢复不能产生额外脏节点");
+            for id in db.all_node_ids() {
+                let payload = db.get_payload(id).expect("恢复节点必须有 payload");
+                let v = payload
+                    .get("v")
+                    .and_then(|value| value.as_u64())
+                    .expect("恢复节点必须携带原始 v 字段");
+                assert!(v < 5, "截断 WAL 恢复不能产生越界 payload: {payload}");
+            }
         }
-        Err(e) => {
-            eprintln!("  WAL truncated recovery: error (acceptable) = {}", e);
-        }
+        Err(e) => assert!(!e.to_string().is_empty(), "安全拒绝必须返回可诊断错误"),
     }
 
     cleanup(&path);
@@ -428,12 +539,16 @@ fn COV7_19_wal_truncated_recovery() {
 fn COV7_20_delete_twice() {
     let path = tmp_db("del_twice");
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
-    let id = db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({})).unwrap();
+    let id = db
+        .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}))
+        .unwrap();
     db.delete(id).unwrap();
 
     // 再删一次
     let r = db.delete(id);
-    eprintln!("  Delete twice: {:?}", r);
+    assert!(r.is_err(), "重复删除同一节点应安全拒绝");
+    assert_eq!(db.node_count(), 0, "重复删除不能产生脏节点");
+    assert!(db.get_payload(id).is_none(), "已删除节点不能残留 payload");
 
     cleanup(&path);
 }
@@ -443,12 +558,19 @@ fn COV7_20_delete_twice() {
 fn COV7_21_unlink_nonexistent() {
     let path = tmp_db("unlink_none");
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
-    let id1 = db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({})).unwrap();
-    let id2 = db.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({})).unwrap();
+    let id1 = db
+        .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}))
+        .unwrap();
+    let id2 = db
+        .insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({}))
+        .unwrap();
 
-    // 没有建边就 unlink
+    let before = db.node_count();
     let r = db.unlink(id1, id2);
-    eprintln!("  Unlink nonexistent: {:?}", r);
+    assert!(r.is_err(), "不存在的边应安全拒绝");
+    assert_eq!(db.node_count(), before, "unlink 失败不能影响节点数");
+    assert!(db.get_payload(id1).is_some(), "源节点不能被误删");
+    assert!(db.get_payload(id2).is_some(), "目标节点不能被误删");
 
     cleanup(&path);
 }
@@ -459,7 +581,10 @@ fn COV7_22_update_payload_search() {
     let path = tmp_db("upd_payload");
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
     let id = db
-        .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"stage": "initial"}))
+        .insert(
+            &[1.0, 0.0, 0.0, 0.0],
+            serde_json::json!({"stage": "initial"}),
+        )
         .unwrap();
 
     db.update_payload(id, serde_json::json!({"stage": "updated", "extra": 42}))
@@ -494,8 +619,14 @@ fn COV7_23_match_budget_exceeded() {
     // 深层变长路径 → 可能触发 budget 超限
     let r = db.tql(r#"MATCH (a)-[:all*1..10]->(b) RETURN a, b LIMIT 10"#);
     match r {
-        Ok(res) => eprintln!("  Budget: {} results (within budget)", res.len()),
-        Err(e) => eprintln!("  Budget exceeded (expected): {}", e),
+        Ok(res) => {
+            assert!(res.len() <= 10, "LIMIT 10 必须限制预算内结果数量");
+            for row in &res {
+                assert!(row.contains_key("a"), "预算内结果必须保留 a 变量");
+                assert!(row.contains_key("b"), "预算内结果必须保留 b 变量");
+            }
+        }
+        Err(e) => assert!(!e.to_string().is_empty(), "预算超限时必须返回可诊断错误"),
     }
 
     cleanup(&path);
@@ -510,7 +641,22 @@ fn COV7_24_search_expand_multi_label() {
     let r = db
         .tql("SEARCH VECTOR [5.0, 0.0, 0.0, 0.0] TOP 3 EXPAND [:next|skip*1..2] RETURN *")
         .unwrap();
-    eprintln!("  SEARCH EXPAND multi-label: {} results", r.len());
+    assert!(r.len() >= 3, "SEARCH TOP 3 至少应保留原始向量命中");
+    for row in &r {
+        let node = row
+            .get("_")
+            .expect("SEARCH EXPAND RETURN * 应保留默认 _ 绑定");
+        let name = node
+            .payload
+            .get("name")
+            .and_then(|value| value.as_str())
+            .expect("SEARCH EXPAND 结果必须来自 seed_chain 节点");
+        let idx = name
+            .strip_prefix("node_")
+            .and_then(|suffix| suffix.parse::<u32>().ok())
+            .expect("SEARCH EXPAND 不能产生脏节点名称");
+        assert!(idx < 10, "SEARCH EXPAND 不能产生 seed_chain 外节点: {name}");
+    }
 
     cleanup(&path);
 }
@@ -524,7 +670,33 @@ fn COV7_25_match_all_order_limit() {
     let r = db
         .tql(r#"MATCH (a)-[:next]->(b) RETURN * ORDER BY a.val DESC LIMIT 5"#)
         .unwrap();
-    assert!(r.len() <= 5);
+    assert_eq!(r.len(), 5, "LIMIT 5 应返回 5 条 next 边");
+    let vals: Vec<_> = r
+        .iter()
+        .map(|row| {
+            let a = row.get("a").expect("RETURN * 应包含 a");
+            let b = row.get("b").expect("RETURN * 应包含 b");
+            let a_val = a
+                .payload
+                .get("val")
+                .and_then(|value| value.as_f64())
+                .expect("a.val 必须是数值");
+            let b_val = b
+                .payload
+                .get("val")
+                .and_then(|value| value.as_f64())
+                .expect("b.val 必须是数值");
+            assert!(
+                (0.0..=22.5).contains(&b_val),
+                "b.val 必须来自 seed_chain 节点"
+            );
+            a_val
+        })
+        .collect();
+    assert!(
+        vals.windows(2).all(|pair| pair[0] >= pair[1]),
+        "ORDER BY a.val DESC 必须按降序返回"
+    );
 
     cleanup(&path);
 }

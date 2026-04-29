@@ -264,10 +264,7 @@ fn bloom_mask_and合并多个掩码() {
 
 #[test]
 fn bloom_mask_or返回零() {
-    let f = Filter::or(vec![
-        Filter::eq("a", json!(1)),
-        Filter::eq("b", json!(2)),
-    ]);
+    let f = Filter::or(vec![Filter::eq("a", json!(1)), Filter::eq("b", json!(2))]);
     let mask = f.extract_must_have_mask();
     assert_eq!(mask, 0, "Or 条件无法提取必达掩码");
 }
@@ -406,7 +403,10 @@ fn bloom_mask_其他变体返回零() {
     assert_eq!(Filter::nin("x", vec![json!(1)]).extract_must_have_mask(), 0);
     assert_eq!(Filter::size("x", 3).extract_must_have_mask(), 0);
     assert_eq!(Filter::all("x", vec![json!(1)]).extract_must_have_mask(), 0);
-    assert_eq!(Filter::type_match("x", "string").extract_must_have_mask(), 0);
+    assert_eq!(
+        Filter::type_match("x", "string").extract_must_have_mask(),
+        0
+    );
     assert_eq!(Filter::ne("x", json!(1)).extract_must_have_mask(), 0);
     assert_eq!(Filter::gte("x", 1.0).extract_must_have_mask(), 0);
     assert_eq!(Filter::lte("x", 1.0).extract_must_have_mask(), 0);
@@ -416,8 +416,7 @@ fn bloom_mask_其他变体返回零() {
 fn bloom_mask_eq_值为非字符串() {
     // extract_must_have_mask 中 val_str 分支: Value::String vs other
     let f1 = Filter::eq("x", json!("hello")); // String 分支
-    let f2 = Filter::eq("x", json!(42));        // non-String 分支 (to_string)
+    let f2 = Filter::eq("x", json!(42)); // non-String 分支 (to_string)
     assert_ne!(f1.extract_must_have_mask(), 0);
     assert_ne!(f2.extract_must_have_mask(), 0);
 }
-

@@ -4,13 +4,13 @@
 //! 所有外部单元测试按模块组织在此目录下。
 //! 每个子模块对应一个源码模块的点到点测试。
 
-mod filter;
-mod vector;
-mod index;
-mod core;
-mod wal;
 mod cognitive;
-mod memtable;
-mod traversal;
-mod tql_ast;
+mod core;
 mod database;
+mod filter;
+mod index;
+mod memtable;
+mod tql_ast;
+mod traversal;
+mod vector;
+mod wal;

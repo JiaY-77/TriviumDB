@@ -14,7 +14,6 @@ use crate::storage::wal::WalEntry;
 
 use super::lock_or_recover;
 
-
 /// WAL 崩溃恢复：回放单条 WAL 记录到 MemTable
 ///
 /// 设计要点：

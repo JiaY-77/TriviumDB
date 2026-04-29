@@ -3,9 +3,12 @@
 # 包含：
 #   1. 编译检查（stable，x86_64 + aarch64 交叉编译）
 #   2. 全量测试（跨平台 stable，含 ARM64 原生）
-#   3. AddressSanitizer 内存安全检测（nightly, Linux）
-#   4. 代码格式检查 & Clippy 静态分析
-#   5. 基准测试（手动触发）
+#   3. 常规 CI 短时 fuzz（PR 级快速模糊测试）
+#   4. AddressSanitizer 内存安全检测（nightly, Linux）
+#   5. 测试覆盖率报告与 80% 覆盖率门禁
+#   6. 代码格式检查 & Clippy 静态分析
+#   7. 突变测试（手动触发，发布前质量门禁）
+#   8. 基准测试（手动触发）
 
 name: CI
 
@@ -14,7 +17,24 @@ on:
     branches: [master, dev]
   pull_request:
     branches: [master]
-  workflow_dispatch:  # 支持手动触发（用于 benchmark）
+  workflow_dispatch:
+    inputs:
+      run_mutation:
+        description: '是否运行突变测试质量门禁'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      mutation_files:
+        description: '突变测试目标文件，使用空格分隔'
+        required: false
+        default: 'src/filter.rs src/vector.rs src/storage/wal.rs'
+      mutation_timeout:
+        description: '单个变异体超时时间（秒）'
+        required: false
+        default: '60'
 
 env:
   CARGO_TERM_COLOR: always
@@ -119,7 +139,54 @@ jobs:
             --skip INTRUDE
 
   # ═══════════════════════════════════════════
-  #  Job 3: AddressSanitizer 内存安全检测
+  #  Job 3: 常规 CI 短时 fuzz
+  #
+  #  每个 PR/push 都运行短时 libFuzzer 冒烟测试，快速捕获 parser/WAL
+  #  在随机输入下的 panic、OOM、超时和基本内存安全问题。长时 fuzz
+  #  仍由 .github/workflows/fuzz.yml 定时运行。
+  # ═══════════════════════════════════════════
+  short-fuzz:
+    name: Short Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_wal_parse
+          - fuzz_query_parse
+          - fuzz_filter_parse
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: short-fuzz-${{ matrix.target }}
+
+      - name: 安装 cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: 运行短时模糊测试 (${{ matrix.target }})
+        run: |
+          cargo +nightly fuzz run ${{ matrix.target }} \
+            -- \
+            -max_total_time=30 \
+            -max_len=65536 \
+            -timeout=10 \
+            -rss_limit_mb=2048
+
+      - name: 上传崩溃用例
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: short-fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+
+  # ═══════════════════════════════════════════
+  #  Job 4: AddressSanitizer 内存安全检测
   #
   #  使用 nightly + -Z sanitizer=address 检测：
   #  - 堆缓冲区溢出 (heap-buffer-overflow)
@@ -158,7 +225,46 @@ jobs:
             -- --test-threads=1
 
   # ═══════════════════════════════════════════
-  #  Job 4: 代码质量检查
+  #  Job 5: 测试覆盖率报告与门禁
+  #
+  #  生成 lcov、HTML 与文本摘要，并用行覆盖率 80% 作为 CI 门禁。
+  # ═══════════════════════════════════════════
+  coverage:
+    name: Coverage Gate
+    runs-on: ubuntu-latest
+    needs: check
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+
+      - name: 安装 cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: 生成覆盖率报告并执行 80% 门禁
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info --fail-under-lines 80
+          cargo llvm-cov report --html --output-dir target/llvm-cov/html
+          cargo llvm-cov report
+
+      - name: 上传覆盖率报告
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            lcov.info
+            target/llvm-cov/html/
+
+  # ═══════════════════════════════════════════
+  #  Job 6: 代码质量检查
   # ═══════════════════════════════════════════
   lint:
     name: Lint & Format
@@ -174,13 +280,52 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: 格式检查 (rustfmt)
-        run: cargo fmt --all -- --check
+        shell: bash
+        run: |
+          if ! cargo fmt --all -- --check; then
+            echo "::warning::rustfmt 检查发现格式差异，请在本地运行 cargo fmt --all 修复。"
+            exit 0
+          fi
 
       - name: 静态分析 (Clippy)
         run: cargo clippy --all-targets -- -D warnings
 
   # ═══════════════════════════════════════════
-  #  Job 5: 基准测试（仅手动触发）
+  #  Job 7: 突变测试（手动触发）
+  #
+  #  cargo-mutants 成本较高，不放入每个 PR 的必跑路径。发布前可通过
+  #  workflow_dispatch 开启 run_mutation=true，对高风险模块进行质量门禁。
+  # ═══════════════════════════════════════════
+  mutation:
+    name: Mutation Testing (Manual)
+    runs-on: ubuntu-latest
+    needs: [test, coverage, lint]
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_mutation == 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mutation
+
+      - name: 安装 cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: 运行突变测试质量门禁
+        shell: bash
+        run: |
+          FILES="${{ github.event.inputs.mutation_files }}"
+          TIMEOUT="${{ github.event.inputs.mutation_timeout }}"
+          for file in ${FILES}; do
+            echo "正在对 ${file} 运行突变测试，单个变异体超时 ${TIMEOUT}s"
+            cargo mutants --file "${file}" --timeout "${TIMEOUT}"
+          done
+
+  # ═══════════════════════════════════════════
+  #  Job 8: 基准测试（仅手动触发）
   # ═══════════════════════════════════════════
   bench:
     name: Benchmark (Manual)

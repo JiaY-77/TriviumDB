@@ -199,7 +199,7 @@ proptest! {
         use triviumdb::VectorType;
         let dim = a.len().min(b.len());
         let sim = f32::similarity(&a[..dim], &b[..dim]);
-        prop_assert!(sim >= -1.01 && sim <= 1.01,
+        prop_assert!((-1.01..=1.01).contains(&sim),
             "similarity 应在 [-1,1]，got {}", sim);
     }
 }

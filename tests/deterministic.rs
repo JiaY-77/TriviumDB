@@ -4,15 +4,17 @@
 //! 军工系统要求：相同输入 → 相同输出（bit-exact），跨多次运行、跨编译一致。
 //! 本文件验证 TriviumDB 的核心路径满足确定性要求。
 
-use triviumdb::database::{Database, SearchConfig};
 use triviumdb::VectorType;
+use triviumdb::database::{Database, SearchConfig};
 
 const DIM: usize = 4;
 
 fn tmp_db(name: &str) -> String {
     let dir = std::env::temp_dir().join("triviumdb_test");
     std::fs::create_dir_all(&dir).ok();
-    dir.join(format!("det_{}", name)).to_string_lossy().to_string()
+    dir.join(format!("det_{}", name))
+        .to_string_lossy()
+        .to_string()
 }
 
 fn cleanup(path: &str) {
@@ -75,7 +77,10 @@ fn DET_01_相同查询_100次结果bit_exact一致() {
                 a.score.to_bits(),
                 b.score.to_bits(),
                 "第 {} 轮 第 {} 名: score 不 bit-exact ({} vs {})",
-                round, j, a.score, b.score
+                round,
+                j,
+                a.score,
+                b.score
             );
         }
     }
@@ -105,14 +110,19 @@ fn DET_02_similarity数学不变量_大规模验证() {
             assert!(
                 (ab - ba).abs() < 1e-6,
                 "dim={} seed={}: 对称性违反 sim(a,b)={} vs sim(b,a)={}",
-                dim, seed, ab, ba
+                dim,
+                seed,
+                ab,
+                ba
             );
 
             // 范围
             assert!(
-                ab >= -1.01 && ab <= 1.01,
+                (-1.01..=1.01).contains(&ab),
                 "dim={} seed={}: 超出范围 sim={}",
-                dim, seed, ab
+                dim,
+                seed,
+                ab
             );
 
             // 自反性
@@ -122,20 +132,26 @@ fn DET_02_similarity数学不变量_大规模验证() {
                 assert!(
                     (aa - 1.0).abs() < 0.01,
                     "dim={} seed={}: 自反性违反 sim(a,a)={}",
-                    dim, seed, aa
+                    dim,
+                    seed,
+                    aa
                 );
             }
         }
     }
 
-    eprintln!("  ✅ {} 维度 × 50 种子 = {} 组数学不变量全部通过", dims.len(), dims.len() * 50);
+    eprintln!(
+        "  ✅ {} 维度 × 50 种子 = {} 组数学不变量全部通过",
+        dims.len(),
+        dims.len() * 50
+    );
 }
 
 // ════════════════════════════════════════════════════════════════
 //  3. BQ 索引与暴力搜索的排序一致性
 // ════════════════════════════════════════════════════════════════
 
-/// BQ 三级火箭的 Top-1 结果应与 BruteForce 的 Top-1 一致
+/// 强制 BQ 粗排管线时，Top-1 结果应与 BruteForce 的 Top-1 一致
 /// （Top-K 允许分数相同时的微小顺序差异，但最高分必须一致）
 #[test]
 fn DET_03_BQ与BruteForce_Top1一致性() {
@@ -144,37 +160,90 @@ fn DET_03_BQ与BruteForce_Top1一致性() {
 
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
-    // 插入足够多的数据触发 BQ 索引（通常 > 256 才会激活）
     for i in 0..500u32 {
         let vec = deterministic_vector(i, DIM);
         db.insert(&vec, serde_json::json!({"idx": i})).unwrap();
     }
 
-    // 多个查询向量
     for q_seed in [42u32, 100, 200, 300, 400, 999, 1234, 5678] {
         let query = deterministic_vector(q_seed, DIM);
 
-        // BruteForce: expand_depth=0 强制纯向量搜索
-        let brute = db.search(&query, 1, 0, 0.0).unwrap();
+        let brute = db.search(&query, 1, 0, -1.0).unwrap();
+        assert_eq!(brute.len(), 1, "BruteForce Top-1 必须返回结果");
 
-        // 高级搜索（可能走 BQ 路径）
         let cfg = SearchConfig {
             top_k: 1,
             expand_depth: 0,
+            min_score: -1.0,
+            enable_bq_coarse_search: true,
+            bq_candidate_ratio: 1.0,
             ..Default::default()
         };
         let advanced = db.search_advanced(&query, &cfg).unwrap();
+        assert_eq!(advanced.len(), 1, "强制 BQ Top-1 必须返回结果");
 
-        if !brute.is_empty() && !advanced.is_empty() {
-            assert_eq!(
-                brute[0].id, advanced[0].id,
-                "query_seed={}: BruteForce Top-1 ({}, score={}) != Advanced Top-1 ({}, score={})",
-                q_seed, brute[0].id, brute[0].score, advanced[0].id, advanced[0].score
-            );
-        }
+        assert_eq!(
+            brute[0].id, advanced[0].id,
+            "query_seed={}: BruteForce Top-1 ({}, score={}) != BQ Top-1 ({}, score={})",
+            q_seed, brute[0].id, brute[0].score, advanced[0].id, advanced[0].score
+        );
+        assert_eq!(
+            brute[0].score.to_bits(),
+            advanced[0].score.to_bits(),
+            "query_seed={}: BQ 精排分数必须与 BruteForce bit-exact 一致",
+            q_seed
+        );
     }
 
-    eprintln!("  ✅ 8 个查询的 BQ vs BruteForce Top-1 完全一致");
+    cleanup(&path);
+}
+
+/// 数据量超过自动路由阈值时，默认配置应进入 BQ 粗排并保持结果结构正确
+#[test]
+fn DET_03B_自动BQ路由_结果结构正确() {
+    let path = tmp_db("bq_auto_route");
+    cleanup(&path);
+
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    for i in 0..20_001u32 {
+        let vec = deterministic_vector(i, DIM);
+        db.insert(&vec, serde_json::json!({"idx": i})).unwrap();
+    }
+
+    for q_seed in [7u32, 42, 2048] {
+        let query = deterministic_vector(q_seed, DIM);
+        let cfg = SearchConfig {
+            top_k: 10,
+            expand_depth: 0,
+            min_score: -1.0,
+            ..Default::default()
+        };
+        let bq = db.search_advanced(&query, &cfg).unwrap();
+        assert_eq!(bq.len(), 10, "自动 BQ 必须返回完整 TopK");
+
+        let mut seen = std::collections::HashSet::new();
+        for hit in &bq {
+            assert!(seen.insert(hit.id), "自动 BQ 结果不能返回重复节点");
+            let payload_idx = hit
+                .payload
+                .get("idx")
+                .and_then(|value| value.as_u64())
+                .expect("自动 BQ 结果必须携带原始 idx payload");
+            assert!(payload_idx < 20_001, "自动 BQ 不能返回越界 payload");
+            let expected_score =
+                f32::similarity(&query, &deterministic_vector(payload_idx as u32, DIM));
+            assert_eq!(
+                hit.score.to_bits(),
+                expected_score.to_bits(),
+                "query_seed={q_seed}: 自动 BQ 精排分数必须来自原始向量"
+            );
+        }
+        assert!(
+            bq.windows(2).all(|pair| pair[0].score >= pair[1].score),
+            "自动 BQ 返回结果必须按精排分数降序排列"
+        );
+    }
+
     cleanup(&path);
 }
 
@@ -266,7 +335,8 @@ fn DET_05_TQL查询_50次结果一致() {
                 result.len(),
                 baseline.len(),
                 "query='{}' 第 {} 轮: 结果数量不一致",
-                query, round
+                query,
+                round
             );
         }
     }

@@ -1,0 +1,129 @@
+# TriviumDB 故障注入与恢复测试管线
+#
+# 这个 workflow 不挂到常规 push / pull_request 路径，只通过手动触发或定时任务运行。
+# GitHub 托管 Runner 无法切断真实物理电源，因此这里覆盖的是 CI 可稳定复现的
+# 逻辑级崩溃一致性形态：WAL 断写、tmp 残留、跨文件撕裂、进程硬崩溃、
+# SyncMode 可见性、短时随机故障序列与 Windows rename 占用近似场景。
+
+name: Fault Injection CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_extended:
+        description: '是否运行扩展故障测试矩阵'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+  schedule:
+    # 每周三 UTC 04:00（北京时间 12:00）运行一次，不阻塞常规 PR/push CI
+    - cron: '0 4 * * 3'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  logical-crash-consistency:
+    name: Logical Crash Consistency
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fault-logical-crash
+
+      - name: 运行 WAL 与文件撕裂恢复测试
+        run: |
+          cargo test --test wal_midwrite -- --test-threads=1
+          cargo test --test sector_tearing -- --test-threads=1
+          cargo test --test power_cycle -- --test-threads=1
+          cargo test --test io_fault -- --test-threads=1
+          cargo test --test recovery -- --test-threads=1 P0_2_WAL恢复后_新插入不复用已有ID
+          cargo test --test hw_crash -- --test-threads=1
+
+  compaction-recovery:
+    name: Compaction Recovery Cuts
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fault-compaction
+
+      - name: 运行 compaction 中断恢复测试
+        run: cargo test --test compaction_core -- --test-threads=1
+
+  corruption-hardening:
+    name: Corruption Hardening
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fault-corruption
+
+      - name: 运行损坏与 unsafe 边界测试
+        run: |
+          cargo test --test emi_bitflip -- --test-threads=1
+          cargo test --test unsafe_audit -- --test-threads=1
+
+  windows-rename-and-locks:
+    name: Windows Rename & Lock Semantics
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fault-windows-rename
+
+      - name: 运行 Windows 文件锁与 rename 相关测试
+        shell: pwsh
+        run: |
+          $env:CARGO_INCREMENTAL='0'
+          cargo test --test io_fault -- --test-threads=1 IO_06_文件锁_同一路径不能打开两次
+          cargo test --test power_cycle -- --test-threads=1
+          cargo test --test compaction_core -- --test-threads=1
+
+  extended-fault-matrix:
+    name: Extended Fault Matrix
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_extended == 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fault-extended
+
+      - name: 运行扩展故障测试矩阵
+        run: |
+          cargo test --test wal_midwrite -- --test-threads=1
+          cargo test --test io_fault -- --test-threads=1
+          cargo test --test compaction_core -- --test-threads=1
+          cargo test --test power_cycle -- --test-threads=1
+          cargo test --test sector_tearing -- --test-threads=1
+          cargo test --test emi_bitflip -- --test-threads=1
+          cargo test --test unsafe_audit -- --test-threads=1
+          cargo test --test engine_deep -- --test-threads=1 COV7_19_wal_truncated_recovery

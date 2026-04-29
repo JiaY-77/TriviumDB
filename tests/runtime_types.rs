@@ -8,7 +8,9 @@
 //! - `vector.rs`: f16 (半精度) VectorType 全生命周期 (insert → search → flush → reopen)
 //! - `storage/vec_pool.rs` + `file_format.rs`: flush/reopen mmap 加载路径、增量写入幂等性
 
+use std::collections::HashMap;
 use triviumdb::database::Database;
+use triviumdb::node::Node;
 
 const DIM: usize = 4;
 
@@ -27,6 +29,59 @@ fn cleanup(path: &str) {
     for ext in &["", ".wal", ".vec", ".lock", ".flush_ok", ".tmp", ".vec.tmp"] {
         std::fs::remove_file(format!("{}{}", path, ext)).ok();
     }
+}
+
+fn node<'a>(row: &'a HashMap<String, Node<f32>>, var: &str) -> &'a Node<f32> {
+    row.get(var)
+        .unwrap_or_else(|| panic!("结果行缺少变量 {var}"))
+}
+
+fn payload_f64(node: &Node<f32>, key: &str) -> f64 {
+    node.payload
+        .get(key)
+        .and_then(|v| v.as_f64())
+        .unwrap_or_else(|| panic!("payload 缺少数值字段 {key}"))
+}
+
+fn payload_bool(node: &Node<f32>, key: &str) -> bool {
+    node.payload
+        .get(key)
+        .and_then(|v| v.as_bool())
+        .unwrap_or_else(|| panic!("payload 缺少布尔字段 {key}"))
+}
+
+fn payload_str<'a>(node: &'a Node<f32>, key: &str) -> &'a str {
+    node.payload
+        .get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("payload 缺少字符串字段 {key}"))
+}
+
+fn assert_match_rows<T>(rows: &[HashMap<String, Node<T>>], var: &str, expected_len: usize) {
+    assert_eq!(rows.len(), expected_len, "查询结果行数不符合预期");
+    for row in rows {
+        assert!(row.contains_key(var), "结果行缺少变量 {var}");
+    }
+}
+
+fn assert_find_rows(rows: &[HashMap<String, Node<f32>>], expected_len: usize) {
+    assert_eq!(rows.len(), expected_len, "FIND 结果行数不符合预期");
+    for row in rows {
+        assert!(row.contains_key("_"), "FIND RETURN * 应绑定 _");
+    }
+}
+
+fn assert_tql_err<T>(result: triviumdb::Result<T>, expected_fragment: &str) {
+    let err = match result {
+        Ok(_) => panic!("无效 TQL 必须被拒绝"),
+        Err(err) => err,
+    };
+    let msg = err.to_string();
+    assert!(!msg.is_empty(), "TQL 拒绝必须返回可诊断错误");
+    assert!(
+        msg.contains(expected_fragment),
+        "错误信息应包含 {expected_fragment}，实际为 {msg}"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -63,33 +118,55 @@ fn COV5_01_where_float_cmp() {
 
     // Float == (epsilon比较)
     let r = db.tql(r#"FIND {score: 0.0} RETURN *"#).unwrap();
-    assert!(!r.is_empty());
+    assert_find_rows(&r, 1);
+    assert_eq!(payload_f64(node(&r[0], "_"), "score"), 0.0);
 
     // Float !=
     let r = db
         .tql(r#"MATCH (a) WHERE a.score != 0.0 RETURN a"#)
         .unwrap();
-    assert!(!r.is_empty());
+    assert_match_rows(&r, "a", 7);
+    assert!(
+        r.iter()
+            .all(|row| payload_f64(node(row, "a"), "score") != 0.0),
+        "score != 0.0 不能返回零分节点"
+    );
 
     // Float >
     let r = db.tql(r#"MATCH (a) WHERE a.score > 5.0 RETURN a"#).unwrap();
-    assert!(!r.is_empty());
+    assert_match_rows(&r, "a", 4);
+    assert!(
+        r.iter()
+            .all(|row| payload_f64(node(row, "a"), "score") > 5.0),
+        "score > 5.0 不能返回不满足条件的节点"
+    );
 
     // Float >=
     let r = db
         .tql(r#"MATCH (a) WHERE a.score >= 10.5 RETURN a"#)
         .unwrap();
-    assert!(!r.is_empty());
+    assert_match_rows(&r, "a", 1);
+    assert_eq!(payload_f64(node(&r[0], "a"), "score"), 10.5);
 
     // Float <
     let r = db.tql(r#"MATCH (a) WHERE a.score < 3.0 RETURN a"#).unwrap();
-    assert!(!r.is_empty());
+    assert_match_rows(&r, "a", 2);
+    assert!(
+        r.iter()
+            .all(|row| payload_f64(node(row, "a"), "score") < 3.0),
+        "score < 3.0 不能返回越界节点"
+    );
 
     // Float <=
     let r = db
         .tql(r#"MATCH (a) WHERE a.score <= 1.5 RETURN a"#)
         .unwrap();
-    assert!(!r.is_empty());
+    assert_match_rows(&r, "a", 2);
+    assert!(
+        r.iter()
+            .all(|row| payload_f64(node(row, "a"), "score") <= 1.5),
+        "score <= 1.5 不能返回越界节点"
+    );
 
     cleanup(&path);
 }
@@ -103,12 +180,20 @@ fn COV5_02_where_bool_cmp() {
     let r = db
         .tql(r#"MATCH (a) WHERE a.active == true RETURN a"#)
         .unwrap();
-    assert!(!r.is_empty());
+    assert_match_rows(&r, "a", 4);
+    assert!(
+        r.iter().all(|row| payload_bool(node(row, "a"), "active")),
+        "active == true 不能返回 false 节点"
+    );
 
     let r = db
         .tql(r#"MATCH (a) WHERE a.active != true RETURN a"#)
         .unwrap();
-    assert!(!r.is_empty());
+    assert_match_rows(&r, "a", 4);
+    assert!(
+        r.iter().all(|row| !payload_bool(node(row, "a"), "active")),
+        "active != true 不能返回 true 节点"
+    );
 
     cleanup(&path);
 }
@@ -131,10 +216,20 @@ fn COV5_03_where_string_cmp() {
 
     // String > / < (字典序)
     let r = db.tql(r#"MATCH (a) WHERE a.label > "l" RETURN a"#).unwrap();
-    assert!(!r.is_empty());
+    assert_match_rows(&r, "a", 4);
+    assert!(
+        r.iter()
+            .all(|row| payload_str(node(row, "a"), "label") > "l"),
+        "label > l 不能返回字典序不满足的节点"
+    );
 
     let r = db.tql(r#"MATCH (a) WHERE a.label < "z" RETURN a"#).unwrap();
-    assert!(!r.is_empty());
+    assert_match_rows(&r, "a", 8);
+    assert!(
+        r.iter()
+            .all(|row| payload_str(node(row, "a"), "label") < "z"),
+        "label < z 应覆盖当前数据集全部节点"
+    );
 
     cleanup(&path);
 }
@@ -147,11 +242,21 @@ fn COV5_04_where_int_float_cross() {
 
     // Int vs Float
     let r = db.tql(r#"MATCH (a) WHERE a.rank > 2.5 RETURN a"#).unwrap();
-    assert!(!r.is_empty());
+    assert_match_rows(&r, "a", 5);
+    assert!(
+        r.iter()
+            .all(|row| payload_f64(node(row, "a"), "rank") > 2.5),
+        "rank > 2.5 不能返回越界节点"
+    );
 
     // Float vs Int (通过 score 字段和整数字面量)
     let r = db.tql(r#"MATCH (a) WHERE a.score > 5 RETURN a"#).unwrap();
-    assert!(!r.is_empty());
+    assert_match_rows(&r, "a", 4);
+    assert!(
+        r.iter()
+            .all(|row| payload_f64(node(row, "a"), "score") > 5.0),
+        "score > 5 不能返回越界节点"
+    );
 
     cleanup(&path);
 }
@@ -185,19 +290,38 @@ fn COV5_06_order_by_types() {
     let r = db
         .tql(r#"FIND {active: true} RETURN * ORDER BY _.rank DESC"#)
         .unwrap();
-    assert!(!r.is_empty());
+    assert_find_rows(&r, 4);
+    let ranks: Vec<_> = r
+        .iter()
+        .map(|row| payload_f64(node(row, "_"), "rank"))
+        .collect();
+    assert_eq!(ranks, vec![6.0, 4.0, 2.0, 0.0]);
 
     // ORDER BY Float field
     let r = db
         .tql(r#"FIND {active: false} RETURN * ORDER BY _.score ASC"#)
         .unwrap();
-    assert!(!r.is_empty());
+    assert_find_rows(&r, 4);
+    let scores: Vec<_> = r
+        .iter()
+        .map(|row| payload_f64(node(row, "_"), "score"))
+        .collect();
+    assert_eq!(scores, vec![1.5, 4.5, 7.5, 10.5]);
 
     // ORDER BY String field
     let r = db
         .tql(r#"FIND {active: true} RETURN * ORDER BY _.label ASC"#)
         .unwrap();
-    assert!(!r.is_empty());
+    assert_find_rows(&r, 4);
+    assert!(
+        r.iter().all(|row| payload_bool(node(row, "_"), "active")),
+        "ORDER BY 不能破坏 active=true 过滤条件"
+    );
+    let labels: Vec<_> = r
+        .iter()
+        .map(|row| payload_str(node(row, "_"), "label"))
+        .collect();
+    assert_eq!(labels, vec!["high", "high", "low", "low"]);
 
     cleanup(&path);
 }
@@ -211,7 +335,16 @@ fn COV5_07_order_by_id() {
     let r = db
         .tql(r#"FIND {active: true} RETURN * ORDER BY _.id DESC"#)
         .unwrap();
-    assert!(r.len() >= 2);
+    assert_find_rows(&r, 4);
+    assert!(
+        r.iter().all(|row| payload_bool(node(row, "_"), "active")),
+        "ORDER BY _.id 不能破坏 active=true 过滤条件"
+    );
+    let ids: Vec<_> = r.iter().map(|row| node(row, "_").id).collect();
+    assert!(
+        ids.windows(2).all(|pair| pair[0] >= pair[1]),
+        "ORDER BY _.id DESC 必须按 id 降序返回"
+    );
 
     cleanup(&path);
 }
@@ -225,7 +358,22 @@ fn COV5_08_find_where_order_limit() {
     let r = db
         .tql(r#"FIND {active: true} WHERE {rank: {$gte: 2}} RETURN * ORDER BY _.rank DESC LIMIT 2"#)
         .unwrap();
-    assert!(r.len() <= 2);
+    assert_find_rows(&r, 2);
+    let ranks: Vec<_> = r
+        .iter()
+        .map(|row| {
+            let n = node(row, "_");
+            assert!(payload_bool(n, "active"), "组合查询不能返回 inactive 节点");
+            let rank = payload_f64(n, "rank");
+            assert!(rank >= 2.0, "组合查询不能返回 rank < 2 的节点");
+            rank
+        })
+        .collect();
+    assert_eq!(ranks.len(), 2, "组合查询 LIMIT 2 必须返回两条");
+    assert!(
+        ranks.windows(2).all(|pair| pair[0] >= pair[1]),
+        "组合查询返回结果必须保持 rank 降序"
+    );
 
     cleanup(&path);
 }
@@ -240,23 +388,23 @@ fn COV5_09_find_and_or_not() {
     let path = tmp_db("find_logic");
     let db = seed_typed_graph(&path);
 
-    // FIND + AND
+    // FIND + AND 当前语法会把空 FIND 文档安全拒绝
     let r = db.tql(r#"FIND {} WHERE _.rank > 2 AND _.rank < 6 RETURN *"#);
-    if let Ok(res) = r {
-        eprintln!("  FIND AND: {} 条", res.len());
-    }
+    let err = r.expect_err("空 FIND 文档应被安全拒绝");
+    assert!(!err.to_string().is_empty(), "安全拒绝必须返回可诊断错误");
+    assert_eq!(db.node_count(), 8, "解析失败不能污染数据库");
 
-    // FIND + OR
+    // FIND + OR 当前语法会把空 FIND 文档安全拒绝
     let r = db.tql(r#"FIND {} WHERE _.rank < 2 OR _.rank > 5 RETURN *"#);
-    if let Ok(res) = r {
-        eprintln!("  FIND OR: {} 条", res.len());
-    }
+    let err = r.expect_err("空 FIND 文档应被安全拒绝");
+    assert!(!err.to_string().is_empty(), "安全拒绝必须返回可诊断错误");
+    assert_eq!(db.node_count(), 8, "解析失败不能污染数据库");
 
-    // FIND + NOT
+    // FIND + NOT 当前语法会把空 FIND 文档安全拒绝
     let r = db.tql(r#"FIND {} WHERE NOT _.active == true RETURN *"#);
-    if let Ok(res) = r {
-        eprintln!("  FIND NOT: {} 条", res.len());
-    }
+    let err = r.expect_err("空 FIND 文档应被安全拒绝");
+    assert!(!err.to_string().is_empty(), "安全拒绝必须返回可诊断错误");
+    assert_eq!(db.node_count(), 8, "解析失败不能污染数据库");
 
     cleanup(&path);
 }
@@ -309,11 +457,12 @@ fn COV5_10_f16_full_lifecycle() {
             0.0,
         )
         .unwrap();
-    assert!(!hits.is_empty());
-    eprintln!(
-        "  f16 search: {} hits, top score={}",
-        hits.len(),
-        hits[0].score
+    assert_eq!(hits.len(), 2, "f16 搜索应返回两个半精度节点");
+    assert_eq!(hits[0].id, id1, "完全相同的 f16 向量应排第一");
+    assert!(
+        hits.iter()
+            .all(|hit| hit.payload.get("type") == Some(&serde_json::json!("half"))),
+        "f16 搜索结果必须来自半精度测试节点"
     );
 
     // flush + reopen (触发 vec_pool mmap 加载路径)
@@ -353,7 +502,11 @@ fn COV5_11_flush_reopen_mmap() {
     assert_eq!(db.node_count(), 50);
 
     let hits = db.search(&[25.0, 0.0, 0.0, 0.0], 5, 0, 0.0).unwrap();
-    assert!(!hits.is_empty());
+    assert_eq!(hits.len(), 5, "mmap 重新加载后搜索应遵守 top_k=5");
+    assert!(
+        hits.iter().all(|hit| hit.payload.get("idx").is_some()),
+        "mmap 搜索结果必须保留原始 payload"
+    );
 
     cleanup(&path);
 }
@@ -416,16 +569,20 @@ fn COV5_14_tql_syntax_errors() {
     let db = Database::<f32>::open(&path, DIM).unwrap();
 
     // 不完整 SEARCH
-    assert!(db.tql("SEARCH VECTOR").is_err());
+    assert_tql_err(db.tql("SEARCH VECTOR"), "Expected");
+    assert_eq!(db.node_count(), 0, "语法错误不能污染空数据库");
 
     // MATCH 缺少括号
-    assert!(db.tql("MATCH a RETURN a").is_err());
+    assert_tql_err(db.tql("MATCH a RETURN a"), "Expected");
+    assert_eq!(db.node_count(), 0, "语法错误不能污染空数据库");
 
     // 空查询
-    assert!(db.tql("").is_err());
+    assert_tql_err(db.tql(""), "Expected");
+    assert_eq!(db.node_count(), 0, "语法错误不能污染空数据库");
 
     // 无效操作符
-    assert!(db.tql(r#"FIND {x: {$invalid: 1}} RETURN *"#).is_err());
+    assert_tql_err(db.tql(r#"FIND {x: {$invalid: 1}} RETURN *"#), "invalid");
+    assert_eq!(db.node_count(), 0, "语法错误不能污染空数据库");
 
     cleanup(&path);
 }
@@ -440,7 +597,21 @@ fn COV5_15_tql_distinct_edge() {
     let r = db
         .tql(r#"MATCH (a)-[:seq]->(b) RETURN DISTINCT a.label"#)
         .unwrap();
-    eprintln!("  DISTINCT a.label: {} 条", r.len());
+    assert_eq!(r.len(), 2, "DISTINCT a.label 应只返回 low/high 两类标签");
+    let mut labels: Vec<_> = r
+        .iter()
+        .map(|row| {
+            row.get("a")
+                .and_then(|node| node.payload.get("label"))
+                .cloned()
+                .expect("DISTINCT a.label 每行必须保留 a.label")
+        })
+        .collect();
+    labels.sort_by_key(|v| v.as_str().unwrap_or_default().to_string());
+    assert_eq!(
+        labels,
+        vec![serde_json::json!("high"), serde_json::json!("low")]
+    );
 
     cleanup(&path);
 }
@@ -458,7 +629,18 @@ fn COV5_16_search_complex_where() {
     let r = db
         .tql(r#"SEARCH VECTOR [3.0, 0.0, 0.0, 0.0] TOP 5 WHERE {$and: [{active: true}, {rank: {$gte: 2}}]} RETURN *"#)
         .unwrap();
-    eprintln!("  SEARCH+complex WHERE: {} 条", r.len());
+    assert!(r.len() <= 5, "SEARCH TOP 5 必须限制返回数量");
+    assert!(
+        !r.is_empty(),
+        "当前数据集应至少命中一个 active=true 且 rank>=2 的节点"
+    );
+    assert!(
+        r.iter().all(|row| {
+            let n = node(row, "_");
+            payload_bool(n, "active") && payload_f64(n, "rank") >= 2.0
+        }),
+        "SEARCH 复杂 WHERE 不能返回不满足条件的节点"
+    );
 
     cleanup(&path);
 }
@@ -472,13 +654,36 @@ fn COV5_17_match_where_on_b() {
     let r = db
         .tql(r#"MATCH (a)-[:seq]->(b) WHERE b.rank > 5 RETURN a, b"#)
         .unwrap();
-    eprintln!("  WHERE on b: {} 条", r.len());
+    assert!(
+        r.len() <= 2,
+        "b.rank > 5 返回数量不能超过当前数据集可满足路径上限"
+    );
+    assert!(
+        r.iter().all(|row| {
+            row.contains_key("a")
+                && row.contains_key("b")
+                && payload_f64(node(row, "b"), "rank") > 5.0
+        }),
+        "WHERE on b 不能返回 b.rank 不满足条件的路径"
+    );
 
     // WHERE on both a and b
     let r = db
         .tql(r#"MATCH (a)-[:seq]->(b) WHERE a.active == true AND b.score > 5.0 RETURN a, b"#)
         .unwrap();
-    eprintln!("  WHERE on a+b: {} 条", r.len());
+    assert!(
+        r.len() <= 3,
+        "a.active 与 b.score 组合谓词返回数量不能超过当前数据集可满足路径上限"
+    );
+    assert!(
+        r.iter().all(|row| {
+            row.contains_key("a")
+                && row.contains_key("b")
+                && payload_bool(node(row, "a"), "active")
+                && payload_f64(node(row, "b"), "score") > 5.0
+        }),
+        "双变量 WHERE 不能返回不满足组合谓词的路径"
+    );
 
     cleanup(&path);
 }
@@ -492,7 +697,15 @@ fn COV5_18_match_order_by() {
     let r = db
         .tql(r#"MATCH (a)-[:seq]->(b) RETURN a, b ORDER BY a.score DESC, b.rank ASC"#)
         .unwrap();
-    assert!(!r.is_empty());
+    assert_eq!(r.len(), 7, "seq 链应返回 7 条有向边");
+    let scores: Vec<_> = r
+        .iter()
+        .map(|row| payload_f64(node(row, "a"), "score"))
+        .collect();
+    assert!(
+        scores.windows(2).all(|pair| pair[0] >= pair[1]),
+        "MATCH ORDER BY a.score DESC 必须按降序返回"
+    );
 
     cleanup(&path);
 }
@@ -510,8 +723,14 @@ fn COV5_19_tql_mut_complex() {
     assert!(r.affected >= 1);
 
     // 验证
-    let results = db.tql(r#"FIND {label: "updated"} RETURN *"#);
-    eprintln!("  SET result: {:?}", results);
+    let results = db.tql(r#"FIND {label: "updated"} RETURN *"#).unwrap();
+    assert_find_rows(&results, 1);
+    let updated = node(&results[0], "_");
+    assert_eq!(payload_f64(updated, "rank"), 0.0);
+    assert_eq!(
+        updated.payload.get("label"),
+        Some(&serde_json::json!("updated"))
+    );
 
     cleanup(&path);
 }

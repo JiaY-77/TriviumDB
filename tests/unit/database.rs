@@ -51,7 +51,9 @@ fn open_with_sync() {
 #[test]
 fn insert_和_get() {
     let mut db = open_db("insert_get");
-    let id = db.insert(&[1.0, 2.0, 3.0], json!({"name": "test"})).unwrap();
+    let id = db
+        .insert(&[1.0, 2.0, 3.0], json!({"name": "test"}))
+        .unwrap();
     assert!(db.contains(id));
     assert_eq!(db.node_count(), 1);
 
@@ -167,8 +169,10 @@ fn set_memory_limit_和_estimated_memory() {
 fn create_index_和_drop_index() {
     let mut db = open_db("prop_idx");
     db.create_index("role");
-    db.insert(&[1.0, 0.0, 0.0], json!({"role": "admin"})).unwrap();
-    db.insert(&[0.0, 1.0, 0.0], json!({"role": "user"})).unwrap();
+    db.insert(&[1.0, 0.0, 0.0], json!({"role": "admin"}))
+        .unwrap();
+    db.insert(&[0.0, 1.0, 0.0], json!({"role": "user"}))
+        .unwrap();
 
     // 通过 TQL 验证索引加速查询可用
     let result = db.tql("FIND {role: \"admin\"} RETURN *");
@@ -265,7 +269,8 @@ fn dim_和_all_node_ids() {
 #[test]
 fn tql_find_读查询() {
     let mut db = open_db("tql_read");
-    db.insert(&[1.0, 0.0, 0.0], json!({"type": "person"})).unwrap();
+    db.insert(&[1.0, 0.0, 0.0], json!({"type": "person"}))
+        .unwrap();
     let result = db.tql("FIND {type: \"person\"} RETURN *");
     assert!(result.is_ok());
 }
@@ -348,7 +353,8 @@ fn tx_delete() {
 #[test]
 fn tx_update_payload_和_vector() {
     let mut db = open_db("tx_update");
-    db.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"v": 1})).unwrap();
+    db.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"v": 1}))
+        .unwrap();
     {
         let mut tx = db.begin_tx();
         tx.update_payload(1, json!({"v": 2}));
@@ -525,29 +531,81 @@ fn tql_mut_读查询降级() {
 #[test]
 fn search_hybrid_text_only() {
     let mut db = open_db("hybrid_text");
-    let id = db.insert(&[1.0, 0.0, 0.0], json!({})).unwrap();
-    db.index_text(id, "hello world rust").unwrap();
+    let rust_id = db
+        .insert(&[1.0, 0.0, 0.0], json!({"name": "rust"}))
+        .unwrap();
+    let python_id = db
+        .insert(&[0.0, 1.0, 0.0], json!({"name": "python"}))
+        .unwrap();
+    db.index_text(rust_id, "hello world rust").unwrap();
+    db.index_text(python_id, "hello world python").unwrap();
     db.build_text_index().unwrap();
 
     let config = triviumdb::database::SearchConfig {
         top_k: 5,
+        expand_depth: 0,
+        min_score: -1.0,
         enable_advanced_pipeline: true,
+        enable_text_hybrid_search: true,
         ..Default::default()
     };
-    // text-only search should not panic
-    let results = db.search_hybrid(Some("rust"), None, &config);
-    assert!(results.is_ok());
+    let results = db.search_hybrid(Some("rust"), None, &config).unwrap();
+    assert_eq!(results.len(), 1, "文本召回应只命中 rust 节点");
+    assert_eq!(results[0].id, rust_id, "文本召回应返回被索引的 rust 节点");
+    assert_eq!(
+        results[0]
+            .payload
+            .get("name")
+            .and_then(|value| value.as_str()),
+        Some("rust"),
+        "文本召回结果必须携带原始 payload"
+    );
 }
 
 #[test]
 fn search_hybrid_with_context() {
     let mut db = open_db("hybrid_ctx");
-    db.insert(&[1.0, 0.0, 0.0], json!({"name": "a"})).unwrap();
+    let id = db.insert(&[1.0, 0.0, 0.0], json!({"name": "a"})).unwrap();
 
-    let config = triviumdb::database::SearchConfig::default();
-    let (results, ctx) = db.search_hybrid_with_context(None, Some(&[1.0, 0.0, 0.0]), &config).unwrap();
-    assert!(!results.is_empty());
-    assert!(!ctx.abort);
+    let config = triviumdb::database::SearchConfig {
+        top_k: 1,
+        expand_depth: 0,
+        min_score: -1.0,
+        ..Default::default()
+    };
+    let (results, ctx) = db
+        .search_hybrid_with_context(None, Some(&[1.0, 0.0, 0.0]), &config)
+        .unwrap();
+    assert_eq!(results.len(), 1, "Context 检索应返回完整 Top1");
+    assert_eq!(results[0].id, id, "Context 检索应命中查询向量对应节点");
+    assert_eq!(
+        results[0]
+            .payload
+            .get("name")
+            .and_then(|value| value.as_str()),
+        Some("a"),
+        "Context 检索结果必须携带原始 payload"
+    );
+    assert!(!ctx.abort, "默认 Hook 不能提前终止检索");
+    let stage_names: std::collections::HashSet<_> = ctx
+        .stage_timings
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    for expected in [
+        "hook_pre_search",
+        "hook_custom_recall",
+        "hook_post_recall",
+        "hook_pre_graph_expand",
+        "graph_expand",
+        "hook_rerank",
+        "hook_post_search",
+    ] {
+        assert!(
+            stage_names.contains(expected),
+            "Context 必须记录阶段耗时: {expected}"
+        );
+    }
 }
 
 #[test]
@@ -573,4 +631,3 @@ fn index_keyword_和_text() {
     db.index_text(id, "triviumdb is a graph database").unwrap();
     db.build_text_index().unwrap();
 }
-

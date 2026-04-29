@@ -1,4 +1,3 @@
-
 //! 从 src/cognitive.rs 分离的内联测试 + 补齐辅助函数测试
 //!
 //! 覆盖: dot, l2_norm, vec_sub, vec_add, vec_scale, mat_vec_mul,
@@ -160,11 +159,7 @@ fn dpp_k大于n() {
 
 #[test]
 fn dpp_quality_weight为零_纯多样性() {
-    let vecs = vec![
-        vec![1.0, 0.0],
-        vec![0.99, 0.1],
-        vec![0.0, 1.0],
-    ];
+    let vecs = vec![vec![1.0, 0.0], vec![0.99, 0.1], vec![0.0, 1.0]];
     let scores = vec![1.0, 0.9, 0.1]; // 0.1 分很低但方向独特
 
     let selected = dpp_greedy(&vecs, &scores, 2, 0.0);
@@ -193,7 +188,7 @@ fn nmf_重建误差应下降() {
     let (w, h) = nmf_multiplicative_update(&v, 2, 3, 2, 200, 1e-4);
 
     // 重建: V_approx = W @ H
-    let mut v_approx = vec![0.0f32; 6];
+    let mut v_approx = [0.0f32; 6];
     for i in 0..2 {
         for j in 0..3 {
             for k in 0..2 {
@@ -203,7 +198,11 @@ fn nmf_重建误差应下降() {
     }
 
     // 计算重建误差（Frobenius 范数）
-    let err: f32 = v.iter().zip(v_approx.iter()).map(|(a, b)| (a - b).powi(2)).sum();
+    let err: f32 = v
+        .iter()
+        .zip(v_approx.iter())
+        .map(|(a, b)| (a - b).powi(2))
+        .sum();
     assert!(err < 0.5, "NMF 重建误差应较小，实际 {}", err);
 }
 

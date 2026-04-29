@@ -5,14 +5,15 @@
 //! 强电磁脉冲 (EMP) 导致的突发性多比特错误 (burst error)。
 
 use triviumdb::Database;
-use std::io::Write;
 
 const DIM: usize = 4;
 
 fn tmp_db(name: &str) -> String {
     let dir = std::env::temp_dir().join("triviumdb_test");
     std::fs::create_dir_all(&dir).ok();
-    dir.join(format!("emi_{}", name)).to_string_lossy().to_string()
+    dir.join(format!("emi_{}", name))
+        .to_string_lossy()
+        .to_string()
 }
 
 fn cleanup(path: &str) {
@@ -33,6 +34,24 @@ fn seed_db(path: &str, count: usize) {
     db.flush().unwrap();
 }
 
+fn assert_payloads_from_seed(db: &Database<f32>, max_count: usize) {
+    for id in db.all_node_ids() {
+        let payload = db.get_payload(id).expect("恢复节点必须有 payload");
+        let idx = payload
+            .get("idx")
+            .and_then(|v| v.as_u64())
+            .expect("恢复节点必须携带原始 idx");
+        assert!(
+            idx < max_count as u64,
+            "恢复不能产生越界脏 payload: {payload}"
+        );
+    }
+}
+
+fn assert_reject_has_diagnostic<E: std::fmt::Display>(err: E) {
+    assert!(!err.to_string().is_empty(), "安全拒绝必须返回可诊断错误");
+}
+
 // ════════════════════════════════════════════════════════════════
 //  1. 连续 8 字节全翻转 — 突发错误 (Burst Error)
 // ════════════════════════════════════════════════════════════════
@@ -49,14 +68,14 @@ fn EMI_01_连续8字节全翻转_burst_error() {
         let len = data.len();
         // 在三个区域各翻转连续 8 字节
         let targets = [
-            16.min(len.saturating_sub(8)),       // header 区域（跳过 magic）
-            len / 3,                              // payload 区域
-            len * 2 / 3,                          // 文件后半部分
+            16.min(len.saturating_sub(8)), // header 区域（跳过 magic）
+            len / 3,                       // payload 区域
+            len * 2 / 3,                   // 文件后半部分
         ];
         for &off in &targets {
             if off + 8 <= len {
-                for i in off..off + 8 {
-                    data[i] = !data[i]; // 全部取反
+                for byte in data.iter_mut().skip(off).take(8) {
+                    *byte = !*byte; // 全部取反
                 }
             }
         }
@@ -69,12 +88,12 @@ fn EMI_01_连续8字节全翻转_burst_error() {
 
     match result.unwrap() {
         Ok(db) => {
-            assert!(db.node_count() <= 30);
-            // 搜索不应崩溃
-            let _ = db.search(&[1.0, 0.0, 0.0, 0.0], 5, 0, 0.0);
-            eprintln!("  ✅ Burst error: 降级加载 {} 个节点", db.node_count());
+            assert!(db.node_count() <= 30, "Burst error 降级不能产生额外节点");
+            assert_payloads_from_seed(&db, 30);
+            let hits = db.search(&[1.0, 0.0, 0.0, 0.0], 5, 0, 0.0).unwrap();
+            assert!(hits.len() <= db.node_count(), "搜索结果不能超过存活节点数");
         }
-        Err(e) => eprintln!("  ✅ Burst error: 正确拒绝: {}", e),
+        Err(e) => assert_reject_has_diagnostic(e),
     }
 
     cleanup(&path);
@@ -111,19 +130,15 @@ fn EMI_02_向量数据区10_percent翻转_搜索降级不崩溃() {
     assert!(result.is_ok(), "大面积比特翻转不应导致 panic");
 
     if let Ok(Ok(db)) = result {
-        // 搜索不应 panic（结果可能不准确）
-        let search_result = std::panic::catch_unwind(
-            std::panic::AssertUnwindSafe(|| db.search(&[1.0, 0.0, 0.0, 0.0], 10, 0, 0.0)),
-        );
-        assert!(
-            search_result.is_ok(),
-            "大面积损坏后搜索不应 panic"
-        );
-        eprintln!(
-            "  ✅ 10% 翻转: {} 个节点存活，搜索 {:?}",
-            db.node_count(),
-            search_result.unwrap().map(|h| h.len())
-        );
+        assert!(db.node_count() <= 50, "大面积翻转降级不能产生额外节点");
+        assert_payloads_from_seed(&db, 50);
+        let search_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            db.search(&[1.0, 0.0, 0.0, 0.0], 10, 0, 0.0)
+        }));
+        assert!(search_result.is_ok(), "大面积损坏后搜索不应 panic");
+        let hits = search_result.unwrap().unwrap();
+        assert!(hits.len() <= 10, "搜索必须遵守 top_k 上限");
+        assert!(hits.len() <= db.node_count(), "搜索结果不能超过存活节点数");
     }
 
     cleanup(&path);
@@ -144,20 +159,14 @@ fn EMI_03_WAL单比特翻转_CRC检测率() {
     {
         let mut db = Database::<f32>::open(&path, DIM).unwrap();
         for i in 0..10u32 {
-            db.insert(
-                &[i as f32, 0.0, 0.0, 0.0],
-                serde_json::json!({"idx": i}),
-            )
-            .unwrap();
+            db.insert(&[i as f32, 0.0, 0.0, 0.0], serde_json::json!({"idx": i}))
+                .unwrap();
         }
         // flush 确保 .tdb 存在，WAL 里还有数据
         db.flush().unwrap();
         for i in 10..20u32 {
-            db.insert(
-                &[i as f32, 0.0, 0.0, 0.0],
-                serde_json::json!({"idx": i}),
-            )
-            .unwrap();
+            db.insert(&[i as f32, 0.0, 0.0, 0.0], serde_json::json!({"idx": i}))
+                .unwrap();
         }
     }
 
@@ -249,11 +258,18 @@ fn EMI_04_TDB全零覆写_安全拒绝() {
 
     let result = std::panic::catch_unwind(|| Database::<f32>::open(&path, DIM));
     assert!(result.is_ok(), "全零 .tdb 不应 panic");
-    assert!(
-        result.unwrap().is_err(),
-        "全零 .tdb 应被拒绝加载"
+    let opened = result.unwrap();
+    assert!(opened.is_err(), "全零 .tdb 应被拒绝加载");
+    let err = opened.err().unwrap();
+    assert_reject_has_diagnostic(err);
+
+    cleanup(&path);
+    let clean = Database::<f32>::open(&path, DIM).unwrap();
+    assert_eq!(
+        clean.node_count(),
+        0,
+        "拒绝全零库后同路径重建不能携带脏状态"
     );
-    eprintln!("  ✅ 全零 .tdb: 正确拒绝");
 
     cleanup(&path);
 }

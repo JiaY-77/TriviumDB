@@ -21,7 +21,9 @@ use triviumdb::Database;
 fn tmp_db(name: &str) -> String {
     let dir = std::env::temp_dir().join("triviumdb_test");
     std::fs::create_dir_all(&dir).ok();
-    dir.join(format!("vtype_{}", name)).to_string_lossy().to_string()
+    dir.join(format!("vtype_{}", name))
+        .to_string_lossy()
+        .to_string()
 }
 
 fn cleanup(path: &str) {
@@ -396,8 +398,7 @@ fn U64_WAL恢复() {
     {
         let mut db = Database::<u64>::open(&path, U64_DIM).unwrap();
         for i in 0..8u64 {
-            db.insert(&[i, !i], serde_json::json!({"idx": i}))
-                .unwrap();
+            db.insert(&[i, !i], serde_json::json!({"idx": i})).unwrap();
         }
     }
 
@@ -549,7 +550,9 @@ fn U64_大批量插入搜索_50节点() {
         "u64 大批量 flush 后应保留全部 50 个节点"
     );
 
-    let results = db.search(&[25u64, 25u64.wrapping_mul(0x517CC1B727220A95)], 10, 0, 0.0).unwrap();
+    let results = db
+        .search(&[25u64, 25u64.wrapping_mul(0x517CC1B727220A95)], 10, 0, 0.0)
+        .unwrap();
     assert_eq!(results.len(), 10, "u64 top_k=10 应返回 10 条结果");
 
     cleanup(&path);

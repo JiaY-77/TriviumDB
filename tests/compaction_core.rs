@@ -7,8 +7,93 @@
 //! - `vector.rs`: 余弦相似度边界（零向量、尾部标量路径）、u64 汉明相似度、f32 SIMD 分发
 
 use triviumdb::database::{Config, Database, SearchConfig, StorageMode};
+use triviumdb::node::NodeId;
 
 const DIM: usize = 4;
+
+#[derive(Clone)]
+struct ExpectedNode {
+    id: NodeId,
+    idx: u32,
+    vector: [f32; DIM],
+}
+
+fn vector_for_idx(idx: u32) -> [f32; DIM] {
+    [idx as f32 + 1.0, idx as f32 + 2.0, idx as f32 + 3.0, 1.0]
+}
+
+fn seed_committed_graph(db: &mut Database<f32>, count: u32) -> Vec<ExpectedNode> {
+    let start = db.node_count() as u32;
+    let mut expected = Vec::new();
+    for offset in 0..count {
+        let idx = start + offset;
+        let vector = vector_for_idx(idx);
+        let id = db
+            .insert(
+                &vector,
+                serde_json::json!({"idx": idx, "kind": "committed"}),
+            )
+            .unwrap();
+        expected.push(ExpectedNode { id, idx, vector });
+    }
+    for pair in expected.windows(2) {
+        db.link(pair[0].id, pair[1].id, "next", 1.0).unwrap();
+    }
+    expected
+}
+
+fn link_expected_batches(db: &mut Database<f32>, left: &[ExpectedNode], right: &[ExpectedNode]) {
+    if let (Some(prev), Some(next)) = (left.last(), right.first()) {
+        db.link(prev.id, next.id, "next", 1.0).unwrap();
+    }
+}
+
+fn assert_committed_graph(db: &Database<f32>, expected: &[ExpectedNode]) {
+    assert_eq!(
+        db.node_count(),
+        expected.len(),
+        "恢复后不能丢失或额外生成已提交节点"
+    );
+    for item in expected {
+        let node = db.get(item.id).expect("已提交节点必须能按 ID 读取");
+        assert_eq!(node.vector, item.vector, "节点向量必须完整恢复");
+        assert_eq!(
+            node.payload.get("idx").and_then(|value| value.as_u64()),
+            Some(item.idx as u64),
+            "节点 payload.idx 必须完整恢复"
+        );
+        assert_eq!(
+            node.payload.get("kind").and_then(|value| value.as_str()),
+            Some("committed"),
+            "节点 payload.kind 必须完整恢复"
+        );
+    }
+    for pair in expected.windows(2) {
+        let edges = db.get_edges(pair[0].id);
+        assert!(
+            edges.iter().any(|edge| {
+                edge.target_id == pair[1].id && edge.label == "next" && edge.weight == 1.0
+            }),
+            "已提交边 {} -> {} 必须完整恢复",
+            pair[0].id,
+            pair[1].id
+        );
+    }
+    for item in expected {
+        let hits = db.search(&item.vector, 1, 0, 0.0).unwrap();
+        assert_eq!(hits.len(), 1, "按原始向量搜索必须返回 Top1");
+        assert_eq!(hits[0].id, item.id, "按原始向量搜索必须命中原节点");
+    }
+}
+
+fn corrupt_flush_marker_size(path: &str) {
+    let marker_path = format!("{}.flush_ok", path);
+    let mut marker = std::fs::read(&marker_path).expect("必须存在 flush_ok 标记");
+    assert!(marker.len() >= 16, "flush_ok 标记必须包含 tdb/vec 大小");
+    let stored_vec = u64::from_le_bytes(marker[8..16].try_into().unwrap());
+    marker[8..16].copy_from_slice(&(stored_vec + 1).to_le_bytes());
+    std::fs::write(marker_path, marker).unwrap();
+}
 
 fn tmp_db(name: &str) -> String {
     let dir = std::env::temp_dir().join("triviumdb_test");
@@ -130,6 +215,159 @@ fn COV_04_triple_compact() {
     drop(db);
     let db = Database::<f32>::open(&path, DIM).unwrap();
     assert_eq!(db.node_count(), 20, "重新打开后数据完好");
+
+    cleanup(&path);
+}
+
+/// compact 写 .vec 后、.tdb 仍旧时断电：必须用旧快照加 WAL 恢复全部已提交数据
+#[test]
+fn COV_04B_compact中断_vec已扩大_tdb未更新_已提交数据不丢() {
+    let path = tmp_db("compact_crash_vec_appended");
+
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let expected = seed_committed_graph(&mut db, 12);
+    db.flush().unwrap();
+
+    let more = seed_committed_graph(&mut db, 8);
+    link_expected_batches(&mut db, &expected, &more);
+    let mut all_expected = expected.clone();
+    all_expected.extend(more);
+
+    let old_tdb = std::fs::read(&path).unwrap();
+    let old_flush_ok = std::fs::read(format!("{}.flush_ok", path)).unwrap();
+    let wal_before = std::fs::read(format!("{}.wal", path)).unwrap();
+    db.flush().unwrap();
+    let new_vec = std::fs::read(format!("{}.vec", path)).unwrap();
+    drop(db);
+
+    std::fs::write(&path, old_tdb).unwrap();
+    std::fs::write(format!("{}.vec", path), new_vec).unwrap();
+    std::fs::write(format!("{}.flush_ok", path), old_flush_ok).unwrap();
+    std::fs::write(format!("{}.wal", path), wal_before).unwrap();
+
+    let db = Database::<f32>::open(&path, DIM).unwrap();
+    assert_committed_graph(&db, &all_expected);
+
+    cleanup(&path);
+}
+
+/// compact 写 .tdb 后、.flush_ok 未提交时断电：必须降级并通过 WAL 找回全部已提交数据
+#[test]
+fn COV_04C_compact中断_tdb已更新_flush_ok未更新_已提交数据不丢() {
+    let path = tmp_db("compact_crash_tdb_renamed");
+
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let expected = seed_committed_graph(&mut db, 10);
+    db.flush().unwrap();
+
+    let more = seed_committed_graph(&mut db, 6);
+    link_expected_batches(&mut db, &expected, &more);
+    let mut all_expected = expected.clone();
+    all_expected.extend(more);
+
+    let old_flush_ok = std::fs::read(format!("{}.flush_ok", path)).unwrap();
+    let wal_before = std::fs::read(format!("{}.wal", path)).unwrap();
+    db.flush().unwrap();
+    drop(db);
+
+    std::fs::write(format!("{}.flush_ok", path), old_flush_ok).unwrap();
+    std::fs::write(format!("{}.wal", path), wal_before).unwrap();
+
+    let db = Database::<f32>::open(&path, DIM).unwrap();
+    assert_committed_graph(&db, &all_expected);
+
+    cleanup(&path);
+}
+
+/// compact 写出 .flush_ok.tmp 但正式标记未提交时断电：残留临时标记不能导致已提交数据丢失
+#[test]
+fn COV_04D_compact中断_flush_ok_tmp残留_已提交数据不丢() {
+    let path = tmp_db("compact_crash_flush_marker_tmp");
+
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let expected = seed_committed_graph(&mut db, 14);
+    db.flush().unwrap();
+    db.update_payload(
+        expected[0].id,
+        serde_json::json!({"idx": expected[0].idx, "kind": "committed"}),
+    )
+    .unwrap();
+    db.flush().unwrap();
+    drop(db);
+
+    std::fs::write(format!("{}.flush_ok.tmp", path), b"partial marker").unwrap();
+
+    let db = Database::<f32>::open(&path, DIM).unwrap();
+    assert_committed_graph(&db, &expected);
+
+    cleanup(&path);
+}
+
+/// compact 成功写快照但 WAL 清理前断电：重复 WAL 回放必须幂等，不能丢失或复制已提交数据
+#[test]
+fn COV_04E_compact成功_wal清理前断电_已提交数据不丢() {
+    let path = tmp_db("compact_crash_before_wal_clear");
+
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let expected = seed_committed_graph(&mut db, 16);
+    db.flush().unwrap();
+
+    let more = seed_committed_graph(&mut db, 4);
+    link_expected_batches(&mut db, &expected, &more);
+    let mut all_expected = expected.clone();
+    all_expected.extend(more);
+
+    let wal_before = std::fs::read(format!("{}.wal", path)).unwrap();
+    db.flush().unwrap();
+    drop(db);
+    std::fs::write(format!("{}.wal", path), wal_before).unwrap();
+
+    let db = Database::<f32>::open(&path, DIM).unwrap();
+    assert_committed_graph(&db, &all_expected);
+
+    cleanup(&path);
+}
+
+/// compact 成功且 WAL 已清空后断电：快照本身必须足够完整地恢复全部已提交数据
+#[test]
+fn COV_04F_compact成功_wal已清空_快照完整恢复() {
+    let path = tmp_db("compact_crash_after_wal_clear");
+
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let expected = seed_committed_graph(&mut db, 18);
+    db.flush().unwrap();
+    drop(db);
+
+    std::fs::write(format!("{}.wal", path), b"").unwrap();
+
+    let db = Database::<f32>::open(&path, DIM).unwrap();
+    assert_committed_graph(&db, &expected);
+
+    cleanup(&path);
+}
+
+/// compact 提交点内容被撕裂时：不能信任不匹配的 .flush_ok，必须通过 WAL 恢复已提交增量
+#[test]
+fn COV_04G_compact中断_flush_ok大小不匹配_已提交数据不丢() {
+    let path = tmp_db("compact_crash_flush_marker_mismatch");
+
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let expected = seed_committed_graph(&mut db, 9);
+    db.flush().unwrap();
+
+    let more = seed_committed_graph(&mut db, 5);
+    link_expected_batches(&mut db, &expected, &more);
+    let mut all_expected = expected.clone();
+    all_expected.extend(more);
+
+    let wal_before = std::fs::read(format!("{}.wal", path)).unwrap();
+    db.flush().unwrap();
+    drop(db);
+    corrupt_flush_marker_size(&path);
+    std::fs::write(format!("{}.wal", path), wal_before).unwrap();
+
+    let db = Database::<f32>::open(&path, DIM).unwrap();
+    assert_committed_graph(&db, &all_expected);
 
     cleanup(&path);
 }

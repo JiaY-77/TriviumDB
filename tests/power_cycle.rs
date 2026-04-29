@@ -11,7 +11,9 @@ const DIM: usize = 4;
 fn tmp_db(name: &str) -> String {
     let dir = std::env::temp_dir().join("triviumdb_test");
     std::fs::create_dir_all(&dir).ok();
-    dir.join(format!("pwr_{}", name)).to_string_lossy().to_string()
+    dir.join(format!("pwr_{}", name))
+        .to_string_lossy()
+        .to_string()
 }
 
 fn cleanup(path: &str) {
@@ -49,7 +51,9 @@ fn PWR_01_快速断电循环_100轮() {
         assert!(
             count >= max_seen.saturating_sub(1), // 允许丢失 WAL 中未 flush 的数据
             "第 {} 轮: 节点数 {} 低于历史最高 {} 超过 1 个（数据意外丢失）",
-            round, count, max_seen
+            round,
+            count,
+            max_seen
         );
 
         // 每 10 轮 flush 一次
@@ -111,11 +115,8 @@ fn PWR_02_flush中途断电_tmp残留_原子性验证() {
     {
         let mut db = Database::<f32>::open(&path, DIM).unwrap();
         for i in 0..50u32 {
-            db.insert(
-                &[i as f32, 0.0, 0.0, 0.0],
-                serde_json::json!({"idx": i}),
-            )
-            .unwrap();
+            db.insert(&[i as f32, 0.0, 0.0, 0.0], serde_json::json!({"idx": i}))
+                .unwrap();
         }
         db.flush().unwrap();
     }
@@ -137,7 +138,10 @@ fn PWR_02_flush中途断电_tmp残留_原子性验证() {
         "flush 中途断电后应从旧 .tdb 恢复完整 50 个节点"
     );
 
-    eprintln!("  ✅ flush 中途断电: 从旧 .tdb 恢复 {} 个节点", db.node_count());
+    eprintln!(
+        "  ✅ flush 中途断电: 从旧 .tdb 恢复 {} 个节点",
+        db.node_count()
+    );
 
     cleanup(&path);
 }

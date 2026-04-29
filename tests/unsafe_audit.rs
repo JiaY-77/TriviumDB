@@ -10,21 +10,54 @@
 //!
 //! 本文件为每一类 unsafe 路径提供专项测试，证明其安全契约成立。
 
-use triviumdb::database::Database;
 use triviumdb::VectorType;
+use triviumdb::database::Database;
 
 const DIM: usize = 4;
 
 fn tmp_db(name: &str) -> String {
     let dir = std::env::temp_dir().join("triviumdb_test");
     std::fs::create_dir_all(&dir).ok();
-    dir.join(format!("unsafe_{}", name)).to_string_lossy().to_string()
+    dir.join(format!("unsafe_{}", name))
+        .to_string_lossy()
+        .to_string()
 }
 
 fn cleanup(path: &str) {
     for ext in &["", ".wal", ".vec", ".lock", ".flush_ok"] {
         std::fs::remove_file(format!("{}{}", path, ext)).ok();
     }
+}
+
+fn assert_open_result_has_no_dirty_data(
+    result: std::thread::Result<triviumdb::Result<Database<f32>>>,
+    max_nodes: usize,
+    payload_key: &str,
+) {
+    assert!(result.is_ok(), "损坏文件不应触发 panic 或段错误");
+    match result.unwrap() {
+        Ok(db) => {
+            assert!(
+                db.node_count() <= max_nodes,
+                "降级加载不能产生超过原始规模的脏节点"
+            );
+            for id in db.all_node_ids() {
+                let payload = db.get_payload(id).expect("恢复节点必须有 payload");
+                assert!(
+                    payload.get(payload_key).is_some() || payload == serde_json::json!({}),
+                    "恢复节点 payload 必须来自已知写入形态: {payload}"
+                );
+            }
+        }
+        Err(e) => assert!(!e.to_string().is_empty(), "安全拒绝必须返回可诊断错误"),
+    }
+}
+
+fn assert_clean_reopen_after_reject(path: &str) {
+    cleanup(path);
+    let db = Database::<f32>::open(path, DIM).unwrap();
+    assert_eq!(db.node_count(), 0, "清理后同路径重建不能携带脏状态");
+    cleanup(path);
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -47,7 +80,7 @@ fn UNSAFE_01_SIMD_非8倍数维度_尾部处理正确性() {
             dim
         );
         assert!(
-            sim >= -1.01 && sim <= 1.01,
+            (-1.01..=1.01).contains(&sim),
             "dim={}: similarity={} 超出 [-1,1] 范围",
             dim,
             sim
@@ -66,7 +99,10 @@ fn UNSAFE_02_SIMD_极端浮点值_不产生NaN_Inf() {
         ("subnormal", vec![1.0e-40_f32; 4]),
         ("neg_zero", vec![-0.0_f32; 4]),
         ("pos_zero", vec![0.0_f32; 4]),
-        ("mixed_extreme", vec![f32::MAX, f32::MIN, 0.0, f32::MIN_POSITIVE]),
+        (
+            "mixed_extreme",
+            vec![f32::MAX, f32::MIN, 0.0, f32::MIN_POSITIVE],
+        ),
     ];
 
     let normal = vec![1.0_f32, 0.0, 0.0, 0.0];
@@ -109,7 +145,10 @@ fn UNSAFE_03_SIMD_与标量路径结果一致() {
         assert!(
             diff < 1e-5,
             "dim={}: SIMD({}) vs scalar({}) 差异 {} 超过阈值",
-            dim, simd_result, scalar_result, diff
+            dim,
+            simd_result,
+            scalar_result,
+            diff
         );
     }
 }
@@ -128,11 +167,8 @@ fn UNSAFE_04_VecPool_文件外部截断后读取不崩溃() {
     {
         let mut db = Database::<f32>::open(&path, DIM).unwrap();
         for i in 0..100u32 {
-            db.insert(
-                &[i as f32, 0.0, 0.0, 0.0],
-                serde_json::json!({"idx": i}),
-            )
-            .unwrap();
+            db.insert(&[i as f32, 0.0, 0.0, 0.0], serde_json::json!({"idx": i}))
+                .unwrap();
         }
         db.flush().unwrap();
     }
@@ -157,11 +193,20 @@ fn UNSAFE_04_VecPool_文件外部截断后读取不崩溃() {
         result.is_ok(),
         ".vec 文件被截断后引擎触发了 panic / segfault"
     );
-    // 可以返回 Err（正常拒绝）或 Ok（降级加载）
-    eprintln!(
-        "  ✅ .vec 截断后: {:?}",
-        result.unwrap().map(|db| db.node_count()).map_err(|e| e.to_string())
-    );
+    match result.unwrap() {
+        Ok(db) => {
+            assert!(db.node_count() <= 100, ".vec 截断降级加载不能产生额外节点");
+            for id in db.all_node_ids() {
+                let payload = db.get_payload(id).expect("恢复节点必须有 payload");
+                let idx = payload
+                    .get("idx")
+                    .and_then(|value| value.as_u64())
+                    .expect("恢复节点必须携带原始 idx 字段");
+                assert!(idx < 100, ".vec 截断恢复不能产生越界 payload: {payload}");
+            }
+        }
+        Err(e) => assert!(!e.to_string().is_empty(), ".vec 截断拒绝必须返回可诊断错误"),
+    }
 
     cleanup(&path);
 }
@@ -186,7 +231,7 @@ fn UNSAFE_05_VecPool_文件被删除后读取不崩溃() {
     std::fs::remove_file(format!("{}.flush_ok", path)).ok();
 
     let result = std::panic::catch_unwind(|| Database::<f32>::open(&path, DIM));
-    assert!(result.is_ok(), ".vec 被删除后引擎不应 panic");
+    assert_open_result_has_no_dirty_data(result, 50, "idx");
 
     cleanup(&path);
 }
@@ -211,14 +256,14 @@ fn UNSAFE_06_畸形Header偏移量越界_不panic() {
     }
 
     // 篡改 header 中的 payload_offset 为一个越界值
-    if let Ok(mut data) = std::fs::read(&path) {
-        if data.len() >= 58 {
-            // payload_offset 字段在 offset 26-34，设为 u64::MAX
-            let bad_offset = u64::MAX.to_le_bytes();
-            data[26..34].copy_from_slice(&bad_offset);
-            std::fs::write(&path, &data).unwrap();
-            std::fs::remove_file(format!("{}.flush_ok", path)).ok();
-        }
+    if let Ok(mut data) = std::fs::read(&path)
+        && data.len() >= 58
+    {
+        // payload_offset 字段在 offset 26-34，设为 u64::MAX
+        let bad_offset = u64::MAX.to_le_bytes();
+        data[26..34].copy_from_slice(&bad_offset);
+        std::fs::write(&path, &data).unwrap();
+        std::fs::remove_file(format!("{}.flush_ok", path)).ok();
     }
 
     let result = std::panic::catch_unwind(|| Database::<f32>::open(&path, DIM));
@@ -226,8 +271,12 @@ fn UNSAFE_06_畸形Header偏移量越界_不panic() {
 
     match result.unwrap() {
         Ok(_) => panic!("畸形偏移量应被拒绝，不应成功加载"),
-        Err(e) => eprintln!("  ✅ 畸形偏移量: 正确拒绝: {}", e),
+        Err(e) => assert!(
+            !e.to_string().is_empty(),
+            "畸形偏移量拒绝必须返回可诊断错误"
+        ),
     }
+    assert_clean_reopen_after_reject(&path);
 
     cleanup(&path);
 }
@@ -243,10 +292,7 @@ fn UNSAFE_07_截断Header_只有Magic() {
 
     let result = std::panic::catch_unwind(|| Database::<f32>::open(&path, DIM));
     assert!(result.is_ok(), "截断 header 不应 panic");
-    assert!(
-        result.unwrap().is_err(),
-        "只有 6 字节的文件应被拒绝"
-    );
+    assert!(result.unwrap().is_err(), "只有 6 字节的文件应被拒绝");
 
     cleanup(&path);
 }
@@ -265,22 +311,25 @@ fn UNSAFE_08_node_count溢出_声明百万实际为空() {
     }
 
     // 篡改 node_count 为 1_000_000
-    if let Ok(mut data) = std::fs::read(&path) {
-        if data.len() >= 58 {
-            let fake_count = 1_000_000u64.to_le_bytes();
-            data[18..26].copy_from_slice(&fake_count);
-            std::fs::write(&path, &data).unwrap();
-            std::fs::remove_file(format!("{}.flush_ok", path)).ok();
-        }
+    if let Ok(mut data) = std::fs::read(&path)
+        && data.len() >= 58
+    {
+        let fake_count = 1_000_000u64.to_le_bytes();
+        data[18..26].copy_from_slice(&fake_count);
+        std::fs::write(&path, &data).unwrap();
+        std::fs::remove_file(format!("{}.flush_ok", path)).ok();
     }
 
     let result = std::panic::catch_unwind(|| Database::<f32>::open(&path, DIM));
     assert!(result.is_ok(), "node_count 溢出不应 panic");
-    // 加载应失败（Payload block overflow）
-    eprintln!(
-        "  ✅ node_count 溢出: {:?}",
-        result.unwrap().map(|_| "loaded").map_err(|e| e.to_string())
+    let opened = result.unwrap();
+    assert!(opened.is_err(), "node_count 溢出文件应被拒绝");
+    let err = opened.err().unwrap();
+    assert!(
+        !err.to_string().is_empty(),
+        "node_count 溢出拒绝必须返回可诊断错误"
     );
+    assert_clean_reopen_after_reject(&path);
 
     cleanup(&path);
 }
@@ -310,11 +359,15 @@ fn UNSAFE_10_单字节文件_不panic() {
     let path = tmp_db("one_byte");
     cleanup(&path);
 
-    std::fs::write(&path, &[0xFF]).unwrap();
+    std::fs::write(&path, [0xFF]).unwrap();
 
     let result = std::panic::catch_unwind(|| Database::<f32>::open(&path, DIM));
     assert!(result.is_ok(), "单字节文件不应 panic");
-    assert!(result.unwrap().is_err(), "单字节文件应被拒绝");
+    let opened = result.unwrap();
+    assert!(opened.is_err(), "单字节文件应被拒绝");
+    let err = opened.err().unwrap();
+    assert!(!err.to_string().is_empty(), "单字节拒绝应有错误信息");
+    assert_clean_reopen_after_reject(&path);
 
     cleanup(&path);
 }

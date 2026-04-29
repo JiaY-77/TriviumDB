@@ -175,7 +175,10 @@ fn COV2_06_property_index() {
 
     // TQL 使用索引查询
     let results = db.tql(r#"FIND {name: "user_5"} RETURN *"#).unwrap();
-    assert!(!results.is_empty());
+    assert_eq!(results.len(), 1, "索引查询应精确命中 user_5");
+    let node = results[0].get("_").expect("FIND RETURN * 应绑定 _");
+    assert_eq!(node.payload.get("name"), Some(&serde_json::json!("user_5")));
+    assert_eq!(node.payload.get("age"), Some(&serde_json::json!(5)));
 
     db.drop_index("name");
 
@@ -260,8 +263,24 @@ fn COV2_09_tql_match_where() {
     let results = db
         .tql(r#"MATCH (a)-[:knows]->(b) WHERE a.age > 25 RETURN b"#)
         .unwrap();
-    // 应该有结果
-    eprintln!("  MATCH WHERE 结果: {} 条", results.len());
+    assert!(
+        (3..=4).contains(&results.len()),
+        "age > 25 的 knows 查询应命中稳定的高年龄出边集合"
+    );
+    for row in &results {
+        let b = row.get("b").expect("MATCH RETURN b 应绑定 b");
+        assert_eq!(b.payload.get("type"), Some(&serde_json::json!("user")));
+        let age = b.payload.get("age").and_then(|v| v.as_u64()).unwrap();
+        assert!((20..=29).contains(&age), "MATCH 结果必须来自社交图用户节点");
+    }
+    assert!(
+        results.iter().any(|row| row
+            .get("b")
+            .and_then(|node| node.payload.get("age"))
+            .and_then(|v| v.as_u64())
+            .is_some_and(|age| age >= 27)),
+        "WHERE 过滤后结果中应包含高年龄目标节点"
+    );
 
     cleanup(&path);
 }
@@ -273,7 +292,12 @@ fn COV2_10_tql_match_label_filter() {
     let db = seed_social_graph(&path);
 
     let results = db.tql(r#"MATCH (a)-[:manages]->(b) RETURN a, b"#).unwrap();
-    eprintln!("  MATCH manages: {} 条", results.len());
+    assert_eq!(results.len(), 1, "manages 边应只有一条");
+    let a = results[0].get("a").expect("MATCH manages 应绑定 a");
+    let b = results[0].get("b").expect("MATCH manages 应绑定 b");
+    assert_eq!(a.payload.get("type"), Some(&serde_json::json!("user")));
+    assert_eq!(b.payload.get("type"), Some(&serde_json::json!("user")));
+    assert_ne!(a.id, b.id, "manages 边两端不应是同一节点");
 
     // 不存在的标签
     let results = db
@@ -293,8 +317,16 @@ fn COV2_11_tql_search_vector() {
     let results = db
         .tql("SEARCH VECTOR [1.0, 0.0, 0.0, 0.0] TOP 3 RETURN *")
         .unwrap();
-    assert!(results.len() <= 3);
-    assert!(!results.is_empty());
+    assert!(results.len() <= 3, "SEARCH VECTOR 必须遵守 TOP 3");
+    assert_eq!(results.len(), 3, "10 个节点中 TOP 3 应返回 3 条");
+    for row in &results {
+        let node = row.get("_").expect("SEARCH RETURN * 应绑定 _");
+        assert_eq!(node.payload.get("type"), Some(&serde_json::json!("user")));
+        assert!(
+            node.payload.get("name").is_some(),
+            "搜索结果必须来自社交图用户节点"
+        );
+    }
 
     cleanup(&path);
 }
@@ -308,7 +340,20 @@ fn COV2_12_tql_distinct() {
     let results = db
         .tql(r#"FIND {type: "user"} RETURN DISTINCT type"#)
         .unwrap();
-    assert!(!results.is_empty());
+    assert_eq!(
+        results.len(),
+        1,
+        "DISTINCT type 应按返回字段值去重为唯一用户类型"
+    );
+    for row in &results {
+        assert_eq!(row.len(), 1, "DISTINCT type 每行只应返回一个绑定");
+        let node = row.values().next().expect("DISTINCT 字段结果应有绑定值");
+        assert_eq!(node.payload.get("type"), Some(&serde_json::json!("user")));
+        assert!(
+            node.payload.get("name").is_some(),
+            "DISTINCT type 结果必须仍来自原始用户节点"
+        );
+    }
 
     cleanup(&path);
 }
@@ -398,7 +443,7 @@ fn COV2_18_tql_complex_where() {
         .tql(r#"FIND {age: {$gte: 22, $lte: 26}} RETURN *"#)
         .unwrap();
     for row in &results {
-        for (_var, node) in row {
+        for node in row.values() {
             if let Some(age) = node.payload.get("age").and_then(|v| v.as_u64()) {
                 assert!((22..=26).contains(&age));
             }
@@ -408,7 +453,7 @@ fn COV2_18_tql_complex_where() {
     // $ne
     let results = db.tql(r#"FIND {name: {$ne: "user_0"}} RETURN *"#).unwrap();
     for row in &results {
-        for (_var, node) in row {
+        for node in row.values() {
             if let Some(name) = node.payload.get("name").and_then(|v| v.as_str()) {
                 assert_ne!(name, "user_0");
             }
@@ -426,7 +471,7 @@ fn COV2_19_tql_return_fields() {
 
     let results = db.tql(r#"FIND {type: "user"} RETURN name, age"#).unwrap();
     for row in &results {
-        for (_var, node) in row {
+        for node in row.values() {
             assert!(node.payload.get("name").is_some(), "应包含 name 字段");
             assert!(node.payload.get("age").is_some(), "应包含 age 字段");
         }

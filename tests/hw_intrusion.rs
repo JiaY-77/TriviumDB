@@ -26,7 +26,9 @@ const DIM: usize = 4;
 fn tmp_db(name: &str) -> String {
     let dir = std::env::temp_dir().join("triviumdb_test");
     std::fs::create_dir_all(&dir).ok();
-    dir.join(format!("intrude_{}", name)).to_string_lossy().to_string()
+    dir.join(format!("intrude_{}", name))
+        .to_string_lossy()
+        .to_string()
 }
 
 fn cleanup(path: &str) {
@@ -201,15 +203,17 @@ fn INTRUDE_01_BTS单比特翻转_TDB文件多点侵入() {
 
         // 在 mmap 映射页上直接执行 bts — 这是文件支撑页，不是堆内存
         let flip_points = [
-            (0usize, 0u32),           // 文件头第 0 字节第 0 位
-            (16, 3),                  // 头部区域第 3 位
-            (len / 4, 5),             // 文件 1/4 处
-            (len / 2, 2),             // 文件中部
+            (0usize, 0u32),             // 文件头第 0 字节第 0 位
+            (16, 3),                    // 头部区域第 3 位
+            (len / 4, 5),               // 文件 1/4 处
+            (len / 2, 2),               // 文件中部
             (len.saturating_sub(8), 7), // 文件尾部
         ];
         for &(byte_off, bit) in &flip_points {
             if byte_off < len {
-                unsafe { mmap_bit_flip(&mut mmap, byte_off, bit); }
+                unsafe {
+                    mmap_bit_flip(&mut mmap, byte_off, bit);
+                }
             }
         }
 
@@ -239,7 +243,8 @@ fn INTRUDE_01_BTS单比特翻转_TDB文件多点侵入() {
                     assert!(
                         p.get("idx").is_some(),
                         "节点 {} 的 payload 应包含 idx 字段，实际内容: {}",
-                        id, p
+                        id,
+                        p
                     );
                 }
             }
@@ -285,7 +290,9 @@ fn INTRUDE_02_MOVNTI非时序毒写_DMA级侵入() {
         let offsets = [len / 3, len * 2 / 3];
         for &off in &offsets {
             if off + 8 <= len {
-                unsafe { mmap_nontemporal_poison(&mut mmap, off, 0xDEADBEEFCAFEBABEu64); }
+                unsafe {
+                    mmap_nontemporal_poison(&mut mmap, off, 0xDEADBEEFCAFEBABEu64);
+                }
             }
         }
 
@@ -313,7 +320,10 @@ fn INTRUDE_02_MOVNTI非时序毒写_DMA级侵入() {
                     id
                 );
             }
-            eprintln!("  ✅ mmap MOVNTI 毒写: 降级加载 {} 个节点，数据完整性已验证", count);
+            eprintln!(
+                "  ✅ mmap MOVNTI 毒写: 降级加载 {} 个节点，数据完整性已验证",
+                count
+            );
         }
         Err(e) => {
             eprintln!("  ✅ MOVNTI 毒写: 引擎正确拒绝: {}", e);
@@ -395,9 +405,9 @@ fn INTRUDE_03_WAL尾部注入垃圾帧_回放容错() {
     assert!(result.is_ok(), "WAL 尾部注入后不应 panic");
 
     // WAL 尾部注入场景：5 个节点已 flush 到 .tdb 文件，必须能恢复
-    let db = result.unwrap().expect(
-        "WAL 尾部垃圾不应导致加载失败：5 个已 flush 的节点应通过 .tdb 文件恢复",
-    );
+    let db = result
+        .unwrap()
+        .expect("WAL 尾部垃圾不应导致加载失败：5 个已 flush 的节点应通过 .tdb 文件恢复");
     assert!(
         db.node_count() >= 5,
         "至少 5 个已 flush 的节点应存活，实际 {}",
@@ -464,7 +474,10 @@ fn INTRUDE_04_ASM构造NaN查询向量_搜索输入验证() {
     );
     let err_msg = search_result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("NaN") || err_msg.contains("Inf") || err_msg.contains("invalid") || err_msg.contains("Invalid"),
+        err_msg.contains("NaN")
+            || err_msg.contains("Inf")
+            || err_msg.contains("invalid")
+            || err_msg.contains("Invalid"),
         "错误信息应明确指出 NaN/Inf 问题，实际: {}",
         err_msg
     );
@@ -556,7 +569,9 @@ fn INTRUDE_06_渐进式比特衰减_NAND_Flash老化模拟() {
         // 每 512 字节翻转 1 位 — bts 直接操作文件映射页
         let mut offset = 0usize;
         while offset < len {
-            unsafe { mmap_bit_flip(&mut mmap, offset, (offset % 7) as u32); }
+            unsafe {
+                mmap_bit_flip(&mut mmap, offset, (offset % 7) as u32);
+            }
             flipped += 1;
             offset += 512;
         }
@@ -589,7 +604,10 @@ fn INTRUDE_06_渐进式比特衰减_NAND_Flash老化模拟() {
                     id
                 );
             }
-            eprintln!("  ✅ mmap NAND 老化: 降级加载 {}/50 节点存活（数据完整性已验证）", survived);
+            eprintln!(
+                "  ✅ mmap NAND 老化: 降级加载 {}/50 节点存活（数据完整性已验证）",
+                survived
+            );
         }
         Err(e) => {
             eprintln!("  ✅ mmap NAND 老化: 引擎拒绝加载: {}", e);

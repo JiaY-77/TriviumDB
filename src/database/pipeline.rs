@@ -24,7 +24,6 @@ use std::sync::{Arc, Mutex};
 
 use super::lock_or_recover;
 
-
 /// 执行完整的混合检索管线
 ///
 /// 这是从 `Database::search_hybrid_internal` 中提取出的核心管线逻辑。

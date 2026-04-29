@@ -122,7 +122,8 @@ fn test_fatigue_and_specificity_ablation() {
     assert!(
         bh_score3 > bh_score2,
         "不应期解除后黑洞得分应回升！Round2(疲劳抑制)={}, Round3(恢复)={}",
-        bh_score2, bh_score3
+        bh_score2,
+        bh_score3
     );
 
     // 清理

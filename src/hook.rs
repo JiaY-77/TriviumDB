@@ -703,7 +703,11 @@ mod tests {
                 _cfg: &SearchConfig,
                 _ctx: &mut HookContext,
             ) -> Option<Vec<SearchHit>> {
-                Some(vec![SearchHit { id: 42, score: 1.0, payload: serde_json::Value::Null }])
+                Some(vec![SearchHit {
+                    id: 42,
+                    score: 1.0,
+                    payload: serde_json::Value::Null,
+                }])
             }
         }
 
@@ -715,7 +719,11 @@ mod tests {
                 _cfg: &SearchConfig,
                 _ctx: &mut HookContext,
             ) -> Option<Vec<SearchHit>> {
-                Some(vec![SearchHit { id: 99, score: 0.5, payload: serde_json::Value::Null }])
+                Some(vec![SearchHit {
+                    id: 99,
+                    score: 0.5,
+                    payload: serde_json::Value::Null,
+                }])
             }
         }
 
@@ -736,7 +744,11 @@ mod tests {
         let composite = CompositeHook::new();
         let mut ctx = HookContext::new();
         let config = SearchConfig::default();
-        assert!(composite.on_custom_recall(&[1.0], &config, &mut ctx).is_none());
+        assert!(
+            composite
+                .on_custom_recall(&[1.0], &config, &mut ctx)
+                .is_none()
+        );
     }
 
     #[test]
@@ -759,8 +771,16 @@ mod tests {
 
         let mut ctx = HookContext::new();
         let mut hits = vec![
-            SearchHit { id: 1, score: 1.0, payload: serde_json::Value::Null },
-            SearchHit { id: 2, score: 0.5, payload: serde_json::Value::Null },
+            SearchHit {
+                id: 1,
+                score: 1.0,
+                payload: serde_json::Value::Null,
+            },
+            SearchHit {
+                id: 2,
+                score: 0.5,
+                payload: serde_json::Value::Null,
+            },
         ];
         let result = composite.on_rerank(&mut hits, &mut ctx);
         assert!(result.is_some());
@@ -772,7 +792,11 @@ mod tests {
         struct SeedBoostHook;
         impl SearchHook for SeedBoostHook {
             fn on_pre_graph_expand(&self, seeds: &mut Vec<SearchHit>, _ctx: &mut HookContext) {
-                seeds.push(SearchHit { id: 100, score: 0.9, payload: serde_json::Value::Null });
+                seeds.push(SearchHit {
+                    id: 100,
+                    score: 0.9,
+                    payload: serde_json::Value::Null,
+                });
             }
         }
 
@@ -780,7 +804,11 @@ mod tests {
         composite.add(SeedBoostHook);
 
         let mut ctx = HookContext::new();
-        let mut seeds = vec![SearchHit { id: 1, score: 1.0, payload: serde_json::Value::Null }];
+        let mut seeds = vec![SearchHit {
+            id: 1,
+            score: 1.0,
+            payload: serde_json::Value::Null,
+        }];
         composite.on_pre_graph_expand(&mut seeds, &mut ctx);
         assert_eq!(seeds.len(), 2);
         assert_eq!(seeds[1].id, 100);
@@ -800,8 +828,16 @@ mod tests {
 
         let mut ctx = HookContext::new();
         let mut results = vec![
-            SearchHit { id: 1, score: 1.0, payload: serde_json::Value::Null },
-            SearchHit { id: 2, score: 0.5, payload: serde_json::Value::Null },
+            SearchHit {
+                id: 1,
+                score: 1.0,
+                payload: serde_json::Value::Null,
+            },
+            SearchHit {
+                id: 2,
+                score: 0.5,
+                payload: serde_json::Value::Null,
+            },
         ];
         composite.on_post_search(&mut results, &mut ctx);
         assert_eq!(results.len(), 1);
@@ -809,7 +845,10 @@ mod tests {
 
     #[test]
     fn test_ffi_search_hit_repr() {
-        let h = FfiSearchHit { id: 42, score: 0.95 };
+        let h = FfiSearchHit {
+            id: 42,
+            score: 0.95,
+        };
         assert_eq!(h.id, 42);
         assert_eq!(h.score, 0.95);
         // 验证 Copy/Clone/Debug

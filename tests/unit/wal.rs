@@ -1,16 +1,17 @@
-
 //! WAL 模块的单元测试（从 wal.rs 补齐）
 //!
 //! 覆盖: Wal append/read/clear/SyncMode 完整生命周期
 //! 与 wal_midwrite.rs 的区别: wal_midwrite 测试截断容错，这里测试正常路径
 
 use std::io::Cursor;
-use triviumdb::storage::wal::{Wal, WalEntry, SyncMode};
+use triviumdb::storage::wal::{SyncMode, Wal, WalEntry};
 
 fn tmp_db(name: &str) -> String {
     let dir = std::env::temp_dir().join("triviumdb_test");
     std::fs::create_dir_all(&dir).ok();
-    dir.join(format!("unit_wal_{}", name)).to_string_lossy().to_string()
+    dir.join(format!("unit_wal_{}", name))
+        .to_string_lossy()
+        .to_string()
 }
 
 fn cleanup(path: &str) {
@@ -34,19 +35,25 @@ fn wal_append_和_read_entries_往返() {
             id: 1,
             vector: vec![1.0, 2.0, 3.0],
             payload: r#"{"name":"alice"}"#.to_string(),
-        }).unwrap();
+        })
+        .unwrap();
         wal.append(&WalEntry::Insert::<f32> {
             id: 2,
             vector: vec![4.0, 5.0, 6.0],
             payload: r#"{"name":"bob"}"#.to_string(),
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     let (entries, _) = Wal::read_entries::<f32>(&path).unwrap();
     assert_eq!(entries.len(), 2);
 
     match &entries[0] {
-        WalEntry::Insert { id, vector, payload } => {
+        WalEntry::Insert {
+            id,
+            vector,
+            payload,
+        } => {
             assert_eq!(*id, 1);
             assert_eq!(*vector, vec![1.0, 2.0, 3.0]);
             assert!(payload.contains("alice"));
@@ -68,23 +75,28 @@ fn wal_所有Entry变体往返() {
             id: 1,
             vector: vec![1.0],
             payload: "{}".to_string(),
-        }).unwrap();
+        })
+        .unwrap();
         wal.append(&WalEntry::Link::<f32> {
             src: 1,
             dst: 2,
             label: "knows".to_string(),
             weight: 0.5,
-        }).unwrap();
+        })
+        .unwrap();
         wal.append(&WalEntry::Delete::<f32> { id: 3 }).unwrap();
-        wal.append(&WalEntry::Unlink::<f32> { src: 1, dst: 2 }).unwrap();
+        wal.append(&WalEntry::Unlink::<f32> { src: 1, dst: 2 })
+            .unwrap();
         wal.append(&WalEntry::UpdatePayload::<f32> {
             id: 1,
             payload: r#"{"updated":true}"#.to_string(),
-        }).unwrap();
+        })
+        .unwrap();
         wal.append(&WalEntry::UpdateVector::<f32> {
             id: 1,
             vector: vec![9.0],
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     let (entries, _) = Wal::read_entries::<f32>(&path).unwrap();
@@ -140,7 +152,8 @@ fn wal_clear_后读取为空() {
         id: 1,
         vector: vec![1.0],
         payload: "{}".to_string(),
-    }).unwrap();
+    })
+    .unwrap();
     wal.clear().unwrap();
 
     let (entries, _) = Wal::read_entries::<f32>(&path).unwrap();
@@ -151,7 +164,8 @@ fn wal_clear_后读取为空() {
         id: 2,
         vector: vec![2.0],
         payload: "{}".to_string(),
-    }).unwrap();
+    })
+    .unwrap();
     drop(wal);
 
     let (entries, _) = Wal::read_entries::<f32>(&path).unwrap();
@@ -174,14 +188,16 @@ fn wal_sync_mode_切换() {
         id: 1,
         vector: vec![1.0],
         payload: "{}".to_string(),
-    }).unwrap();
+    })
+    .unwrap();
 
     wal.set_sync_mode(SyncMode::Off);
     wal.append(&WalEntry::Insert::<f32> {
         id: 2,
         vector: vec![2.0],
         payload: "{}".to_string(),
-    }).unwrap();
+    })
+    .unwrap();
     wal.flush_writer();
     drop(wal);
 
@@ -221,7 +237,8 @@ fn wal_needs_recovery_非空文件() {
         id: 1,
         vector: vec![1.0],
         payload: "{}".to_string(),
-    }).unwrap();
+    })
+    .unwrap();
     drop(wal);
 
     assert!(Wal::needs_recovery(&path), "非空 WAL 应该需要恢复");

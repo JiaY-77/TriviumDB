@@ -19,7 +19,9 @@ const DIM: usize = 4;
 fn tmp_db(name: &str) -> String {
     let dir = std::env::temp_dir().join("triviumdb_test");
     std::fs::create_dir_all(&dir).ok();
-    dir.join(format!("concurrent_{}", name)).to_string_lossy().to_string()
+    dir.join(format!("concurrent_{}", name))
+        .to_string_lossy()
+        .to_string()
 }
 
 fn cleanup(path: &str) {
@@ -71,7 +73,8 @@ fn 并发_8线程同时只读查询_不恐慌不矛盾() {
                 assert!(
                     count > 0,
                     "线程 {} 轮 {}: node_count 返回 0",
-                    thread_id, round
+                    thread_id,
+                    round
                 );
 
                 // 操作 2: all_node_ids
@@ -80,7 +83,10 @@ fn 并发_8线程同时只读查询_不恐慌不矛盾() {
                     ids.len(),
                     count,
                     "线程 {} 轮 {}: all_node_ids.len()={} != node_count={}",
-                    thread_id, round, ids.len(), count
+                    thread_id,
+                    round,
+                    ids.len(),
+                    count
                 );
 
                 // 操作 3: get_payload（验证每个 ID 都能查到）
@@ -89,7 +95,9 @@ fn 并发_8线程同时只读查询_不恐慌不矛盾() {
                     assert!(
                         payload.is_some(),
                         "线程 {} 轮 {}: id {} 在 all_node_ids 中但 get_payload 返回 None",
-                        thread_id, round, id
+                        thread_id,
+                        round,
+                        id
                     );
                 }
 
@@ -99,7 +107,9 @@ fn 并发_8线程同时只读查询_不恐慌不矛盾() {
                 assert!(
                     result.is_ok(),
                     "线程 {} 轮 {}: search 返回 Err: {:?}",
-                    thread_id, round, result.err()
+                    thread_id,
+                    round,
+                    result.err()
                 );
             }
         });
@@ -164,11 +174,7 @@ fn 并发_1写4读_写入期间读取一致性() {
                     &[i as f32, 0.0, 0.0, 0.0],
                     serde_json::json!({"writer": true, "seq": i}),
                 );
-                assert!(
-                    result.is_ok(),
-                    "写线程 insert 失败: {:?}",
-                    result.err()
-                );
+                assert!(result.is_ok(), "写线程 insert 失败: {:?}", result.err());
             }
         }));
     }
@@ -188,16 +194,21 @@ fn 并发_1写4读_写入期间读取一致性() {
                 assert!(
                     count >= prev_count,
                     "读线程 {} 轮 {}: 节点数从 {} 降到了 {}！数据一致性被破坏",
-                    reader_id, rounds, prev_count, count
+                    reader_id,
+                    rounds,
+                    prev_count,
+                    count
                 );
                 prev_count = count;
 
                 // 一致性：all_node_ids 和 node_count 必须匹配
                 let ids = db.all_node_ids();
                 assert_eq!(
-                    ids.len(), count,
+                    ids.len(),
+                    count,
                     "读线程 {} 轮 {}: 不一致",
-                    reader_id, rounds
+                    reader_id,
+                    rounds
                 );
 
                 drop(db); // 显式释放锁
@@ -317,14 +328,15 @@ fn 并发_8线程TQL查询_结果互不干扰() {
         let query = query.to_string();
         handles.push(std::thread::spawn(move || {
             for round in 0..100 {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    db.tql(&query)
-                }));
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| db.tql(&query)));
 
                 assert!(
                     result.is_ok(),
                     "线程 {} 轮 {} TQL panic: query={:?}",
-                    thread_id, round, query
+                    thread_id,
+                    round,
+                    query
                 );
             }
         }));
@@ -338,11 +350,7 @@ fn 并发_8线程TQL查询_结果互不干扰() {
         }
     }
 
-    assert_eq!(
-        panic_count, 0,
-        "{}/8 个 TQL 并发线程 panic！",
-        panic_count
-    );
+    assert_eq!(panic_count, 0, "{}/8 个 TQL 并发线程 panic！", panic_count);
     eprintln!("  ✅ 8 线程 TQL 并发: 8×100=800 轮查询，零 panic");
 
     drop(db);
