@@ -81,6 +81,29 @@ harness = false
 name = "bench_medium"
 harness = false
 
+[[bench]]
+name = "bench_lpi"
+harness = false
+
+[[bench]]
+name = "bench_ppi"
+harness = false
+
+[[bench]]
+name = "bench_dpp_graph"
+harness = false
+
+[[bench]]
+name = "bench_gru_router"
+harness = false
+
+[[bench]]
+name = "bench_gru_graph"
+harness = false
+
+[[bench]]
+name = "bench_bq_hnsw"
+harness = false
 
 [profile.release]
 lto = true

@@ -1,4 +1,9 @@
-pub mod bq; // LSH初筛 (Binary Quantization)
+pub mod bq;
+pub mod bq_hnsw;
 pub mod brute_force;
-pub mod int8; // Int8 量化精筛 (Scalar Quantization)
-pub mod text; // 纯文本倒排与特征矩阵 (AC/BM25)
+pub mod dpp_graph;
+pub mod gru_router; // MinGRU 路由索引
+pub mod int8;
+pub mod lpi;
+pub mod ppi;
+pub mod text;
