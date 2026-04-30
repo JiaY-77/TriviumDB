@@ -20,7 +20,7 @@ use std::path::Path;
 fn robust_rename(from: &Path, to: &Path) -> std::io::Result<()> {
     #[cfg(not(windows))]
     {
-        return std::fs::rename(from, to);
+        std::fs::rename(from, to)
     }
 
     #[cfg(windows)]

@@ -126,13 +126,11 @@ pub fn run_leiden(adj: &AdjacencySnapshot, config: &LeidenConfig) -> LeidenResul
         .collect();
 
     let mut remap: HashMap<u32, u32> = HashMap::new();
-    let mut new_id = 1u32;
     // 排序确保确定性映射
     let mut sorted_valid: Vec<u32> = valid_clusters.into_iter().collect();
     sorted_valid.sort_unstable();
-    for c in sorted_valid {
+    for (new_id, c) in (1u32..).zip(sorted_valid.into_iter()) {
         remap.insert(c, new_id);
-        new_id += 1;
     }
 
     let mut final_map: HashMap<NodeId, u32> = HashMap::new();

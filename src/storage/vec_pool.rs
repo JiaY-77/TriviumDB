@@ -170,11 +170,7 @@ impl<T: VectorType> VecPool<T> {
     /// 增量层的向量数量
     #[inline]
     pub fn delta_count(&self) -> usize {
-        if self.dim == 0 {
-            0
-        } else {
-            self.delta.len() / self.dim
-        }
+        self.delta.len().checked_div(self.dim).unwrap_or(0)
     }
 
     /// 基础层的向量数量
