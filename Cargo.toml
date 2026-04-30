@@ -77,6 +77,11 @@ harness = false
 name = "ci_report"
 harness = false
 
+[[bench]]
+name = "bench_medium"
+harness = false
+
+
 [profile.release]
 lto = true
 codegen-units = 1

@@ -347,6 +347,50 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
         0 // 0 表示无 BQ Block
     };
 
+    // ═══ 文件结构完整性校验 ═══
+    // 防止引擎静默加载被截断的 .tdb 文件（扇区撕裂 / 断电 / 外部篡改）。
+    // 通过 header 中声明的各 block offset 计算期望的最小文件大小，
+    // 与实际文件大小比对。任何不一致都意味着文件被截断。
+    let file_len = mmap.len();
+
+    if payload_offset > file_len {
+        return Err(TriviumError::CorruptedFile(format!(
+            "payload_offset ({}) exceeds file size ({}), file truncated",
+            payload_offset, file_len
+        )));
+    }
+    if edge_offset > file_len {
+        return Err(TriviumError::CorruptedFile(format!(
+            "edge_offset ({}) exceeds file size ({}), file truncated",
+            edge_offset, file_len
+        )));
+    }
+    if bq_offset > 0 {
+        if bq_offset > file_len {
+            return Err(TriviumError::CorruptedFile(format!(
+                "bq_offset ({}) exceeds file size ({}), file truncated",
+                bq_offset, file_len
+            )));
+        }
+        // BQ Block 完整性：读取 bq_count 并验证整个 Block 未被截断
+        if bq_offset + 8 <= file_len {
+            let bq_count = u64::from_le_bytes(
+                bytes[bq_offset..bq_offset + 8].try_into().unwrap_or([0; 8]),
+            ) as usize;
+            if bq_count > 0 {
+                let sig_size = std::mem::size_of::<BqSignature>();
+                let expected_bq_end = bq_offset + 8 + bq_count * sig_size;
+                if expected_bq_end > file_len {
+                    return Err(TriviumError::CorruptedFile(format!(
+                        "BQ block truncated: expected {} bytes (offset {} + 8 + {} × {}), \
+                         actual file size {} bytes",
+                        expected_bq_end, bq_offset, bq_count, sig_size, file_len
+                    )));
+                }
+            }
+        }
+    }
+
     // 兼容旧版 V3 及以下的冗余区块
     let edge_limit_offset = if version >= 4 {
         // v4/v5: edge block 的上限由 bq_offset（v5）或 文件末尾（v4）决定

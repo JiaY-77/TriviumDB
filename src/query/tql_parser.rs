@@ -359,6 +359,18 @@ impl TqlParser {
 
     /// 解析 {key: value, ...} 形式的文档过滤
     fn parse_doc_filter(&mut self) -> Result<Filter, String> {
+        self.depth += 1;
+        if self.depth > 128 {
+            self.depth -= 1;
+            return Err("Parser recursion depth exceeded (doc filter nesting too deep)".into());
+        }
+        let result = self.parse_doc_filter_inner();
+        self.depth -= 1;
+        result
+    }
+
+    /// parse_doc_filter 的内部实现，深度限制由外层 parse_doc_filter 统一守护
+    fn parse_doc_filter_inner(&mut self) -> Result<Filter, String> {
         self.expect(&TqlToken::LBrace)?;
 
         let mut filters = Vec::new();
