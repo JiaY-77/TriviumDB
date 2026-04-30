@@ -65,6 +65,9 @@ pub struct SearchConfig {
     pub enable_bq_coarse_search: bool,
     /// BQ 粗筛候选集占总数据量的比例
     pub bq_candidate_ratio: f32,
+    /// 强制使用暴力搜索，禁用自动 BQ 路由（用于基准测试和需要精确结果的场景）
+    /// 当为 true 时，即使 node_count > 20,000 也不会自动切换到 BQ 管线
+    pub force_brute_force: bool,
 
     // --- 混合倒排与文本检索 (Hybrid Search) ---
     /// 启用文本混合查询时，决定文本匹配的分数提权倍率 (Boost)
@@ -98,6 +101,7 @@ impl Default for SearchConfig {
             lateral_inhibition_threshold: 0,
             enable_bq_coarse_search: false,
             bq_candidate_ratio: 0.05,
+            force_brute_force: false,
             text_boost: 1.5,
             enable_text_hybrid_search: false,
             bm25_k1: 1.2,

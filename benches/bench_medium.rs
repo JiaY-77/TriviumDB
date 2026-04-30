@@ -227,6 +227,7 @@ fn main() {
     let brute_cfg = SearchConfig {
         top_k: TOP_K,
         enable_bq_coarse_search: false,
+        force_brute_force: true,
         ..Default::default()
     };
     let t_brute = Instant::now();

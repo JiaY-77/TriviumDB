@@ -337,6 +337,7 @@ fn main() {
     let brute_cfg = SearchConfig {
         top_k,
         enable_bq_coarse_search: false,
+        force_brute_force: true,
         ..Default::default()
     };
     let bq_cfg = SearchConfig {

@@ -276,12 +276,14 @@ fn recall_vector<T: VectorType>(
 
     // ═══════════════════════════════════════════════════════
     // 动态引擎路由：基于数据规模的自适应多级管线
-    // 1. N <= 20,000 => 暴力全扫 (AVX2 极限)
-    // 2. 20,000 < N <= 100,000 => BQ 双级管线
-    // 3. 100,000 < N => BQ 三级火箭
+    // 1. force_brute_force == true => 暴力全扫（无视数据量，用于基准测试）
+    // 2. N <= 20,000 => 暴力全扫 (AVX2 极限)
+    // 3. 20,000 < N <= 100,000 => BQ 双级管线
+    // 4. 100,000 < N => BQ 三级火箭
     // ═══════════════════════════════════════════════════════
     let total_nodes = mt.node_count();
-    let use_bq = config.enable_bq_coarse_search || total_nodes > 20_000;
+    let use_bq = !config.force_brute_force
+        && (config.enable_bq_coarse_search || total_nodes > 20_000);
     let use_int8_rocket = total_nodes > 100_000;
 
     let vector_hits: Vec<SearchHit> = if use_bq {
